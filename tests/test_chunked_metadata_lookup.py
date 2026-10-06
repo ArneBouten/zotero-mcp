@@ -65,3 +65,23 @@ def test_returns_none_for_unindexed_item():
     client = _client({"OTHER999#0": {"item_key": "OTHER999"}})
 
     assert client.get_document_metadata("ABCD1234") is None
+
+
+def test_a_failing_read_is_an_error_not_an_unindexed_item():
+    """A damaged index must stop the update scan, not look empty.
+
+    Treating the error as "not indexed" sent every item back for embedding
+    into an index that then hung on the next read.
+    """
+    import pytest
+
+    from zotero_mcp.chroma_client import IndexReadError
+
+    client = _client({})
+
+    def broken_get(**kwargs):
+        raise RuntimeError("Failed to apply logs to the hnsw segment writer")
+
+    client.collection.get = broken_get
+    with pytest.raises(IndexReadError, match="db-check"):
+        client.get_document_metadata("ABCD1234")

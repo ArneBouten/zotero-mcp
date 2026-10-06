@@ -31,7 +31,7 @@ except Exception:
 
 
 from . import _runtime, batch_common, fulltext_cache, gemini_batch, openai_batch
-from .chroma_client import ChromaClient, create_chroma_client
+from .chroma_client import ChromaClient, IndexReadError, create_chroma_client
 from .client import get_active_group_id, get_zotero_client
 
 # Re-exported so callers keep importing them from here, while the
@@ -2543,6 +2543,11 @@ class ZoteroSemanticSearch:
                 logger.info(f"Retrieved {len(api_items)} items from local database")
                 return api_items
 
+        except IndexReadError:
+            # The search index, not the Zotero database, failed: indexing
+            # through the API fallback would write into the same damaged
+            # index. Stop the run.
+            raise
         except Exception as e:
             logger.error(f"Error reading from local database: {e}")
             logger.info("Falling back to API...")

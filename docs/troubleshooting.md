@@ -48,6 +48,27 @@ zotero-mcp update-db --force-rebuild
 
 A forced rebuild deletes the whole ChromaDB collection and re-embeds every item in the active library from scratch. With OpenAI or Gemini embeddings that is billed again in full, and it takes as long as the first build. If the index also holds other libraries (or documents with no library attribution), the command refuses and asks for `--allow-mass-deletion`; passing that flag drops those documents permanently. Back up `~/.config/zotero-mcp/chroma_db/` first, and try a plain `zotero-mcp update-db` before rebuilding.
 
+### A damaged index: updates or searches hang
+
+Symptoms: an update stops at the first items and never finishes, semantic search hangs, and `zotero-mcp update-db` or `db-status` cannot be interrupted. The server log or an error says *"Failed to apply logs to the hnsw segment writer"*.
+
+Cause: two processes once wrote the same index at the same time (index updates were not locked on Windows before 0.13.2+arne.2). The vector file then holds some labels twice and lacks others. Nothing notices until a later change touches one of those passages; ChromaDB fails to apply it, keeps it pending, and every process that opens the index afterwards retries it and hangs.
+
+Check (read-only, safe while everything runs):
+
+```bash
+zotero-mcp db-check
+```
+
+Repair: close Claude Desktop and every other MCP client, then
+
+```bash
+zotero-mcp db-rebuild-vectors
+zotero-mcp update-db --fulltext
+```
+
+The rebuild copies every passage whose vector is intact into a fresh index — vectors, text and metadata as stored, nothing re-embedded — and keeps the old index as `chroma_db-before-rebuild-<timestamp>`. Items with a damaged passage are left out; the following `update-db` indexes them again from their text (a few embedding calls). It needs free disk space of about twice the index size.
+
 ## Update issues
 
 - **Update command fails**: Check your internet connection and try `zotero-mcp update --force`
