@@ -828,3 +828,42 @@ def test_hydrated_tags_carry_the_automatic_type(tmp_path):
         {"tag": "MeSH heading", "type": 1},
         {"tag": "physics"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Quick-search word semantics: every word must match some field
+# ---------------------------------------------------------------------------
+
+
+def _keys(results):
+    return sorted(r["key"] for r in results)
+
+
+def test_search_items_sql_author_year_query(tmp_path):
+    """'Author Year' -- the form the tool recommends -- matches across fields."""
+    with _reader(tmp_path) as reader:
+        assert _keys(reader.search_items_sql("Doe 2024", group_id=0)) == ["PERS0001"]
+        assert _keys(reader.search_items_sql("Smith 2018", group_id=0)) == ["PERS0002"]
+        # Every word must match: the year rules out Doe's paper.
+        assert reader.search_items_sql("Doe 2018", group_id=0) == []
+
+
+def test_search_items_sql_words_in_any_order_and_field(tmp_path):
+    with _reader(tmp_path) as reader:
+        assert _keys(reader.search_items_sql("learning quantum", group_id=0)) == ["PERS0001"]
+        assert _keys(reader.search_items_sql("Jane Networks", group_id=0)) == ["PERS0001"]
+
+
+def test_search_items_sql_quoted_phrase_is_one_word(tmp_path):
+    with _reader(tmp_path) as reader:
+        assert _keys(reader.search_items_sql('"Quantum Networks"', group_id=0)) == ["PERS0001"]
+        assert reader.search_items_sql('"Networks Quantum"', group_id=0) == []
+
+
+def test_quicksearch_terms():
+    from zotero_mcp.local_db import _quicksearch_terms
+
+    assert _quicksearch_terms("Soenens 2009") == ["Soenens", "2009"]
+    assert _quicksearch_terms('  "parental control"  Soenens ') == ["parental control", "Soenens"]
+    assert _quicksearch_terms("") == []
+    assert _quicksearch_terms('""') == []

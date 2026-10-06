@@ -950,6 +950,23 @@ def _row_to_api_collection(row) -> dict:
     }
 
 
+_QUICKSEARCH_TERM_RE = re.compile(r'"([^"]+)"|(\S+)')
+
+
+def _quicksearch_terms(query: str) -> list[str]:
+    """Split a quick-search query into words the way Zotero does.
+
+    Whitespace separates words; a double-quoted span is one word. Empty
+    input gives no words.
+    """
+    terms = []
+    for quoted, bare in _QUICKSEARCH_TERM_RE.findall(query or ""):
+        term = (quoted or bare.strip('"')).strip()
+        if term:
+            terms.append(term)
+    return terms
+
+
 class LocalZoteroReader:
     """
     Direct SQLite reader for Zotero's local database.
@@ -2425,9 +2442,11 @@ class LocalZoteroReader:
     ) -> list[dict] | None:
         """#167 SQLite metadata search backend for zotero_search_items.
 
-        Substring-matches every variant `_generate_search_variants(query)`
-        produces against title/creator/year (plus abstract/tags/notes in
-        'everything' mode), OR'd together in one query, scoped to the
+        Splits the query into words as Zotero's quick search does (a quoted
+        phrase is one word) and requires every word to substring-match --
+        in any of its `_generate_search_variants` forms -- the title, a
+        creator or the date (plus abstract/tags/notes in 'everything'
+        mode), in one query, scoped to the
         library identified by `group_id` — or to every accessible library
         when `group_id` is None (#163). Returns None — signalling "fall
         back to the pyzotero path" — when `item_type` is anything other
@@ -2494,10 +2513,14 @@ class LocalZoteroReader:
             else:
                 return None  # boolean itemType expressions ("a || b") unsupported
 
-        variants = _generate_search_variants(query)
-        like_clauses: list[str] = []
-        like_params: list = []
-        if not variants:
+        # Zotero's quick search splits the query into words (a "quoted
+        # phrase" stays one word) and requires every word to match some
+        # field -- that is what the pyzotero path gets from Zotero itself.
+        # Matching the whole string against each field instead made an
+        # "Author Year" query, the very form the tool recommends, match
+        # nothing: no single field holds both the name and the year.
+        terms = _quicksearch_terms(query)
+        if not terms:
             # A blank query is a *filter-only* search — "every item carrying
             # this tag" — which is exactly what zotero_search_by_tag asks for
             # and which this backend can answer perfectly well. It is only
@@ -2505,37 +2528,42 @@ class LocalZoteroReader:
             # quietly mean "return the whole library".
             if not (tag or item_type):
                 return None
-        for variant in variants:
-            # Escaped, but deliberately not zsearch_norm-folded: this free-text
-            # path matches by OR-ing _generate_search_variants, which also
-            # covers dash/space and umlaut *expansion* (Müller -> Mueller) that
-            # normalize() does not do. Folding here as well would over-match
-            # relative to the pyzotero path.
-            pattern = f"%{_semantics.escape_like(variant)}%"
-            like_clauses.append("title_val.value LIKE ? ESCAPE '\\'")
-            like_params.append(pattern)
-            like_clauses.append("date_val.value LIKE ? ESCAPE '\\'")
-            like_params.append(pattern)
-            like_clauses.append(
-                f"EXISTS (SELECT 1 FROM itemCreators ic JOIN creators c ON ic.creatorID = c.creatorID "
-                f"WHERE ic.itemID = i.itemID AND {_CREATOR_NAME_EXPR} LIKE ? ESCAPE '\\')"
-            )
-            like_params.append(pattern)
-            if qmode == "everything":
-                like_clauses.append("abstract_val.value LIKE ? ESCAPE '\\'")
+        term_groups: list[str] = []
+        like_params: list = []
+        for term in terms:
+            like_clauses: list[str] = []
+            for variant in _generate_search_variants(term):
+                # Escaped, but deliberately not zsearch_norm-folded: this
+                # free-text path matches by OR-ing _generate_search_variants,
+                # which also covers dash/space and umlaut *expansion*
+                # (Müller -> Mueller) that normalize() does not do. Folding
+                # here as well would over-match relative to the pyzotero path.
+                pattern = f"%{_semantics.escape_like(variant)}%"
+                like_clauses.append("title_val.value LIKE ? ESCAPE '\\'")
+                like_params.append(pattern)
+                like_clauses.append("date_val.value LIKE ? ESCAPE '\\'")
                 like_params.append(pattern)
                 like_clauses.append(
-                    "EXISTS (SELECT 1 FROM itemTags itg JOIN tags t ON itg.tagID = t.tagID "
-                    "WHERE itg.itemID = i.itemID AND t.name LIKE ? ESCAPE '\\')"
+                    f"EXISTS (SELECT 1 FROM itemCreators ic JOIN creators c ON ic.creatorID = c.creatorID "
+                    f"WHERE ic.itemID = i.itemID AND {_CREATOR_NAME_EXPR} LIKE ? ESCAPE '\\')"
                 )
                 like_params.append(pattern)
-                like_clauses.append(
-                    "EXISTS (SELECT 1 FROM itemNotes n WHERE "
-                    "(n.parentItemID = i.itemID OR n.itemID = i.itemID) AND n.note LIKE ? ESCAPE '\\')"
-                )
-                like_params.append(pattern)
+                if qmode == "everything":
+                    like_clauses.append("abstract_val.value LIKE ? ESCAPE '\\'")
+                    like_params.append(pattern)
+                    like_clauses.append(
+                        "EXISTS (SELECT 1 FROM itemTags itg JOIN tags t ON itg.tagID = t.tagID "
+                        "WHERE itg.itemID = i.itemID AND t.name LIKE ? ESCAPE '\\')"
+                    )
+                    like_params.append(pattern)
+                    like_clauses.append(
+                        "EXISTS (SELECT 1 FROM itemNotes n WHERE "
+                        "(n.parentItemID = i.itemID OR n.itemID = i.itemID) AND n.note LIKE ? ESCAPE '\\')"
+                    )
+                    like_params.append(pattern)
+            term_groups.append("(" + " OR ".join(like_clauses) + ")")
 
-        like_sql = f" AND ({' OR '.join(like_clauses)})" if like_clauses else ""
+        like_sql = f" AND {' AND '.join(term_groups)}" if term_groups else ""
         query_sql = (
             _item_hydration_select(len(lib_ids))
             + f" {type_filter_sql} {tag_sql}{collection_sql}{like_sql}"
