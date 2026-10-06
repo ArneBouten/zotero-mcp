@@ -1595,6 +1595,13 @@ def update_search_database(
 
         if stats.get("error"):
             output.append(f"**Error:** {stats['error']}")
+        elif stats.get("skipped_reason") == "another_update_in_progress":
+            # Without this the run reads as a successful update of nothing.
+            output.append(
+                "**Not run:** another index update is already in progress (in this "
+                "server or another process using the same index). It continues on "
+                "its own; check zotero_get_search_database_status later."
+            )
         else:
             output.append(f"**Total items:** {stats.get('total_items', 0)}")
             output.append(f"**Processed:** {stats.get('processed_items', 0)}")

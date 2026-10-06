@@ -336,3 +336,22 @@ def test_status_reports_version_and_freshness(monkeypatch, tmp_path):
 
     (cfg / "config.json").write_text('{"semantic_search": {"update_config": {}}}')
     assert "Index Current" not in search_module.get_search_database_status(ctx=DummyContext())
+
+
+def test_update_tool_says_when_another_update_holds_the_lock(monkeypatch, tmp_path):
+    from conftest import DummyContext
+
+    from zotero_mcp.tools import search as search_module
+
+    class _Busy:
+        def update_database(self, **kwargs):
+            return {"skipped_reason": "another_update_in_progress", "duration": "0:00:00"}
+
+    cfg = tmp_path / ".config" / "zotero-mcp"
+    cfg.mkdir(parents=True)
+    (cfg / "config.json").write_text("{}")
+    monkeypatch.setattr(search_module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(semantic_search, "create_semantic_search", lambda *a, **k: _Busy())
+    out = search_module.update_search_database(ctx=DummyContext())
+    assert "another index update is already in progress" in out
+    assert "Processed" not in out
