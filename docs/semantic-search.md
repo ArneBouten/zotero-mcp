@@ -110,6 +110,29 @@ zotero-mcp db-status
 
 How much of each PDF is extracted, and which attachment is read when an item has several, is set in [Text extraction settings](configuration.md#text-extraction-settings).
 
+## Passage indexing
+
+By default each item is one vector: its metadata, abstract and as much full
+text as the embedding model accepts. With chunking on (`"enabled": true`
+under `semantic_search.chunking`), each item is indexed as overlapping
+passages instead, so a search can land on page 14 of a paper and quote it.
+
+### Study context in passages
+
+Passage 0 of an item opens with its title, authors and abstract; every later
+passage is a bare window of the document. With `"context_header": true` under
+`chunking`, each later passage is embedded with a short header naming its
+study — title, year, authors and the first 500 characters of the abstract —
+so a sentence from the middle of a paper is matched as part of that paper
+rather than as an anonymous fragment.
+
+The header is used for embedding and re-ranking only; results show the
+passage itself. It is off by default: it costs about 130 tokens per passage,
+and since it changes what every passage embeds, switching it on or off takes
+full effect only after `zotero-mcp update-db --fulltext --force-rebuild`.
+It also makes the passages of one paper more alike, so the paper most
+about a query can contribute more of the top hits.
+
 ## Example queries
 
 In your AI assistant:
