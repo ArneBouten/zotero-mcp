@@ -576,6 +576,46 @@ class TestAddByDoiIfExists:
         assert "EXIST001" in result
         assert "added to ['COLB0001']" in result
 
+    def test_file_mode_tags_use_the_write_clients_version(self, monkeypatch, fake_zot, dummy_ctx):
+        """Hybrid mode: the match comes from the local database, whose version
+        lags the web API's until Zotero syncs. Writing the local copy back
+        failed with 412 ("expected 772, found 13810"); the tag update must
+        re-fetch from the write client instead."""
+        import copy
+
+        from pyzotero.zotero_errors import PreConditionFailedError
+
+        write_zot = FakeZoteroIdem()
+        write_zot._collections = fake_zot._collections
+        web_copy = copy.deepcopy(fake_zot._items[0])
+        web_copy["version"] = 13810
+        web_copy["data"]["tags"].append({"tag": "added-on-the-web"})
+        write_zot._items = [web_copy]
+
+        def strict_update(item, **kwargs):
+            if item.get("version") != 13810:
+                raise PreConditionFailedError("Item has been modified since specified version")
+            write_zot.updated.append(item)
+            return _FakeResponse(204)
+
+        write_zot.update_item = strict_update
+        monkeypatch.setattr(
+            "zotero_mcp.tools._helpers._get_write_client",
+            lambda ctx: (fake_zot, write_zot),
+        )
+        monkeypatch.setattr("requests.get", lambda *a, **kw: _make_crossref_response())
+        monkeypatch.setattr(
+            "zotero_mcp.tools._helpers._try_attach_oa_pdf",
+            lambda *a, **kw: "skipped (test)",
+        )
+
+        server.add_by_doi(doi=DOI, tags=["new-tag"], if_exists="file", ctx=dummy_ctx)
+
+        assert len(write_zot.updated) == 1
+        tags = {t["tag"] for t in write_zot.updated[0]["data"]["tags"]}
+        assert tags == {"old", "added-on-the-web", "new-tag"}
+        assert not any("Could not add tags" in m for m in getattr(dummy_ctx, "warnings", []))
+
     def test_file_mode_second_run_is_noop(self, monkeypatch, fake_zot, dummy_ctx):
         _patch_clients(monkeypatch, fake_zot)
 
