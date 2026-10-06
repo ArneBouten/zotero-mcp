@@ -59,6 +59,53 @@ def _maybe_fire_presearch_sync(search) -> None:
     _threading.Thread(target=_run, daemon=True, name="zmcp-presearch-sync").start()
 
 
+#: (data_level0 mtime, size, id-map mtime) -> integrity line, so repeated
+#: status calls do not re-read a multi-gigabyte file that has not changed.
+_INTEGRITY_CACHE: dict[tuple, str] = {}
+
+
+def _index_integrity(persist_directory: str | None, collection: str | None = None) -> str | None:
+    """Whether the vector index is intact, for the status tool.
+
+    Reads the hnswlib files directly (zotero_mcp.index_repair), never through
+    ChromaDB, so it works — and answers quickly — even when ChromaDB itself
+    would hang on a damaged index. Cached per file version. None when there
+    is nothing to check yet.
+    """
+    if not persist_directory:
+        return None
+    try:
+        from zotero_mcp.index_repair import check_vector_index
+
+        chroma_dir = Path(persist_directory)
+        segments = [p for p in chroma_dir.iterdir() if (p / "data_level0.bin").exists()]
+        if not segments:
+            return None
+        stamp = tuple(
+            (p.name, (p / "data_level0.bin").stat().st_mtime_ns,
+             (p / "data_level0.bin").stat().st_size,
+             (p / "index_metadata.pickle").stat().st_mtime_ns)
+            for p in sorted(segments)
+        )
+        if stamp in _INTEGRITY_CACHE:
+            return _INTEGRITY_CACHE[stamp]
+        check = check_vector_index(chroma_dir, collection or "zotero_library")
+    except Exception as e:
+        return f"could not be checked ({e})"
+    if check.healthy:
+        line = "intact — every indexed passage has exactly one vector"
+    else:
+        line = (
+            f"DAMAGED — {len(check.untrusted_ids)} passage(s) in "
+            f"{len(check.untrusted_items)} item(s) have no reliable vector; changes to "
+            "them make updates and searches hang. Close every MCP client and run "
+            "`zotero-mcp db-rebuild-vectors`."
+        )
+    _INTEGRITY_CACHE.clear()
+    _INTEGRITY_CACHE[stamp] = line
+    return line
+
+
 #: How long the client-side advanced-search walk may run before it returns a
 #: partial answer. Kept well under the Zotero API lock's 45s wait bound so a
 #: broad search cannot cascade into "Zotero API busy" on every other tool
@@ -1620,6 +1667,11 @@ def get_search_database_status(*, ctx: Context) -> str:
             output.append("**Status:** Not initialized — run zotero_update_search_database first.")
         if collection_info.get('error'):
             output.append(f"**Error:** {collection_info['error']}")
+        integrity = _index_integrity(
+            collection_info.get("persist_directory"), collection_info.get("name")
+        )
+        if integrity:
+            output.append(f"**Index Integrity:** {integrity}")
 
         output.append("")
 
