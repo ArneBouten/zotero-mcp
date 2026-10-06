@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import pickle
+import random
 import shutil
 import sqlite3
 import struct
@@ -36,6 +37,13 @@ _DELETE_MARK = 0x01
 _DELETE_OP = 3  # chromadb.db.mixins.embeddings_queue operation code
 
 Progress = Callable[[str], None]
+
+#: HNSW parameters for a rebuilt index. ChromaDB's defaults (16 neighbours,
+#: ef_construction 100, ef_search 100) lost passages on a library of book-
+#: length documents with near-duplicate passages; on clustered test data like
+#: it, these raised recall@200 from 0.68 to 0.99. They cost a little more
+#: memory for links (small next to 12 KB per 3072-dim vector) and build time.
+REBUILD_HNSW = {"max_neighbors": 32, "ef_construction": 200, "ef_search": 400}
 
 
 class IndexRepairError(RuntimeError):
@@ -160,6 +168,7 @@ def rebuild_vector_index(
     skip_items: set[str] | None = None,
     batch_size: int = 1000,
     progress: Progress = print,
+    seed: int = 0,
 ) -> dict:
     """Write a fresh copy of the index into ``work_dir`` from ``chroma_dir``.
 
@@ -167,9 +176,10 @@ def rebuild_vector_index(
     whose pending deletes are dropped from the log (the metadata already
     reflects them, and replaying one that touches a damaged label is exactly
     what fails). Every passage is then copied — id, vector, text, metadata —
-    into ``work_dir/chroma_db``, except all passages of ``skip_items`` and of
-    any item whose vectors cannot be read. Returns counts and the items left
-    out; they are indexed again by the next update.
+    into ``work_dir/chroma_db``, in random order (see below), except all
+    passages of ``skip_items`` and of any item whose vectors cannot be read.
+    Returns counts and the items left out; they are indexed again by the next
+    update.
     """
     import chromadb
     from chromadb.config import Settings
@@ -206,10 +216,13 @@ def rebuild_vector_index(
     settings = Settings(anonymized_telemetry=False, allow_reset=False)
     src = chromadb.PersistentClient(path=str(source), settings=settings).get_collection(collection)
     dst_client = chromadb.PersistentClient(path=str(target), settings=settings)
-    # No embedding function: the collection's stored configuration stays
-    # empty, as in an index zotero-mcp created, so its own client opens it
-    # with whatever embedding model is configured.
-    dst = dst_client.create_collection(collection, embedding_function=None)
+    # No embedding function: the collection's stored configuration names
+    # none, as in an index zotero-mcp created, so its own client opens it
+    # with whatever embedding model is configured. Graph parameters: see
+    # REBUILD_HNSW.
+    dst = dst_client.create_collection(
+        collection, embedding_function=None, configuration={"hnsw": dict(REBUILD_HNSW)}
+    )
 
     all_ids: list[str] = []
     offset = 0
@@ -221,48 +234,54 @@ def rebuild_vector_index(
         offset += len(page)
     progress(f"{len(all_ids)} passages in the index.")
 
-    by_item: dict[str, list[str]] = {}
-    for doc_id in all_ids:
-        by_item.setdefault(_item_key(doc_id), []).append(doc_id)
     skip = set(skip_items or ())
-    left_out = sorted(k for k in by_item if k in skip)
-    copied = 0
-    failed_items: list[str] = []
+    left_out = sorted({_item_key(i) for i in all_ids} & skip)
+    # Random insertion order. A paper's passages are near-duplicates of one
+    # another, and an HNSW graph built one paper at a time links each such
+    # cluster mostly to itself: searches that enter one cannot leave it. A
+    # rebuild that copied paper by paper returned 200 passages from two books
+    # for a query whose answer was in a third. Shuffled, the graph keeps the
+    # long-range links search needs.
+    order = [i for i in all_ids if _item_key(i) not in skip]
+    random.Random(seed).shuffle(order)
 
-    def copy_items(keys: list[str]) -> None:
+    copied = 0
+    failed_ids: list[str] = []
+
+    def copy_ids(ids: list[str]) -> None:
         nonlocal copied
-        ids = [i for k in keys for i in by_item[k]]
         try:
             got = src.get(ids=ids, include=["embeddings", "documents", "metadatas"])
         except Exception:
-            if len(keys) == 1:
-                failed_items.append(keys[0])
+            if len(ids) == 1:
+                failed_ids.append(ids[0])
                 return
-            mid = len(keys) // 2
-            copy_items(keys[:mid])
-            copy_items(keys[mid:])
+            mid = len(ids) // 2
+            copy_ids(ids[:mid])
+            copy_ids(ids[mid:])
             return
-        if len(got["ids"]) != len(ids):
-            # Some ids vanished between listing and reading: copy what came.
-            pass
-        dst.add(
-            ids=got["ids"],
-            embeddings=got["embeddings"],
-            documents=got["documents"],
-            metadatas=got["metadatas"],
-        )
-        copied += len(got["ids"])
+        if got["ids"]:
+            dst.add(
+                ids=got["ids"],
+                embeddings=got["embeddings"],
+                documents=got["documents"],
+                metadatas=got["metadatas"],
+            )
+            copied += len(got["ids"])
 
-    pending_keys: list[str] = []
-    pending_n = 0
-    keys = [k for k in sorted(by_item) if k not in skip]
-    for n_done, key in enumerate(keys, 1):
-        pending_keys.append(key)
-        pending_n += len(by_item[key])
-        if pending_n >= batch_size or n_done == len(keys):
-            copy_items(pending_keys)
-            pending_keys, pending_n = [], 0
-            progress(f"  {copied} passages copied ({n_done}/{len(keys)} items)")
+    for start in range(0, len(order), batch_size):
+        copy_ids(order[start:start + batch_size])
+        if (start // batch_size) % 10 == 0 or start + batch_size >= len(order):
+            progress(f"  {copied} of {len(order)} passages copied")
+
+    # An item with any unreadable passage is left out whole, so the next
+    # update re-indexes it completely rather than serving half of it.
+    failed_items = sorted({_item_key(i) for i in failed_ids})
+    if failed_items:
+        partial = [i for i in order if _item_key(i) in set(failed_items) and i not in set(failed_ids)]
+        for start in range(0, len(partial), batch_size):
+            dst.delete(ids=partial[start:start + batch_size])
+        copied -= len(partial)
 
     count = dst.count()
     if count != copied:
@@ -280,7 +299,7 @@ def rebuild_vector_index(
         "passages": len(all_ids),
         "copied": copied,
         "left_out_items": left_out,
-        "unreadable_items": sorted(failed_items),
+        "unreadable_items": failed_items,
         "dropped_pending_deletes": dropped,
     }
 

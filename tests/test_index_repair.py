@@ -15,6 +15,7 @@ chromadb = pytest.importorskip("chromadb")
 
 from zotero_mcp.index_repair import (  # noqa: E402
     _HEADER,
+    REBUILD_HNSW,
     check_vector_index,
     rebuild_vector_index,
 )
@@ -112,8 +113,17 @@ def test_rebuild_leaves_out_damaged_items_and_is_clean(index, tmp_path):
         path=target, settings=Settings(anonymized_telemetry=False, allow_reset=False)
     ).get_collection(COLLECTION)
     got = col.get(ids=expected[:5], include=["documents", "metadatas", "embeddings"])
-    assert got["documents"] == [f"text of {i}" for i in expected[:5]]
-    assert got["metadatas"][0]["item_key"] == expected[0].split("#")[0]
+    docs = dict(zip(got["ids"], got["documents"]))
+    metas = dict(zip(got["ids"], got["metadatas"]))
+    assert docs == {i: f"text of {i}" for i in expected[:5]}
+    assert all(metas[i]["item_key"] == i.split("#")[0] for i in expected[:5])
+    # Vectors are copied as stored: each passage still finds itself first.
+    src = chromadb.PersistentClient(path=str(path)).get_collection(COLLECTION)
+    original = src.get(ids=expected[:5], include=["embeddings"])
+    for doc_id, vector in zip(original["ids"], original["embeddings"]):
+        hit = col.query(query_embeddings=[list(vector)], n_results=1, include=[])["ids"][0][0]
+        assert hit == doc_id
+    assert col.configuration["hnsw"]["ef_search"] == REBUILD_HNSW["ef_search"]
     # Removals work again — the operation the damage used to break.
     col.delete(ids=expected[:50])
     assert col.count() == len(expected) - 50
@@ -158,3 +168,50 @@ def test_status_integrity_is_silent_without_an_index(tmp_path):
 
     assert search_tools._index_integrity(None) is None
     assert search_tools._index_integrity(str(tmp_path)) is None
+
+
+def test_rebuild_keeps_clustered_passages_findable(tmp_path):
+    """Papers whose passages are near-duplicates must not trap the search.
+
+    Copied paper by paper with ChromaDB's default graph settings, an index
+    like this answered some queries with passages from the wrong papers
+    only (recall@200 as low as 0). The rebuild shuffles and uses
+    REBUILD_HNSW; recall of the exact top 50 must stay high for every query.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    dim, papers, per = 256, 300, 60
+    centers = rng.normal(size=(papers, dim))
+    vectors = np.vstack([c + 0.25 * rng.normal(size=(per, dim)) for c in centers])
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    ids = [f"P{p:04d}#{i}" for p in range(papers) for i in range(per)]
+
+    path = tmp_path / "chroma_db"
+    col = chromadb.PersistentClient(path=str(path)).create_collection(
+        COLLECTION, embedding_function=None
+    )
+    for start in range(0, len(ids), 1000):  # paper by paper, as updates write
+        col.add(
+            ids=ids[start:start + 1000],
+            embeddings=vectors[start:start + 1000].tolist(),
+            documents=["x"] * len(ids[start:start + 1000]),
+        )
+
+    result = rebuild_vector_index(path, tmp_path / "work", progress=lambda m: None)
+    from chromadb.config import Settings
+
+    rebuilt = chromadb.PersistentClient(
+        path=result["target"], settings=Settings(anonymized_telemetry=False, allow_reset=False)
+    ).get_collection(COLLECTION)
+
+    queries = centers[rng.choice(papers, 20)] + 0.9 * rng.normal(size=(20, dim))
+    queries /= np.linalg.norm(queries, axis=1, keepdims=True)
+    recalls = []
+    for q in queries:
+        exact = {ids[i] for i in np.argsort(((vectors - q) ** 2).sum(1))[:50]}
+        got = set(rebuilt.query(query_embeddings=[q.tolist()], n_results=50, include=[])["ids"][0])
+        recalls.append(len(exact & got) / 50)
+    # Built paper by paper with ChromaDB's defaults, data like this gave
+    # min 0.00 over repeated runs (scripts in the PR description).
+    assert min(recalls) >= 0.9, recalls
