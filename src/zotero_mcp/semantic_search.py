@@ -757,6 +757,39 @@ def _diversify_passages(results: dict, max_per_item: int, max_items: int | None)
     return len(keep)
 
 
+def _passage_body(document: str, meta: dict[str, Any] | None) -> str:
+    """The passage itself, without the study-context header it was embedded with.
+
+    Passages after the first are stored as ``"<header>\n\n<passage>"`` so the
+    embedding (and a re-ranker) knows which study they come from. Shown to a
+    reader, that header is noise -- and worse, the snippet picker gravitates
+    to it because it repeats the title. The passage keeps its own length in
+    ``char_end - char_start``, which locates the boundary without storing the
+    header twice. Anything that does not match that shape is returned as is.
+    """
+    if not document or not isinstance(meta, dict):
+        return document
+    if not meta.get("chunk_index"):
+        return document
+    try:
+        span = int(meta["char_end"]) - int(meta["char_start"])
+    except (KeyError, TypeError, ValueError):
+        return document
+    if span <= 0 or span >= len(document):
+        return document
+    title = str(meta.get("title") or "").strip()
+    pos = document.find("\n\n")
+    while pos != -1:
+        body = document[pos + 2:]
+        if len(body) <= span:
+            head = document[:pos]
+            if not title or head.startswith(title[:40]):
+                return body
+            return document
+        pos = document.find("\n\n", pos + 2)
+    return document
+
+
 class CrossEncoderReranker:
     """Optional cross-encoder re-ranker for semantic search results."""
 
@@ -3573,8 +3606,14 @@ class ZoteroSemanticSearch:
                     # indication of which study it belongs to. Prepending a
                     # compact header restores that context for the embedding,
                     # so a sentence from page 14 is scored as part of *this*
-                    # paper rather than as an anonymous fragment.
-                    ctx_header = self._chunk_context_header(item)
+                    # paper rather than as an anonymous fragment. Opt-in:
+                    # it changes what every passage embeds, so turning it on
+                    # (or off) only applies fully after a rebuild.
+                    ctx_header = (
+                        self._chunk_context_header(item)
+                        if self._chunking_config.get("context_header", False)
+                        else ""
+                    )
                     for ci, (chunk_text, c0, c1) in enumerate(passages):
                         cmeta = dict(metadata)
                         cmeta["parent_item_key"] = item_key
@@ -4550,6 +4589,7 @@ class ZoteroSemanticSearch:
             distance = distances[i] if i < len(distances) else None
             document = documents[i] if i < len(documents) else ""
             meta = metadatas[i] if i < len(metadatas) else {}
+            document = _passage_body(document, meta)
 
             passage, passage_offset = best_snippet(query, document)
 
