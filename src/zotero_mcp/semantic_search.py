@@ -333,6 +333,14 @@ def _truncate_to_tokens(text: str, max_tokens: int = 8000) -> str:
 # version number is not proof the migration that saved it was correct.
 _INDEX_SCHEMA_VERSION = 3
 
+# Revision of the text extractor. A "failed" extraction recorded under an
+# older revision is retried once on the next update, so an extractor
+# improvement reaches documents it previously could not read instead of
+# leaving them metadata-only until someone edits them.
+#   1: pdf-inspector markdown pass only
+#   2: plain-text fallback for scanner OCR layers (#611)
+_EXTRACTOR_REVISION = 2
+
 # The incremental deletion pass refuses (without an explicit opt-in) to
 # remove at least this many docs AND at least this fraction of the syncing
 # library's indexed docs in one run: that fingerprint is far more likely a
@@ -1380,8 +1388,10 @@ class ZoteroSemanticSearch:
                 metadata["fulltext_source"] = data.get("fulltextSource")
         elif data.get("fulltext_attempted"):
             # Extraction was attempted but failed (timeout, empty, etc.)
-            # Mark so we don't retry on every incremental update
+            # Mark so we don't retry on every incremental update -- and
+            # record which extractor failed, so a better one retries it.
             metadata["has_fulltext"] = "failed"
+            metadata["extractor_revision"] = _EXTRACTOR_REVISION
 
         # Record the attachment-key set (local mode only) so update runs can
         # retry a "failed" item once its attachments change — attaching a file
@@ -1723,7 +1733,16 @@ class ZoteroSemanticSearch:
                                     chroma_date = existing_metadata.get("date_modified", "")
                                     item_date = getattr(it, "date_modified", "") or ""
                                     stored_att_keys = existing_metadata.get("attachment_keys")
-                                    if chroma_date == item_date and stored_att_keys == att_keys:
+                                    # A failure recorded by an older extractor
+                                    # is retried once with the current one:
+                                    # the OCR-layer fallback (#611) reads PDFs
+                                    # that used to yield nothing.
+                                    failed_revision = existing_metadata.get("extractor_revision", 1)
+                                    if (
+                                        chroma_date == item_date
+                                        and stored_att_keys == att_keys
+                                        and (not att_keys or failed_revision >= _EXTRACTOR_REVISION)
+                                    ):
                                         # Nothing changed since the failure — don't retry
                                         should_extract = False
                                         skipped_existing += 1

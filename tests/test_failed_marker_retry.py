@@ -301,6 +301,7 @@ def test_real_failed_extraction_still_reported(monkeypatch, capsys):
         "has_fulltext": "failed",
         "date_modified": DATE_MODIFIED,
         "attachment_keys": "ATTKEY1",
+        "extractor_revision": semantic_search._EXTRACTOR_REVISION,
     }
     attachments = [("ATTKEY1", "storage:paper.pdf", "application/pdf")]
     items, reader, _search = _run_scan_no_text(monkeypatch, stored, attachments=attachments)
@@ -365,3 +366,44 @@ def test_legacy_record_without_attachment_keys_is_not_reextracted(monkeypatch):
     items, reader = _run_scan(monkeypatch, stored, attachments=attachments)
     assert items == []
 
+
+
+# ---------------------------------------------------------------------------
+# A better extractor retries what an older one failed on
+# ---------------------------------------------------------------------------
+
+
+def test_failure_from_an_older_extractor_is_retried(monkeypatch):
+    """A failure recorded before the OCR-layer fallback (#611) gets one retry."""
+    stored = {
+        "has_fulltext": "failed",
+        "date_modified": DATE_MODIFIED,
+        "attachment_keys": "ATTKEY1",
+        # no extractor_revision: recorded by revision 1
+    }
+    attachments = [("ATTKEY1", "storage:scan.pdf", "application/pdf")]
+    items, reader = _run_scan(monkeypatch, stored, attachments=attachments)
+    assert len(items) == 1
+    assert reader.extract_calls == 1
+
+
+def test_failure_from_the_current_extractor_is_not_retried(monkeypatch):
+    stored = {
+        "has_fulltext": "failed",
+        "date_modified": DATE_MODIFIED,
+        "attachment_keys": "ATTKEY1",
+        "extractor_revision": semantic_search._EXTRACTOR_REVISION,
+    }
+    attachments = [("ATTKEY1", "storage:scan.pdf", "application/pdf")]
+    items, reader = _run_scan(monkeypatch, stored, attachments=attachments)
+    assert items == []
+    assert reader.extract_calls == 0
+
+
+def test_new_failures_record_the_extractor_revision(monkeypatch):
+    items, reader, search = _run_scan_no_text(
+        monkeypatch, None, attachments=[("ATTKEY1", "storage:scan.pdf", "application/pdf")]
+    )
+    metadata = search._create_metadata(items[0])
+    assert metadata["has_fulltext"] == "failed"
+    assert metadata["extractor_revision"] == semantic_search._EXTRACTOR_REVISION
