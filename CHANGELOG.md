@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.2] - 2026-10-06
+
+Arne's build: upstream 0.13.2 plus the changes below.
+
+### Added
+
+- **Section labels on indexed passages** (Abstract, Introduction, Methods, Results, Discussion, Conclusion, References, Appendix, Back matter), shown first in the Location line and filterable with `filters={"section": ...}`. A chapter, part or unrecognised all-caps heading ends a label.
+- **Hosted re-ranking** through Voyage, Cohere, OpenRouter, Contextual or any compatible endpoint (`reranker.provider`). Search results say *"Ranked by voyage/rerank-3 over N candidate passages"*, or why re-ranking failed.
+- **Optional study context for passages** (`chunking.context_header`): passages after the first are embedded with their paper's title, year, authors and abstract opening. Results show the passage without it.
+- **`zotero_insert_word_citations`**: Pandoc-style markers in a .docx (`[@KEY]`, `[@KEY, p. 12]`, `[-@KEY]`, `{{bibliography}}`) become live Zotero Word-plugin citations and a bibliography. See [Word citations](docs/word-citations.md). New `[word]` extra (lxml).
+- **Status shows the server version and whether the index is current.**
+
+### Fixed
+
+- **Voyage re-ranking never ran**: its response lists results under `data`, not `results`, so every call fell back silently to retrieval order.
+- **A passage index returned fewer papers than asked for**: the top passages all came from one or two papers. Search now takes a 200-passage pool and keeps at most two passages per paper before ranking.
+- **New papers were only searchable after a restart, or one search late.** A library fingerprint now skips the index scan when nothing changed and, when something did, the search waits (up to 25 s) for the update.
+- **Index updates were not locked on Windows**, so two could run at once.
+- **Extractions that failed under an older extractor are retried once**, so scanned PDFs the OCR-layer fallback can now read are indexed.
+- **Keyword search on the SQLite backend matched the whole query against each field**, so "Author Year" found nothing; words are now matched independently, as in Zotero's quick search.
+- **`zotero_update_search_database` reported a skipped run as an update of 0 items**; it now says another update holds the lock.
+
 ## [0.13.2] - 2026-10-04
 
 ### Fixed
