@@ -51,6 +51,8 @@ TOOL_BUDGETS = {
     "zotero_find_duplicates":          (234, 450),
     "zotero_merge_duplicates":         (295, 450),
     "zotero_attach_file":              (190, 430),
+    # tools/word.py
+    "zotero_insert_word_citations":    (200, 449),
     # tools/search.py
     "zotero_search_items":             (175, 400),
     "zotero_search_by_tag":            (115, 265),

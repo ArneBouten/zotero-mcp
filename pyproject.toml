@@ -78,8 +78,12 @@ pdf = [
 scite = [
     "requests>=2.28.0",
 ]
+# Live Zotero citations in .docx files (zotero_insert_word_citations).
+word = [
+    "lxml>=4.9",
+]
 all = [
-    "zotero-mcp-server[semantic,pdf,scite]",
+    "zotero-mcp-server[semantic,pdf,scite,word]",
 ]
 dev = [
     "zotero-mcp-server[all]",

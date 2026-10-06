@@ -125,6 +125,9 @@ All add tools take a `collections` parameter accepting collection keys, names, o
 - `zotero_merge_duplicates`: Merge duplicate items with dry-run preview; consolidates all child items. `auto=True` merges every high-confidence (same-DOI) group in one pass behind a two-call plan/confirm gate
 - `zotero_search_by_citation_key`: Look up items by BetterBibTeX citation key (with Extra field fallback)
 
+### 🖋️ Word citations
+- `zotero_insert_word_citations`: Turn citation markers in a `.docx` (`[@KEY]`, `[@KEY, p. 12]`, `{{bibliography}}`) into live Zotero citations and a bibliography that the Zotero Word plugin can refresh and restyle — see [Word citations](word-citations.md)
+
 ### 🔗 Related items tools
 - `zotero_get_item_related`: Get all related items for a specific Zotero item
 - `zotero_add_item_relation`: Add a related item relationship (creates bidirectional link)

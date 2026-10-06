@@ -2181,6 +2181,52 @@ class LocalZoteroReader:
         ).fetchone()
         return row[0] if row else None
 
+    def account_info(self) -> dict[str, Any]:
+        """The signed-in Zotero account as recorded locally.
+
+        ``{"userID": int | None, "localUserKey": str | None}``. Zotero names
+        personal-library items ``http://zotero.org/users/<userID>/items/<KEY>``
+        once the library has synced, and ``.../users/local/<localUserKey>/...``
+        before that; documents cite items by these URIs.
+        """
+        conn = self._get_connection()
+        info: dict[str, Any] = {"userID": None, "localUserKey": None}
+        try:
+            rows = conn.execute(
+                "SELECT key, value FROM settings WHERE setting = 'account' "
+                "AND key IN ('userID', 'localUserKey')"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return info
+        for key, value in rows:
+            if key == "userID":
+                try:
+                    info["userID"] = int(value)
+                except (TypeError, ValueError):
+                    pass
+            elif key == "localUserKey":
+                info["localUserKey"] = str(value) if value else None
+        return info
+
+    def item_ids_for_keys(
+        self, keys: list[str], group_id: int = PERSONAL_LIBRARY_GROUP_ID
+    ) -> dict[str, int]:
+        """Map item keys to this database's itemIDs within one library."""
+        library_id = self._resolve_scope_library_id(group_id)
+        if library_id is None or not keys:
+            return {}
+        conn = self._get_connection()
+        out: dict[str, int] = {}
+        for i in range(0, len(keys), 500):
+            chunk = keys[i:i + 500]
+            marks = ",".join("?" for _ in chunk)
+            for key, item_id in conn.execute(
+                f"SELECT key, itemID FROM items WHERE libraryID = ? AND key IN ({marks})",
+                (library_id, *chunk),
+            ):
+                out[key] = int(item_id)
+        return out
+
     def library_fingerprint(self, group_id: int = PERSONAL_LIBRARY_GROUP_ID) -> str | None:
         """A short string that changes whenever one library's items change.
 
