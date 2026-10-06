@@ -30,7 +30,7 @@ except Exception:
     _tokenizer = None
 
 
-from . import batch_common, fulltext_cache, gemini_batch, openai_batch
+from . import _runtime, batch_common, fulltext_cache, gemini_batch, openai_batch
 from .chroma_client import ChromaClient, create_chroma_client
 from .client import get_active_group_id, get_zotero_client
 
@@ -2054,6 +2054,24 @@ class ZoteroSemanticSearch:
         else:
             return self._get_items_from_api(limit, include_fulltext=include_fulltext_via_api)
 
+    def _resolve_extraction_workers(self, config_workers, server_workers=None) -> int:
+        """How many processes extract attachment text in this run.
+
+        CLI flag beats config; 1 (fully sequential) when neither is set.
+        Never more than the core count: extraction is CPU-bound, so extra
+        workers only add process-spawn and scheduling overhead.
+
+        Inside the MCP server the default is in-process extraction. A
+        background sync extracts a handful of new attachments, and a process
+        pool in a long-lived stdio server has left workers stuck at start-up
+        (Windows) and orphaned when the client killed the server.
+        ``extraction.server_workers`` opts back in.
+        """
+        if _runtime.in_server_process and not self.extraction_workers:
+            config_workers = server_workers or 1
+        workers = self.extraction_workers or config_workers or 1
+        return max(1, min(int(workers), os.cpu_count() or 1))
+
     def _get_items_from_local_db(
         self,
         limit: int | None = None,
@@ -2082,6 +2100,7 @@ class ZoteroSemanticSearch:
             zotero_db_path = self.db_path  # CLI override takes precedence
             collection_keys = None
             config_workers = None
+            server_workers = None
             # If semantic_search config file exists, prefer its setting
             try:
                 if self.config_path and os.path.exists(self.config_path):
@@ -2092,6 +2111,7 @@ class ZoteroSemanticSearch:
                         pdf_max_pages = extraction_cfg.get("pdf_max_pages")
                         attachment_priority = extraction_cfg.get("attachment_priority")
                         config_workers = extraction_cfg.get("workers")
+                        server_workers = extraction_cfg.get("server_workers")
                         collection_keys = semantic_cfg.get("collection_keys")
                         # Use config db_path only if no CLI override
                         if not zotero_db_path:
@@ -2099,11 +2119,7 @@ class ZoteroSemanticSearch:
             except Exception:
                 pass
 
-            # CLI flag beats config; 1 (fully sequential) when neither is set.
-            # Never exceed the core count — extraction is CPU-bound, so extra
-            # workers only add process-spawn and scheduling overhead.
-            workers = self.extraction_workers or config_workers or 1
-            workers = max(1, min(int(workers), os.cpu_count() or 1))
+            workers = self._resolve_extraction_workers(config_workers, server_workers)
 
             with (
                 suppress_stdout(),

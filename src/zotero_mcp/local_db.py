@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
@@ -243,6 +243,25 @@ def _init_extraction_worker() -> None:
     """
     logging.getLogger("zotero_mcp.extract").setLevel(logging.CRITICAL)
     logging.getLogger("pdfminer").setLevel(logging.ERROR)
+
+
+def _terminate_pool(pool: ProcessPoolExecutor) -> None:
+    """Stop a process pool whose workers have stalled, without waiting on them.
+
+    ``shutdown(wait=True)`` — what leaving the ``with`` block does — would
+    wait for workers that will never finish, so terminate them first; the
+    executor then sees a broken pool and its management thread exits.
+    """
+    processes = list((getattr(pool, "_processes", None) or {}).values())
+    for proc in processes:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
 
 
 def _extract_worker(path_str: str, max_pages: int) -> str:
@@ -1242,6 +1261,21 @@ class LocalZoteroReader:
 
         return None
 
+    #: Seconds without a single finished extraction before the worker pool
+    #: is declared stalled (see extract_fulltext_for_items). Generous: one
+    #: worker may be parsing a scanned book of up to pdf_max_pages pages.
+    #: None means ZOTERO_EXTRACTION_STALL_TIMEOUT or the default.
+    extraction_stall_timeout: float | None = None
+
+    def _resolve_extraction_stall_timeout(self) -> float:
+        value = self.extraction_stall_timeout
+        if value is None:
+            try:
+                value = float(os.getenv("ZOTERO_EXTRACTION_STALL_TIMEOUT") or 600)
+            except ValueError:
+                value = 600.0
+        return max(1.0, float(value))
+
     def _resolve_pdf_max_pages(self) -> int:
         """Page cap for PDF extraction.
 
@@ -1888,41 +1922,68 @@ class LocalZoteroReader:
                 pending[future] = (item_id, item_key, target, attachment_key)
 
             settled: set[Any] = set()
-            for future in as_completed(pending):
-                item_id, item_key, target, attachment_key = pending[future]
-                try:
-                    text = future.result()
-                except BrokenProcessPool as e:
-                    # A worker *process* died — an OOM on a pathological PDF,
-                    # not the ordinary corrupt-file case ``_extract_worker``
-                    # already absorbs. Every future still outstanding raises
-                    # this same error, so letting the blanket handler below
-                    # turn each one into empty text would mark the whole
-                    # remainder of the batch has_fulltext="failed" — a sticky
-                    # marker the skip logic then refuses to retry until the
-                    # item changes or the collection is rebuilt. One transient
-                    # death would poison a large run. Stop reaping futures and
-                    # redo the outstanding work in this process instead.
+            not_done = set(pending)
+            stall_timeout = self._resolve_extraction_stall_timeout()
+            pool_failed = False
+            while not_done and not pool_failed:
+                done, not_done = wait(
+                    not_done, timeout=stall_timeout, return_when=FIRST_COMPLETED
+                )
+                if not done:
+                    # No worker finished anything for stall_timeout seconds.
+                    # Seen on Windows: spawned workers that never got past
+                    # interpreter start-up, so the run waited forever on
+                    # results that could not come. Stop the pool and redo
+                    # the outstanding work in-process, as for a dead pool.
                     logger.warning(
-                        f"Extraction worker pool died ({e}); re-extracting the "
-                        f"remaining {len(pending) - len(settled)} item(s) in-process"
+                        f"Extraction workers produced nothing for {stall_timeout:.0f}s; "
+                        f"stopping them and extracting the remaining "
+                        f"{len(pending) - len(settled)} item(s) in-process"
                     )
+                    _terminate_pool(pool)
                     stranded = [
                         (i, k)
                         for f, (i, k, _target, _att) in pending.items()
                         if f not in settled
                     ]
                     break
-                except Exception as e:  # this item failed; fall back below
-                    logger.debug(f"Extraction worker failed for item {item_id}: {e}")
-                    text = ""
-                settled.add(future)
-                if text:
-                    source = _source_for_path(target)
-                    self._cache_store(target, attachment_key, item_key, text, source)
-                    yield item_id, (text, source)
-                else:
-                    deferred.append((item_id, item_key, (target, attachment_key)))
+                for future in done:
+                    item_id, item_key, target, attachment_key = pending[future]
+                    try:
+                        text = future.result()
+                    except BrokenProcessPool as e:
+                        # A worker *process* died — an OOM on a pathological
+                        # PDF, not the ordinary corrupt-file case
+                        # ``_extract_worker`` already absorbs. Every future
+                        # still outstanding raises this same error, so letting
+                        # the blanket handler below turn each one into empty
+                        # text would mark the whole remainder of the batch
+                        # has_fulltext="failed" — a sticky marker the skip
+                        # logic then refuses to retry until the item changes
+                        # or the collection is rebuilt. One transient death
+                        # would poison a large run. Stop reaping futures and
+                        # redo the outstanding work in this process instead.
+                        logger.warning(
+                            f"Extraction worker pool died ({e}); re-extracting the "
+                            f"remaining {len(pending) - len(settled)} item(s) in-process"
+                        )
+                        stranded = [
+                            (i, k)
+                            for f, (i, k, _target, _att) in pending.items()
+                            if f not in settled
+                        ]
+                        pool_failed = True
+                        break
+                    except Exception as e:  # this item failed; fall back below
+                        logger.debug(f"Extraction worker failed for item {item_id}: {e}")
+                        text = ""
+                    settled.add(future)
+                    if text:
+                        source = _source_for_path(target)
+                        self._cache_store(target, attachment_key, item_key, text, source)
+                        yield item_id, (text, source)
+                    else:
+                        deferred.append((item_id, item_key, (target, attachment_key)))
 
         # Work the dead pool never finished, redone here. This is the exact
         # path ``extraction_workers <= 1`` takes, so target resolution, the

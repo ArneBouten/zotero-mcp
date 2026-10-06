@@ -1396,6 +1396,10 @@ def main():
         # Windows only: get the ChromaDB import onto the main thread before any
         # worker thread can attempt it (#485). Must precede the warmup thread.
         _preimport_semantic_search_on_main_thread()
+        # Background syncs then extract in-process by default (see
+        # semantic_search._get_items_from_local_db).
+        from zotero_mcp import _runtime
+        _runtime.mark_server_process()
         _warmup_reranker_in_background()
         if transport == "stdio":
             mcp.run(transport="stdio")
