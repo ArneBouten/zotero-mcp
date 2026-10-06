@@ -290,13 +290,23 @@ def _converge_existing_item(write_zot, item, coll_keys, tags, ctx) -> dict:
 
     tags_failed = False
     if tags_to_add:
-        # Update tags first, on our fetched copy (current version); the
-        # collection backstop below re-fetches, so it sees the new version.
-        item["data"]["tags"] = (data.get("tags") or []) + [
-            {"tag": t} for t in tags_to_add
-        ]
+        # *item* may come from the local database, whose version lags the
+        # web API's whenever the item was changed there and Zotero has not
+        # synced yet (hybrid mode); writing it back would fail with 412.
+        # Re-fetch from the client that writes, add only the tags the fresh
+        # copy still lacks, and retry on a version conflict. The collection
+        # backstop below re-fetches too, so it sees the new version.
+        def _add_tags(fresh):
+            fresh_data = fresh.setdefault("data", {})
+            have = {t.get("tag") for t in fresh_data.get("tags") or []}
+            fresh_data["tags"] = (fresh_data.get("tags") or []) + [
+                {"tag": t} for t in tags_to_add if t not in have
+            ]
+
         try:
-            resp = write_zot.update_item(item)
+            resp = _helpers._update_item_with_version_retry(
+                write_zot, item_key, _add_tags, ctx=ctx
+            )
             tags_failed = not _helpers._handle_write_response(resp, ctx)
         except Exception as e:
             tags_failed = True
