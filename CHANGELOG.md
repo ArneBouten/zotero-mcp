@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.3] - 2026-10-06
+
+### Fixed
+
+- **An index update could wait forever on text-extraction workers.** On Windows the server's six worker processes stalled at start-up and the startup update never finished, holding the update lock. The MCP server now extracts in-process by default (`extraction.server_workers` opts back in), and a pool that produces nothing for 10 minutes is stopped and its work finished in-process.
+- **Adding tags to an existing item failed with HTTP 412 in hybrid mode** (`if_exists="file"`): the local copy's version lags the web API's until Zotero syncs. The tags are now written to a freshly fetched copy, with a retry on a version conflict.
+
 ## [0.13.2+arne.2] - 2026-10-06
 
 Arne's build: upstream 0.13.2 plus the changes below.
