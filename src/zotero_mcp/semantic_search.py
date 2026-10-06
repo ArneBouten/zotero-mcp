@@ -264,8 +264,9 @@ def _acquire_update_lock(lock_path: Path):
     holder on a filesystem with quirky flock semantics) and the user knowingly
     accepts the small double-work risk.
 
-    Windows lacks ``fcntl``; on that platform the function degrades to a
-    no-op and yields True so behaviour matches pre-lock releases.
+    Windows lacks ``fcntl``; there the same exclusion comes from
+    ``msvcrt.locking`` (see :func:`_acquire_update_lock_windows`). Only a
+    platform with neither degrades to a no-op that always proceeds.
     """
     if _force_update_requested():
         yield True
@@ -274,7 +275,7 @@ def _acquire_update_lock(lock_path: Path):
     try:
         import fcntl
     except ImportError:
-        yield True
+        yield from _acquire_update_lock_windows(lock_path)
         return
 
     ensure_private_dir(lock_path.parent)
@@ -299,6 +300,61 @@ def _acquire_update_lock(lock_path: Path):
         yield True
     finally:
         if fd is not None:
+            fd.close()
+
+
+# Byte offset of the Windows lock region: well past the pid the file holds,
+# so another process can still read the pid while the lock is held (a
+# locked byte refuses reads from other handles on Windows).
+_WIN_LOCK_OFFSET = 1 << 20
+
+
+def _acquire_update_lock_windows(lock_path: Path):
+    """Generator body of :func:`_acquire_update_lock` for Windows.
+
+    Without it every update on Windows ran unguarded, so the startup update,
+    a pre-search background update and a manual ``zotero-mcp update-db``
+    could index the same ChromaDB collection at once. ``msvcrt.locking`` is a
+    mandatory byte-range lock owned by the file handle: it is refused to any
+    other handle, in this process or another, and released by the OS if the
+    holder dies, so a crash cannot leave a stale lock.
+    """
+    try:
+        import msvcrt
+    except ImportError:
+        yield True
+        return
+
+    ensure_private_dir(lock_path.parent)
+    fd = None
+    locked = False
+    try:
+        # Create without truncating, then reopen for in-place writes.
+        open(lock_path, "a").close()
+        fd = open(lock_path, "r+")
+        fd.seek(_WIN_LOCK_OFFSET)
+        try:
+            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            locked = True
+        except OSError:
+            yield False
+            return
+        try:
+            fd.seek(0)
+            fd.truncate()
+            fd.write(str(os.getpid()))
+            fd.flush()
+        except Exception:
+            pass
+        yield True
+    finally:
+        if fd is not None:
+            if locked:
+                try:
+                    fd.seek(_WIN_LOCK_OFFSET)
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
             fd.close()
 
 
