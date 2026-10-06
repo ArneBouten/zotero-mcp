@@ -31,6 +31,7 @@ except Exception:
 
 
 from . import _runtime, batch_common, fulltext_cache, gemini_batch, openai_batch
+from . import ocr as _ocr
 from .chroma_client import ChromaClient, IndexReadError, create_chroma_client
 from .client import get_active_group_id, get_zotero_client
 
@@ -395,6 +396,8 @@ _INDEX_SCHEMA_VERSION = 3
 # leaving them metadata-only until someone edits them.
 #   1: pdf-inspector markdown pass only
 #   2: plain-text fallback for scanner OCR layers (#611)
+#   3: OCR of scanned PDFs (zotero_mcp.ocr) — used instead of 2 only on a
+#      run where OCR language data is available
 _EXTRACTOR_REVISION = 2
 
 # The incremental deletion pass refuses (without an explicit opt-in) to
@@ -1164,6 +1167,9 @@ class ZoteroSemanticSearch:
     # Class-level fallback so instances built without __init__ (test doubles
     # do this) still resolve the attribute — None means "use the config".
     extraction_workers: int | None = None
+    #: Revision recorded on failed extractions; _EXTRACTOR_REVISION, plus one
+    #: while OCR is available. Set per run in _get_items_from_local_db.
+    _extractor_revision: int = _EXTRACTOR_REVISION
 
     # Serializes every ChromaDB call made from the streaming index path, where
     # a producer thread classifies one slice while the main thread commits the
@@ -1930,7 +1936,7 @@ class ZoteroSemanticSearch:
             # Mark so we don't retry on every incremental update -- and
             # record which extractor failed, so a better one retries it.
             metadata["has_fulltext"] = "failed"
-            metadata["extractor_revision"] = _EXTRACTOR_REVISION
+            metadata["extractor_revision"] = self._extractor_revision
 
         # Record the attachment-key set (local mode only) so update runs can
         # retry a "failed" item once its attachments change — attaching a file
@@ -2101,6 +2107,7 @@ class ZoteroSemanticSearch:
             collection_keys = None
             config_workers = None
             server_workers = None
+            ocr_cfg = None
             # If semantic_search config file exists, prefer its setting
             try:
                 if self.config_path and os.path.exists(self.config_path):
@@ -2112,6 +2119,7 @@ class ZoteroSemanticSearch:
                         attachment_priority = extraction_cfg.get("attachment_priority")
                         config_workers = extraction_cfg.get("workers")
                         server_workers = extraction_cfg.get("server_workers")
+                        ocr_cfg = extraction_cfg.get("ocr")
                         collection_keys = semantic_cfg.get("collection_keys")
                         # Use config db_path only if no CLI override
                         if not zotero_db_path:
@@ -2120,6 +2128,10 @@ class ZoteroSemanticSearch:
                 pass
 
             workers = self._resolve_extraction_workers(config_workers, server_workers)
+            ocr_settings = _ocr.resolve_settings(ocr_cfg)
+            # Failures recorded before OCR was available are retried once
+            # now that it is (see _extractor_revision).
+            self._extractor_revision = _EXTRACTOR_REVISION + (1 if ocr_settings else 0)
 
             with (
                 suppress_stdout(),
@@ -2133,6 +2145,7 @@ class ZoteroSemanticSearch:
                     # cap, which is what a later run will want to reuse.
                     fulltext_cache_enabled=True,
                     config_path=self.config_path,
+                    ocr_settings=ocr_settings,
                 ) as reader,
             ):
                 # Stamped on every document so a later run can tell that the
@@ -2342,7 +2355,7 @@ class ZoteroSemanticSearch:
                                     if (
                                         chroma_date == item_date
                                         and stored_att_keys == att_keys
-                                        and (not att_keys or failed_revision >= _EXTRACTOR_REVISION)
+                                        and (not att_keys or failed_revision >= self._extractor_revision)
                                     ):
                                         # Nothing changed since the failure — don't retry
                                         should_extract = False

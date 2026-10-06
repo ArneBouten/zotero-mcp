@@ -211,6 +211,31 @@ To read one specific attachment regardless of priority, pass that attachment's o
 
 If worker processes produce nothing for 10 minutes (`ZOTERO_EXTRACTION_STALL_TIMEOUT`, in seconds), they are stopped and the remaining attachments are extracted in-process, so a stalled pool cannot hang an update.
 
+### OCR for scanned PDFs
+
+A PDF that is only page images (a scan without a text layer) gives the extractor nothing, so it used to be indexed by its metadata alone. When Tesseract language data is available, indexing recognises such pages with OCR. PyMuPDF already contains the Tesseract engine, so only the language files are needed:
+
+```bash
+zotero-mcp ocr-setup                       # English
+zotero-mcp ocr-setup --languages eng,nld   # more languages
+```
+
+This downloads the files into `~/.config/zotero-mcp/tessdata` (an existing Tesseract install's `tessdata` folder is found too). From then on every update OCRs new scans, once each — the text is cached — and scans that failed before are retried once. OCR applies when fewer than a fifth of a PDF's pages have text, and only to the empty pages.
+
+```json
+{"semantic_search": {"extraction": {"ocr": {"languages": "eng", "max_pages": 300, "dpi": 300}}}}
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `enabled` | on when language data is found | `false` turns OCR off. |
+| `languages` | `"eng"` | Tesseract codes joined with `+` (`"eng+nld"`). Every extra language slows recognition, so list only what your scans need. |
+| `max_pages` | `300` | Pages recognised per document; about one to two seconds a page. |
+| `dpi` | `300` | Rendering resolution for recognition. |
+| `tessdata` | — | A folder with the `.traineddata` files, if not in a standard place. |
+
+OCR runs only while indexing, never in the interactive tools. The recognised text is searchable through semantic search; the PDF in Zotero itself stays a scan. Large first runs are fastest from the command line (`zotero-mcp update-db --fulltext`), which uses `extraction.workers` processes.
+
 Extracted text is reliable for prose and unreliable for math and tables. `zotero_read_pdf_pages` flags the pages where that happens and can return those pages as images (`format='image'`).
 
 ## Command-line options

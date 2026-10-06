@@ -407,3 +407,44 @@ def test_new_failures_record_the_extractor_revision(monkeypatch):
     metadata = search._create_metadata(items[0])
     assert metadata["has_fulltext"] == "failed"
     assert metadata["extractor_revision"] == semantic_search._EXTRACTOR_REVISION
+
+
+def _with_ocr_available(monkeypatch):
+    from zotero_mcp import ocr
+
+    monkeypatch.setattr(
+        ocr, "resolve_settings", lambda cfg: ocr.OcrSettings(tessdata="/fake/tessdata")
+    )
+
+
+def test_failure_from_before_ocr_is_retried_once_ocr_is_available(monkeypatch):
+    """The scans that failed without OCR get one more try once it is set up."""
+    _with_ocr_available(monkeypatch)
+    stored = {
+        "has_fulltext": "failed",
+        "date_modified": DATE_MODIFIED,
+        "attachment_keys": "ATTKEY1",
+        "extractor_revision": semantic_search._EXTRACTOR_REVISION,
+    }
+    attachments = [("ATTKEY1", "storage:scan.pdf", "application/pdf")]
+    items, reader = _run_scan(monkeypatch, stored, attachments=attachments)
+    assert len(items) == 1
+    assert reader.extract_calls == 1
+
+
+def test_failure_with_ocr_is_not_retried_and_records_the_ocr_revision(monkeypatch):
+    _with_ocr_available(monkeypatch)
+    stored = {
+        "has_fulltext": "failed",
+        "date_modified": DATE_MODIFIED,
+        "attachment_keys": "ATTKEY1",
+        "extractor_revision": semantic_search._EXTRACTOR_REVISION + 1,
+    }
+    attachments = [("ATTKEY1", "storage:scan.pdf", "application/pdf")]
+    items, reader = _run_scan(monkeypatch, stored, attachments=attachments)
+    assert items == [] and reader.extract_calls == 0
+
+    items, reader, search = _run_scan_no_text(monkeypatch, None, attachments=attachments)
+    assert search._create_metadata(items[0])["extractor_revision"] == (
+        semantic_search._EXTRACTOR_REVISION + 1
+    )

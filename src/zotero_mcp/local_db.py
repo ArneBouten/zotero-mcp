@@ -8,6 +8,7 @@ when running in local mode.
 import atexit
 import json
 import logging
+import multiprocessing
 import os
 import platform
 import re
@@ -32,6 +33,7 @@ from .extract import (
     extract_file,
     normalize_attachment_priority,
     pick_by_priority,
+    with_ocr,
 )
 from .utils import _generate_search_variants, _normalize_for_search, is_local_mode
 
@@ -264,7 +266,7 @@ def _terminate_pool(pool: ProcessPoolExecutor) -> None:
         pass
 
 
-def _extract_worker(path_str: str, max_pages: int) -> str:
+def _extract_worker(path_str: str, max_pages: int, ocr_settings=None) -> str:
     """Parse one attachment. Runs in a pool worker, so it must be top-level.
 
     Returns "" rather than raising: a corrupt PDF is ordinary in a real
@@ -272,6 +274,8 @@ def _extract_worker(path_str: str, max_pages: int) -> str:
     """
     try:
         doc = extract_file(Path(path_str), max_pages=max_pages)
+        if ocr_settings is not None:
+            doc = with_ocr(doc, path_str, max_pages=max_pages, settings=ocr_settings)
         return doc.text if doc else ""
     except Exception:
         return ""
@@ -1000,6 +1004,9 @@ class LocalZoteroReader:
     extraction_workers: int = 1
     fulltext_cache_enabled: bool = False
     config_path: str | None = None
+    #: OCR for scanned PDFs (zotero_mcp.ocr.OcrSettings); None = no OCR.
+    #: Only the indexing path sets it — see zotero_mcp.ocr.
+    ocr_settings = None
     _library_labels: dict[int, tuple[int, str]] | None = None
 
     def __init__(
@@ -1010,6 +1017,7 @@ class LocalZoteroReader:
         extraction_workers: int = 1,
         fulltext_cache_enabled: bool = False,
         config_path: str | None = None,
+        ocr_settings=None,
     ):
         """
         Initialize the local database reader.
@@ -1033,6 +1041,8 @@ class LocalZoteroReader:
                 would otherwise poison the cache with truncated text.
             config_path: Semantic-search config path, used only to locate the
                 fulltext cache directory next to it.
+            ocr_settings: zotero_mcp.ocr.OcrSettings to recognise scanned
+                PDFs while indexing; None (the default) never runs OCR.
         """
         self.db_path = db_path or self._find_zotero_db()
         self._connection: sqlite3.Connection | None = None
@@ -1047,6 +1057,7 @@ class LocalZoteroReader:
         self.extraction_workers: int = max(1, int(extraction_workers or 1))
         self.fulltext_cache_enabled: bool = fulltext_cache_enabled
         self.config_path: str | None = config_path
+        self.ocr_settings = ocr_settings
 
     def _find_zotero_db(self) -> str:
         """
@@ -1274,6 +1285,10 @@ class LocalZoteroReader:
                 value = float(os.getenv("ZOTERO_EXTRACTION_STALL_TIMEOUT") or 600)
             except ValueError:
                 value = 600.0
+            if self.ocr_settings is not None:
+                # One worker may be recognising a scanned book: allow ~6 s a
+                # page at the cap (several workers share the CPU).
+                value = max(value, 6.0 * self.ocr_settings.max_pages)
         return max(1.0, float(value))
 
     def _resolve_pdf_max_pages(self) -> int:
@@ -1299,7 +1314,11 @@ class LocalZoteroReader:
         and a caller that has to re-derive them gets a second source of truth
         (#448).
         """
-        return extract_file(file_path, max_pages=self._resolve_pdf_max_pages())
+        max_pages = self._resolve_pdf_max_pages()
+        doc = extract_file(file_path, max_pages=max_pages)
+        if self.ocr_settings is not None:
+            doc = with_ocr(doc, file_path, max_pages=max_pages, settings=self.ocr_settings)
+        return doc
 
     def _get_fulltext_meta_for_item(self, item_id: int):
         meta = []
@@ -1905,8 +1924,13 @@ class LocalZoteroReader:
         deferred: list[tuple[int, str | None, tuple[Path, str] | None]] = []
         # Outstanding work at the moment the pool died, to redo in-process.
         stranded: list[tuple[int, str | None]] = []
+        # "spawn" everywhere, not only where it is the default (Windows,
+        # macOS): forking a parent that has run OCR — Tesseract keeps worker
+        # threads — can copy a held lock into the child and hang it.
         with ProcessPoolExecutor(
-            max_workers=self.extraction_workers, initializer=_init_extraction_worker
+            max_workers=self.extraction_workers,
+            initializer=_init_extraction_worker,
+            mp_context=multiprocessing.get_context("spawn"),
         ) as pool:
             for item_id, item_key in items:
                 chosen = self._resolve_extraction_target(item_id)
@@ -1918,7 +1942,7 @@ class LocalZoteroReader:
                 if hit:
                     yield item_id, hit
                     continue
-                future = pool.submit(_extract_worker, str(target), max_pages)
+                future = pool.submit(_extract_worker, str(target), max_pages, self.ocr_settings)
                 pending[future] = (item_id, item_key, target, attachment_key)
 
             settled: set[Any] = set()

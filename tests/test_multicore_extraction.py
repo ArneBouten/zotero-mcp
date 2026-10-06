@@ -204,7 +204,7 @@ class DeadPool:
 
     survive = 0  # submissions served normally before the pool dies
 
-    def __init__(self, max_workers=None, initializer=None):
+    def __init__(self, max_workers=None, initializer=None, **kwargs):
         self.submitted = 0
 
     def __enter__(self):
@@ -315,7 +315,7 @@ class StalledPool:
 
     complete_first = 0
 
-    def __init__(self, max_workers=None, initializer=None):
+    def __init__(self, max_workers=None, initializer=None, **kwargs):
         self.submitted = 0
         self.terminated = False
         self._processes = {}

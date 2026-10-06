@@ -169,6 +169,27 @@ def _index_integrity(persist_directory: str | None, collection: str | None = Non
     return line
 
 
+def _ocr_status(config_path) -> str:
+    """Whether scanned PDFs get OCR'd when indexed, for the status tool."""
+    try:
+        from zotero_mcp import ocr
+
+        cfg = {}
+        try:
+            with open(config_path) as f:
+                cfg = (json.load(f).get("semantic_search", {}).get("extraction", {}) or {}).get("ocr") or {}
+        except Exception:
+            pass
+        if isinstance(cfg, dict) and cfg.get("enabled") is False:
+            return "off (disabled in config)"
+        settings = ocr.resolve_settings(cfg)
+    except Exception as e:
+        return f"unknown ({e})"
+    if settings is None:
+        return "off — no Tesseract language data found; run `zotero-mcp ocr-setup`"
+    return f"on ({settings.languages}, up to {settings.max_pages} pages per document)"
+
+
 #: How long the client-side advanced-search walk may run before it returns a
 #: partial answer. Kept well under the Zotero API lock's 45s wait bound so a
 #: broad search cannot cascade into "Zotero API busy" on every other tool
@@ -1779,6 +1800,7 @@ def get_search_database_status(*, ctx: Context) -> str:
         )
         if integrity:
             output.append(f"**Index Integrity:** {integrity}")
+        output.append(f"**OCR for Scanned PDFs:** {_ocr_status(config_path)}")
 
         output.append("")
 

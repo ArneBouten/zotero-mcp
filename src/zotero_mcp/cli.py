@@ -871,6 +871,15 @@ def main():
         help="Rebuild even when the check finds no damage (compacts the index)",
     )
 
+    ocr_parser = subparsers.add_parser(
+        "ocr-setup",
+        help="Download Tesseract language data so scanned PDFs are OCR'd when indexed",
+    )
+    ocr_parser.add_argument(
+        "--languages", default="eng",
+        help="Comma-separated Tesseract codes, e.g. eng,nld,fra,deu,spa (default: eng)",
+    )
+
     # DB inspect command (sample and filter indexed docs; also supports stats)
     inspect_parser = subparsers.add_parser("db-inspect", help="Inspect indexed documents or show aggregate stats for the semantic DB")
     inspect_parser.add_argument("--limit", type=int, default=20, help="How many records to show (default: 20)")
@@ -1313,6 +1322,25 @@ def main():
         except Exception as e:
             print(f"Error getting database status: {e}")
             sys.exit(1)
+
+    elif args.command == "ocr-setup":
+        from zotero_mcp import ocr
+
+        langs = [x.strip() for x in args.languages.replace("+", ",").split(",") if x.strip()]
+        print(f"Language data for: {', '.join(langs)}")
+        try:
+            folder = ocr.download_languages(langs)
+        except Exception as e:
+            print(f"Download failed: {e}")
+            sys.exit(1)
+        print(f"Installed in {folder}")
+        settings = ocr.resolve_settings({"languages": "+".join(langs)})
+        if settings is None:
+            print("OCR is still unavailable (is PyMuPDF installed?).")
+            sys.exit(1)
+        print(f"OCR is on for indexing ({settings.languages}). To use more than English,")
+        print('set "extraction": {"ocr": {"languages": "' + settings.languages + '"}} in config.json.')
+        print("Scans that failed before are retried by the next update.")
 
     elif args.command == "db-check":
         sys.exit(_run_db_check())

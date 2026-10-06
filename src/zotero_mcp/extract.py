@@ -411,6 +411,56 @@ def extract_file(
         return None
 
 
+def with_ocr(
+    doc: ExtractedDoc | None,
+    file_path: str | Path,
+    *,
+    max_pages: int | None,
+    settings,
+) -> ExtractedDoc | None:
+    """Fill in a PDF's missing text by OCR, if it is (mostly) a scan.
+
+    ``settings`` is an :class:`zotero_mcp.ocr.OcrSettings` or None (no OCR).
+    Applies when fewer than ``ocr.TEXT_PAGE_SHARE`` of the pages carry text,
+    so a born-digital paper with a few figure-only pages is left alone.
+    Recognises only the empty pages, at most ``settings.max_pages`` of them,
+    and keeps page numbering intact so passages still cite the right page.
+    Returns ``doc`` unchanged when OCR does not apply or yields nothing.
+    """
+    if settings is None or Path(file_path).suffix.lower() != ".pdf":
+        return doc
+    from . import ocr
+
+    try:
+        if doc and doc.page_numbers and len(doc.page_numbers) == len(doc.pages):
+            total = doc.page_count
+            page_map = dict(zip(doc.page_numbers, doc.pages))
+        else:
+            total = ocr.pdf_page_total(file_path)
+            page_map = {}
+        limit = min(total, max_pages) if max_pages and max_pages > 0 else total
+        wanted = list(range(limit))
+        with_text = sum(1 for p in wanted if (page_map.get(p) or "").strip())
+        if with_text >= ocr.TEXT_PAGE_SHARE * max(1, len(wanted)):
+            return doc
+        empty = [p for p in wanted if not (page_map.get(p) or "").strip()]
+        recognised = ocr.ocr_pdf_pages(file_path, empty[: settings.max_pages], settings)
+    except Exception as exc:
+        logger.warning("OCR failed for %s: %s", Path(file_path).name, exc)
+        return doc
+    if not recognised:
+        return doc
+    merged = [page_map.get(p) or recognised.get(p, "") for p in wanted]
+    logger.info("OCR recognised %d page(s) of %s", len(recognised), Path(file_path).name)
+    return _doc_from_pages(
+        merged,
+        page_count=total,
+        source="pdf",
+        page_numbers=tuple(wanted),
+        truncated=limit < total or len(empty) > settings.max_pages,
+    )
+
+
 def _pdf_inspector():
     """Import pdf-inspector, with an actionable message when it's absent.
 

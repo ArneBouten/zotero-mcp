@@ -75,6 +75,16 @@ def pyzotero_local_endpoint():
 
 
 @pytest.fixture(autouse=True)
+def no_ocr_language_data(monkeypatch):
+    """OCR is on whenever Tesseract language data is installed, which would
+    make results depend on the machine running the tests. Off here; the OCR
+    tests opt back in."""
+    from zotero_mcp import ocr
+
+    monkeypatch.setattr(ocr, "find_tessdata", lambda languages, configured=None: None)
+
+
+@pytest.fixture(autouse=True)
 def isolate_local_write_state(monkeypatch, tmp_path):
     """Keep local-write config and capability probing out of the tests.
 
