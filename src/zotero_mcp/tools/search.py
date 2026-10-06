@@ -93,6 +93,35 @@ def _maybe_fire_presearch_sync(search) -> dict | None:
     return {"changed": changed, "finished": not running.is_alive()}
 
 
+def _index_freshness(update_config: dict) -> str | None:
+    """Whether the semantic index reflects the library, for the status tool.
+
+    Compares the active library's fingerprint with the one the last complete
+    update recorded. None when that cannot be told (web mode, no fingerprint
+    recorded yet, unreadable database), so the status simply omits the line.
+    Cheap: one indexed query on zotero.sqlite, no ChromaDB, no model.
+    """
+    stored = update_config.get("library_fingerprints") or {}
+    if not isinstance(stored, dict) or not stored:
+        return None
+    try:
+        group = _client.get_active_group_id()
+        if str(group) not in stored:
+            return None
+        reader = get_local_zotero_reader()
+        if reader is None:
+            return None
+        with reader:
+            current = reader.library_fingerprint(group)
+    except Exception:
+        return None
+    if current is None:
+        return None
+    if current == stored[str(group)]:
+        return "yes — no changes since the last complete update"
+    return "no — the library changed since the last complete update; the next semantic search indexes it"
+
+
 #: How long the client-side advanced-search walk may run before it returns a
 #: partial answer. Kept well under the Zotero API lock's 45s wait bound so a
 #: broad search cannot cascade into "Zotero API busy" on every other tool
@@ -1677,7 +1706,9 @@ def get_search_database_status(*, ctx: Context) -> str:
         update_config = load_update_config(str(config_path))
 
         # Format results
-        output = ["# Semantic Search Database Status", ""]
+        from zotero_mcp._version import __version__
+
+        output = ["# Semantic Search Database Status", "", f"**Server Version:** {__version__}", ""]
 
         output.append("## Collection Information")
         output.append(f"**Name:** {collection_info.get('name', 'Unknown')}")
@@ -1697,6 +1728,9 @@ def get_search_database_status(*, ctx: Context) -> str:
         output.append(f"**Frequency:** {update_config.get('update_frequency', 'manual')}")
         output.append(f"**Last Update:** {update_config.get('last_update', 'Never')}")
         output.append(f"**Should Update Now:** {should_update(update_config)}")
+        freshness = _index_freshness(update_config)
+        if freshness:
+            output.append(f"**Index Current:** {freshness}")
 
         frequency = update_config.get('update_frequency', 'manual')
         if frequency.startswith('every_') and update_config.get('update_days'):

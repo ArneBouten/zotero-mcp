@@ -297,3 +297,42 @@ def test_startup_skips_an_unchanged_library(monkeypatch, tmp_path):
     stub.current = False
     _app._sync_semantic_update()
     assert stub.updates == 1
+
+
+# --- status tool ----------------------------------------------------------------------
+
+
+def test_status_reports_version_and_freshness(monkeypatch, tmp_path):
+    import json
+
+    from conftest import DummyContext
+
+    from zotero_mcp import _version
+    from zotero_mcp import chroma_client as _cc
+    from zotero_mcp import client as _client
+    from zotero_mcp.tools import search as search_module
+
+    db = tmp_path / "zotero.sqlite"
+    conn = _zotero_db(db)
+    _add(conn, 1)
+    fingerprint = _fp(db)
+    cfg = tmp_path / ".config" / "zotero-mcp"
+    cfg.mkdir(parents=True)
+    (cfg / "config.json").write_text(json.dumps({"semantic_search": {"update_config": {
+        "auto_update": True, "update_frequency": "startup", "library_fingerprints": {"0": fingerprint},
+    }}}))
+    monkeypatch.setattr(search_module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(_cc, "read_collection_status", lambda path: {"name": "z", "count": 5})
+    monkeypatch.setattr(_client, "get_active_group_id", lambda: 0)
+    monkeypatch.setattr(search_module, "get_local_zotero_reader", lambda: LocalZoteroReader(db_path=str(db)))
+
+    out = search_module.get_search_database_status(ctx=DummyContext())
+    assert f"**Server Version:** {_version.__version__}" in out
+    assert "**Index Current:** yes" in out
+
+    _add(conn, 2)
+    out = search_module.get_search_database_status(ctx=DummyContext())
+    assert "**Index Current:** no" in out
+
+    (cfg / "config.json").write_text('{"semantic_search": {"update_config": {}}}')
+    assert "Index Current" not in search_module.get_search_database_status(ctx=DummyContext())
