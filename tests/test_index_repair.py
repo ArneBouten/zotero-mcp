@@ -126,3 +126,35 @@ def test_rebuild_refuses_an_occupied_work_dir(index, tmp_path):
     (tmp_path / "work" / "chroma_db").mkdir(parents=True)
     with pytest.raises(IndexRepairError):
         rebuild_vector_index(path, tmp_path / "work", progress=lambda m: None)
+
+
+def test_status_reports_integrity_and_caches_it(index, monkeypatch):
+    from zotero_mcp.tools import search as search_tools
+
+    path, _ = index
+    search_tools._INTEGRITY_CACHE.clear()
+    assert search_tools._index_integrity(str(path), COLLECTION).startswith("intact")
+
+    calls = []
+    import zotero_mcp.index_repair as repair
+
+    original = repair.check_vector_index
+
+    def counting(*a, **kw):
+        calls.append(1)
+        return original(*a, **kw)
+
+    monkeypatch.setattr(repair, "check_vector_index", counting)
+    search_tools._index_integrity(str(path), COLLECTION)
+    assert calls == []  # unchanged files: served from the cache
+
+    _duplicate_label(_segment(path), 10, 11)
+    line = search_tools._index_integrity(str(path), COLLECTION)
+    assert line.startswith("DAMAGED") and "db-rebuild-vectors" in line
+
+
+def test_status_integrity_is_silent_without_an_index(tmp_path):
+    from zotero_mcp.tools import search as search_tools
+
+    assert search_tools._index_integrity(None) is None
+    assert search_tools._index_integrity(str(tmp_path)) is None
