@@ -712,6 +712,51 @@ def _drop_missing_documents(results: dict) -> int:
     return dropped
 
 
+# Passage-pool sizing for chunked search. A query embedding sits closest to
+# the papers most *about* it, and each such paper contributes many near-
+# identical passages -- more so when every passage carries its paper's title
+# and abstract. A pool sized at a few passages per wanted result is therefore
+# swallowed by one or two papers (8 requested, 3 returned; 5 requested, one
+# book returned). The pool is fetched wide and thinned per paper instead.
+_DEFAULT_PASSAGE_POOL = 200
+_MAX_PASSAGE_POOL = 1000
+_DEFAULT_PASSAGES_PER_ITEM = 2
+
+
+def _diversify_passages(results: dict, max_per_item: int, max_items: int | None) -> int:
+    """Thin a passage hit list in place: few passages per paper, few papers.
+
+    Keeps hits in their existing (retrieval) order, at most ``max_per_item``
+    passages from any one item and passages from at most ``max_items``
+    distinct items. Returns the number of hits kept. Rows are grouped by the
+    item key in front of ``#`` in the id, the same key enrichment groups by.
+
+    Keeping more than one passage per paper matters when a re-ranker follows:
+    the retriever's best passage of a paper is not always the one that answers
+    the query, and the re-ranker can only promote a passage it is shown.
+    """
+    ids = (results.get("ids") or [[]])[0] or []
+    if not ids:
+        return 0
+    per_item: dict[str, int] = {}
+    keep: list[int] = []
+    for i, raw_id in enumerate(ids):
+        key = str(raw_id).split("#", 1)[0]
+        seen = per_item.get(key, 0)
+        if seen >= max_per_item:
+            continue
+        if seen == 0 and max_items is not None and len(per_item) >= max_items:
+            continue
+        per_item[key] = seen + 1
+        keep.append(i)
+    if len(keep) != len(ids):
+        for column in ("ids", "distances", "documents", "metadatas"):
+            rows = results.get(column)
+            if rows and rows[0]:
+                rows[0] = [rows[0][i] for i in keep if i < len(rows[0])]
+    return len(keep)
+
+
 class CrossEncoderReranker:
     """Optional cross-encoder re-ranker for semantic search results."""
 
@@ -4346,6 +4391,22 @@ class ZoteroSemanticSearch:
         return aggregate
 
 
+    def _passages_per_item(self) -> int:
+        """How many passages of one paper may compete for a search's results."""
+        try:
+            value = int(self._chunking_config.get("max_passages_per_item", _DEFAULT_PASSAGES_PER_ITEM))
+        except (TypeError, ValueError):
+            value = _DEFAULT_PASSAGES_PER_ITEM
+        return max(1, value)
+
+    def _passage_pool_size(self, limit: int, per_item: int) -> int:
+        """How many passages to retrieve before thinning them per paper."""
+        try:
+            pool = int(self._chunking_config.get("search_pool", _DEFAULT_PASSAGE_POOL))
+        except (TypeError, ValueError):
+            pool = _DEFAULT_PASSAGE_POOL
+        return max(limit * per_item, min(_MAX_PASSAGE_POOL, max(pool, limit * 20)))
+
     def search(self,
                query: str,
                limit: int = 10,
@@ -4370,14 +4431,17 @@ class ZoteroSemanticSearch:
             reranker = self._get_reranker()
             multiplier = max(1, int(self._reranker_config.get("candidate_multiplier", 3) or 3))
             chunked = self._chunking_enabled
-            fetch_limit = limit
             if chunked:
-                # Passages are grouped back to items downstream, so fetch
-                # several chunks per desired item to still surface ~limit
-                # distinct papers.
-                fetch_limit = max(fetch_limit, limit * 4)
-            if reranker:
-                fetch_limit = max(fetch_limit, limit * multiplier)
+                # A passage index returns many hits per paper, and the more a
+                # paper is about the query the more of its passages crowd the
+                # top of the list. Fetch a wide pool, then keep a few passages
+                # per paper (_diversify_passages) so `limit` distinct papers
+                # survive to the re-ranker and the result list.
+                per_item = self._passages_per_item()
+                fetch_limit = self._passage_pool_size(limit, per_item)
+            else:
+                per_item = 1
+                fetch_limit = limit * multiplier if reranker else limit
 
             where = filters
             if group_id is not None:
@@ -4388,6 +4452,17 @@ class ZoteroSemanticSearch:
             results = self.chroma_client.search(query_texts=[query], n_results=fetch_limit, where=where)
 
             _drop_missing_documents(results)
+            pool_size = len((results.get("ids") or [[]])[0] or [])
+
+            if chunked:
+                # With a re-ranker, hand it `multiplier` papers per wanted
+                # result to choose from; without one, retrieval order is final
+                # and `limit` papers are all that can be shown.
+                _diversify_passages(
+                    results,
+                    max_per_item=per_item,
+                    max_items=limit * multiplier if reranker else limit,
+                )
 
             rerank_info: dict[str, Any] | None = None
             if reranker and results.get("documents") and results["documents"][0]:
@@ -4425,6 +4500,7 @@ class ZoteroSemanticSearch:
                 "group_id": group_id,
                 "results": enriched_results,
                 "total_found": len(enriched_results),
+                "passages_considered": pool_size if chunked else None,
                 "rerank": rerank_info,
             }
 

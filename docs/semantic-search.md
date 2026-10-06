@@ -159,6 +159,19 @@ Two consequences:
   Unlabelled passages are still searched; only a `section` filter excludes
   them.
 
+### How many papers a search returns
+
+A passage index returns many hits per paper, and the paper most about the
+query contributes the most of them. Search therefore retrieves a wide pool of
+passages, keeps at most a few per paper, and only then groups them into
+results, so asking for 10 results returns 10 papers rather than 10 passages of
+one book.
+
+| Key (under `chunking`) | Default | What it does |
+|---|---|---|
+| `search_pool` | `200` | Passages retrieved per search before thinning. Raised automatically to 20 × `limit`, capped at 1000. |
+| `max_passages_per_item` | `2` | Passages of one paper that may compete. More than one lets a re-ranker pick the passage that answers the query rather than the one nearest in embedding space. |
+
 ## Re-ranking
 
 A re-ranker reads the query and each candidate passage together and scores how
