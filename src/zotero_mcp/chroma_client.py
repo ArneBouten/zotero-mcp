@@ -42,6 +42,10 @@ except ImportError as e:
 logger = logging.getLogger(__name__)
 
 
+class IndexReadError(RuntimeError):
+    """The ChromaDB index exists but a read from it failed."""
+
+
 class ChromaClient:
     """ChromaDB client for Zotero semantic search."""
 
@@ -419,15 +423,26 @@ class ChromaClient:
             doc_id: Item key (or full document id) to look up
 
         Returns:
-            Metadata dictionary if the item is indexed, None otherwise
+            Metadata dictionary if the item is indexed, None otherwise.
+
+        Raises:
+            IndexReadError: the index could not be read.
         """
         try:
             result = self.collection.get(ids=[doc_id, f"{doc_id}#0"], include=["metadatas"])
-            if result['ids'] and result['metadatas']:
-                return result['metadatas'][0]
-            return None
-        except Exception:
-            return None
+        except Exception as e:
+            # Not "not indexed": an index that cannot be read must stop the
+            # caller. The update scan used to take this for a missing item,
+            # mark it for re-embedding and press on into a damaged index,
+            # where the next read hung (ChromaDB keeps the failed change
+            # pending and retries it on every read).
+            raise IndexReadError(
+                f"The semantic search index could not be read ({e}). "
+                "Run `zotero-mcp db-check`."
+            ) from e
+        if result['ids'] and result['metadatas']:
+            return result['metadatas'][0]
+        return None
 
     def get_existing_ids(self, ids: list[str]) -> set[str]:
         """Return the subset of ids that already exist in the collection."""

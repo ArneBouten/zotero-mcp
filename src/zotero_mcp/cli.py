@@ -181,6 +181,109 @@ def _should_preimport_semantic(platform: str, config_path: str) -> bool:
         return False
 
 
+def _print_index_check(check) -> None:
+    print(f"Vector elements: {check.elements}; ids mapped: {check.ids_mapped}")
+    pending = ", ".join(f"{n} x op{op}" for op, n in sorted(check.pending.items())) or "none"
+    print(f"Unsaved changes in the log: {pending}")
+    if check.healthy:
+        print("Index OK: every indexed passage has exactly one vector.")
+        return
+    print(
+        f"DAMAGED: {check.duplicate_labels} label(s) stored twice, "
+        f"{check.missing_labels} id(s) pointing at a missing vector; "
+        f"{len(check.untrusted_ids)} passage(s) in {len(check.untrusted_items)} item(s) affected."
+    )
+    print("Any change to those items makes ChromaDB fail ('Failed to apply logs to the hnsw")
+    print("segment writer') and later reads hang. Fix: close Claude Desktop and every other")
+    print("MCP client, then run: zotero-mcp db-rebuild-vectors")
+
+
+def _run_db_check() -> int:
+    from zotero_mcp.index_repair import IndexRepairError, check_vector_index
+
+    chroma_dir = Path.home() / ".config" / "zotero-mcp" / "chroma_db"
+    try:
+        check = check_vector_index(chroma_dir)
+    except (IndexRepairError, OSError, KeyError) as e:
+        print(f"Could not check {chroma_dir}: {e}")
+        return 2
+    _print_index_check(check)
+    return 0 if check.healthy else 1
+
+
+def _run_db_rebuild(work_dir: str | None, force: bool) -> int:
+    import datetime as _dt
+
+    from zotero_mcp.index_repair import IndexRepairError, check_vector_index
+    from zotero_mcp.semantic_search import _acquire_update_lock
+
+    base = Path.home() / ".config" / "zotero-mcp"
+    chroma_dir = base / "chroma_db"
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M")
+    work = Path(work_dir) if work_dir else base / f"rebuild-{stamp}"
+
+    with _acquire_update_lock(base / "update.lock") as acquired:
+        if not acquired:
+            print("An index update is running (update.lock is held). Close Claude Desktop and")
+            print("every other MCP client, then run this again.")
+            return 2
+        try:
+            check = check_vector_index(chroma_dir)
+        except (IndexRepairError, OSError, KeyError) as e:
+            print(f"Could not check {chroma_dir}: {e}")
+            return 2
+        _print_index_check(check)
+        if check.healthy and not force:
+            print("Nothing to rebuild (use --force to compact anyway).")
+            return 0
+        # In a child process: ChromaDB keeps its files open for the life of
+        # the interpreter, and Windows will not rename a folder with open
+        # files, so the swap below must happen after it has exited.
+        work.mkdir(parents=True, exist_ok=True)
+        request = work / "rebuild-request.json"
+        request.write_text(json.dumps({
+            "chroma_dir": str(chroma_dir),
+            "work_dir": str(work),
+            "skip_items": sorted(check.untrusted_items),
+        }))
+        proc = subprocess.run([sys.executable, "-m", "zotero_mcp.index_repair", str(request)])
+        result_path = work / "rebuild-result.json"
+        if proc.returncode != 0 or not result_path.exists():
+            print("Rebuild failed (see above). The index was not changed.")
+            return 2
+        result = json.loads(result_path.read_text())
+        new_dir = Path(result["target"])
+        verify = check_vector_index(new_dir)
+        if not verify.healthy:
+            print(f"The rebuilt index in {new_dir} failed its own check; the index was not changed.")
+            return 2
+        old_dir = base / f"chroma_db-before-rebuild-{stamp}"
+        try:
+            chroma_dir.rename(old_dir)
+        except OSError as e:
+            print(f"Could not move the old index aside ({e}). Is Claude Desktop or another MCP")
+            print(f"client still running? The rebuilt index is ready in {new_dir};")
+            print("close them and run this again, or swap the folders by hand.")
+            return 2
+        new_dir.rename(chroma_dir)
+        shutil.rmtree(result["source_copy"], ignore_errors=True)
+        for leftover in (request, result_path):
+            leftover.unlink(missing_ok=True)
+        try:
+            work.rmdir()
+        except OSError:
+            pass
+        print(f"The rebuilt index is in place; the old one is kept as {old_dir}.")
+        if result["left_out_items"]:
+            print(
+                f"{len(result['left_out_items'])} item(s) were left out and will be indexed again by "
+                "the next update: " + ", ".join(result["left_out_items"][:20])
+                + (" ..." if len(result["left_out_items"]) > 20 else "")
+            )
+            print("Run now:  zotero-mcp update-db --fulltext")
+        return 0
+
+
 def _preimport_semantic_search_on_main_thread() -> None:
     """Load ChromaDB here rather than let an AnyIO worker thread do it (#485).
 
@@ -749,6 +852,25 @@ def main():
     db_status_parser.add_argument("--config-path",
                                  help="Path to semantic search configuration file")
 
+    # Index check / repair
+    subparsers.add_parser(
+        "db-check",
+        help="Check the semantic search index files for damage (read-only)",
+    )
+    rebuild_parser = subparsers.add_parser(
+        "db-rebuild-vectors",
+        help="Rebuild a damaged semantic search index from its stored vectors "
+             "(no re-embedding); close every MCP client first",
+    )
+    rebuild_parser.add_argument(
+        "--work-dir",
+        help="Folder for the rebuild (default: ~/.config/zotero-mcp/rebuild-<timestamp>)",
+    )
+    rebuild_parser.add_argument(
+        "--force", action="store_true",
+        help="Rebuild even when the check finds no damage (compacts the index)",
+    )
+
     # DB inspect command (sample and filter indexed docs; also supports stats)
     inspect_parser = subparsers.add_parser("db-inspect", help="Inspect indexed documents or show aggregate stats for the semantic DB")
     inspect_parser.add_argument("--limit", type=int, default=20, help="How many records to show (default: 20)")
@@ -1191,6 +1313,12 @@ def main():
         except Exception as e:
             print(f"Error getting database status: {e}")
             sys.exit(1)
+
+    elif args.command == "db-check":
+        sys.exit(_run_db_check())
+
+    elif args.command == "db-rebuild-vectors":
+        sys.exit(_run_db_rebuild(args.work_dir, args.force))
 
     elif args.command == "db-inspect":
         # Setup Zotero environment variables
