@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.7] - 2026-10-07
+
+### Added
+
+- **OCR for scanned PDFs while indexing.** Run `zotero-mcp ocr-setup` once (downloads Tesseract language data, about 15 MB for English); from then on scans are recognised when indexed, once each, and the scans that failed before are retried. See [Configuration](docs/configuration.md#ocr-for-scanned-pdfs).
+
 ## [0.13.2+arne.6] - 2026-10-06
 
 ### Fixed
