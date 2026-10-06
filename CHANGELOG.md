@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.4] - 2026-10-06
+
+### Added
+
+- **`zotero-mcp db-check` and `zotero-mcp db-rebuild-vectors`.** The check finds passages whose vector the index no longer holds reliably — the damage two processes writing the index at once leave behind. The rebuild copies every intact passage into a fresh index without re-embedding, keeps the old one, and leaves damaged items for the next update to index again. See [Troubleshooting](docs/troubleshooting.md).
+
+### Fixed
+
+- **A damaged index made updates and searches hang.** An index read that fails is now an error that stops the update, instead of being taken for "not indexed" — which sent items back for embedding into the same index, whose next read then hung.
+
 ## [0.13.2+arne.3] - 2026-10-06
 
 ### Fixed
