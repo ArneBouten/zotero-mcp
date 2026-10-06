@@ -303,3 +303,108 @@ def test_worker_count_is_clamped_to_at_least_one():
     reader = LocalZoteroReader.__new__(LocalZoteroReader)
     assert LocalZoteroReader.extraction_workers == 1
     assert reader.fulltext_cache_enabled is False
+
+
+class StalledPool:
+    """An executor whose workers never return anything.
+
+    What a Windows MCP server showed: six spawned workers stuck at
+    interpreter start-up (about 10 MB each), the indexing run waiting on
+    them forever. Some submissions may complete first; the rest never do.
+    """
+
+    complete_first = 0
+
+    def __init__(self, max_workers=None, initializer=None):
+        self.submitted = 0
+        self.terminated = False
+        self._processes = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def submit(self, fn, *args):
+        future = Future()
+        self.submitted += 1
+        if self.submitted <= self.complete_first:
+            future.set_result(fn(*args))
+        return future  # otherwise: pending forever
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        self.terminated = True
+
+
+def test_stalled_pool_falls_back_to_in_process_extraction(files, monkeypatch):
+    items = [(i, f"KEY{i}") for i in range(1, len(files) + 1)]
+    healthy = dict(FakeReader(files, workers=1).extract_fulltext_for_items(items))
+
+    pools = []
+
+    class Pool(StalledPool):
+        complete_first = 2
+
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            pools.append(self)
+
+    monkeypatch.setattr(local_db, "ProcessPoolExecutor", Pool)
+    reader = FakeReader(files, workers=4)
+    reader.extraction_stall_timeout = 0.2
+    got = dict(reader.extract_fulltext_for_items(items))
+
+    assert got == healthy  # every item extracted exactly as sequentially
+    assert pools and pools[0].terminated
+
+
+def test_stall_timeout_comes_from_env_or_default(monkeypatch, files):
+    reader = FakeReader(files)
+    monkeypatch.delenv("ZOTERO_EXTRACTION_STALL_TIMEOUT", raising=False)
+    assert reader._resolve_extraction_stall_timeout() == 600
+    monkeypatch.setenv("ZOTERO_EXTRACTION_STALL_TIMEOUT", "45")
+    assert reader._resolve_extraction_stall_timeout() == 45
+    monkeypatch.setenv("ZOTERO_EXTRACTION_STALL_TIMEOUT", "junk")
+    assert reader._resolve_extraction_stall_timeout() == 600
+    reader.extraction_stall_timeout = 5
+    assert reader._resolve_extraction_stall_timeout() == 5
+
+
+class TestExtractionWorkerResolution:
+    """Process pools stay out of the MCP server unless asked for."""
+
+    @staticmethod
+    def _search(cli_workers=None):
+        from zotero_mcp.semantic_search import ZoteroSemanticSearch
+
+        search = ZoteroSemanticSearch.__new__(ZoteroSemanticSearch)
+        search.extraction_workers = cli_workers
+        return search
+
+    @pytest.fixture(autouse=True)
+    def _cores(self, monkeypatch):
+        monkeypatch.setattr(os, "cpu_count", lambda: 8)
+
+    def test_cli_uses_config_workers(self, monkeypatch):
+        from zotero_mcp import _runtime
+
+        monkeypatch.setattr(_runtime, "in_server_process", False)
+        assert self._search()._resolve_extraction_workers(6) == 6
+        assert self._search()._resolve_extraction_workers(None) == 1
+        assert self._search(cli_workers=3)._resolve_extraction_workers(6) == 3
+        assert self._search()._resolve_extraction_workers(64) == 8
+
+    def test_server_extracts_in_process_by_default(self, monkeypatch):
+        from zotero_mcp import _runtime
+
+        monkeypatch.setattr(_runtime, "in_server_process", True)
+        assert self._search()._resolve_extraction_workers(6) == 1
+        assert self._search()._resolve_extraction_workers(6, server_workers=4) == 4
+
+    def test_mark_server_process(self, monkeypatch):
+        from zotero_mcp import _runtime
+
+        monkeypatch.setattr(_runtime, "in_server_process", False)
+        _runtime.mark_server_process()
+        assert _runtime.in_server_process is True
