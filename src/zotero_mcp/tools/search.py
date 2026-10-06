@@ -27,36 +27,70 @@ CASCADE_TIMEOUT = 60  # seconds — total budget for the entire fallback cascade
 # Pre-search background sync debounce: at most one fire-and-forget sync per
 # this many seconds, shared across all semantic_search tool invocations.
 _PRESEARCH_SYNC_MIN_INTERVAL = 60.0
+# When the library is known to have changed since the last complete index
+# update, the search waits this long for the update before answering, so a
+# paper added a minute ago can be in this answer rather than the next one.
+# Configurable as update_config.presearch_wait_seconds (0 disables waiting).
+_PRESEARCH_WAIT_SECONDS = 25.0
 _last_presearch_sync_ts: float = 0.0
 _presearch_sync_lock = _threading.Lock()
+_presearch_thread: _threading.Thread | None = None
 
 
-def _maybe_fire_presearch_sync(search) -> None:
-    """Schedule a background semantic-search DB update if auto-update is due.
+def _maybe_fire_presearch_sync(search) -> dict | None:
+    """Bring the semantic index up to date around a search, if it is due.
 
-    Runs in a daemon thread so the current tool call returns immediately.
-    Intentionally swallows exceptions — a failed background sync must never
-    surface as a search-tool error to the user.
+    Returns None when nothing was started (no update due, or the library is
+    unchanged since the last complete update), else ``{"changed": bool |
+    None, "finished": bool}``: whether the library is known to have changed,
+    and whether the update finished before this search ran.
+
+    The update runs in a daemon thread. When the library is known to have
+    changed, the search waits up to ``presearch_wait_seconds`` for it; when
+    that is unknown (web mode, or no fingerprint recorded yet) it does not
+    wait, as before. Exceptions are swallowed -- a failed background sync must
+    never surface as a search-tool error.
     """
-    global _last_presearch_sync_ts
+    global _last_presearch_sync_ts, _presearch_thread
     try:
         if not search.should_update_database():
-            return
+            return None
     except Exception:
-        return
+        return None
+    try:
+        current = search.index_is_current()
+    except Exception:
+        current = None
+    if current is True:
+        return None
+
+    try:
+        wait = float(search.update_config.get("presearch_wait_seconds", _PRESEARCH_WAIT_SECONDS))
+    except Exception:
+        wait = _PRESEARCH_WAIT_SECONDS
+
     now = _time.monotonic()
     with _presearch_sync_lock:
-        if now - _last_presearch_sync_ts < _PRESEARCH_SYNC_MIN_INTERVAL:
-            return
-        _last_presearch_sync_ts = now
+        running = _presearch_thread if (_presearch_thread and _presearch_thread.is_alive()) else None
+        if running is None and now - _last_presearch_sync_ts < _PRESEARCH_SYNC_MIN_INTERVAL:
+            return None
+        if running is None:
+            _last_presearch_sync_ts = now
 
-    def _run():
-        try:
-            search.update_database(extract_fulltext=_utils.is_local_mode())
-        except Exception as e:
-            _search_logger.debug(f"Background pre-search sync failed: {e}")
+            def _run():
+                try:
+                    search.update_database(extract_fulltext=_utils.is_local_mode())
+                except Exception as e:
+                    _search_logger.debug(f"Background pre-search sync failed: {e}")
 
-    _threading.Thread(target=_run, daemon=True, name="zmcp-presearch-sync").start()
+            running = _threading.Thread(target=_run, daemon=True, name="zmcp-presearch-sync")
+            _presearch_thread = running
+            running.start()
+
+    if current is False and wait > 0:
+        running.join(wait)
+    changed = None if current is None else not current
+    return {"changed": changed, "finished": not running.is_alive()}
 
 
 #: How long the client-side advanced-search walk may run before it returns a
@@ -1383,7 +1417,7 @@ def semantic_search(
 
         # Fire-and-forget: if auto-update is due, kick off a background sync
         # so subsequent searches see fresh library state. Never blocks here.
-        _maybe_fire_presearch_sync(search)
+        sync = _maybe_fire_presearch_sync(search)
 
         # Perform search
         results = search.search(query=query, limit=limit, filters=filters, group_id=group_id)
@@ -1403,6 +1437,12 @@ def semantic_search(
             output.append("")
         output.append(f"Found {len(search_results)} similar items:")
         output.append("")
+        if sync and sync.get("changed") and not sync.get("finished"):
+            output.append(
+                "*Your library changed since the last index update; the update is "
+                "still running, so the newest additions may be missing here.*"
+            )
+            output.append("")
 
         for i, result in enumerate(search_results, 1):
             similarity_score = result.get("similarity_score", 0)

@@ -2181,6 +2181,50 @@ class LocalZoteroReader:
         ).fetchone()
         return row[0] if row else None
 
+    def library_fingerprint(self, group_id: int = PERSONAL_LIBRARY_GROUP_ID) -> str | None:
+        """A short string that changes whenever one library's items change.
+
+        Built from the item count, the highest itemID and the latest
+        modification stamps in that library, plus its trash count. Adding,
+        editing, annotating, trashing or deleting anything -- papers, notes,
+        attachments, annotations all live in ``items`` -- moves at least one
+        of them. A cheap way to tell "nothing to index" from "something
+        changed" without scanning the library. None if the library is not in
+        this database.
+        """
+        library_id = self._resolve_scope_library_id(group_id)
+        if library_id is None:
+            return None
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*), COALESCE(MAX(itemID), 0),
+                       COALESCE(MAX(clientDateModified), ''), COALESCE(MAX(dateModified), '')
+                FROM items WHERE libraryID = ?
+                """,
+                (library_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Schemas without clientDateModified (test fixtures, very old
+            # databases): dateModified alone still moves on every edit.
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(itemID), 0), COALESCE(MAX(dateModified), '') "
+                "FROM items WHERE libraryID = ?",
+                (library_id,),
+            ).fetchone()
+        parts = [str(v) for v in tuple(row)]
+        try:
+            trashed = conn.execute(
+                "SELECT COUNT(*) FROM deletedItems d JOIN items i ON i.itemID = d.itemID "
+                "WHERE i.libraryID = ?",
+                (library_id,),
+            ).fetchone()[0]
+            parts.append(str(trashed))
+        except sqlite3.OperationalError:
+            pass  # a database without a trash table (test fixtures)
+        return f"{library_id}:" + "|".join(parts)
+
     def _resolve_scope_library_id(self, group_id: int) -> int | None:
         """Translate a codebase-wide group_id (0 = personal) to this
         database's local ``libraryID``, or None if no such library is
