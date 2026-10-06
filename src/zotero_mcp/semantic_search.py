@@ -1951,6 +1951,52 @@ class ZoteroSemanticSearch:
 
         return metadata
 
+    def library_fingerprint(self, group_id: int | None = None) -> str | None:
+        """The local library's change fingerprint, or None when unknowable.
+
+        None outside local mode, or when the database cannot be read; callers
+        then fall back to the configured update schedule alone.
+        """
+        try:
+            group = self._client_group_id() if group_id is None else int(group_id)
+            reader = self._open_local_reader()
+            if reader is None:
+                return None
+            with reader:
+                return reader.library_fingerprint(group)
+        except Exception as e:
+            logger.debug(f"library fingerprint unavailable: {e}")
+            return None
+
+    def _remember_fingerprint(self, group_id: int | None, fingerprint: str | None) -> None:
+        if fingerprint is None or group_id is None:
+            return
+        stored = self.update_config.get("library_fingerprints")
+        if not isinstance(stored, dict):
+            stored = {}
+        stored[str(group_id)] = fingerprint
+        self.update_config["library_fingerprints"] = stored
+
+    def index_is_current(self) -> bool | None:
+        """Whether the index already reflects the library, if that is knowable.
+
+        True: the library has not changed since the last complete update, so
+        an update would find nothing to do. False: it has. None: no
+        fingerprint is available (web mode, or never recorded), so only the
+        configured schedule can say.
+        """
+        try:
+            group = self._client_group_id()
+        except Exception:
+            return None
+        stored = (self.update_config.get("library_fingerprints") or {}).get(str(group))
+        if not stored:
+            return None
+        current = self.library_fingerprint(group)
+        if current is None:
+            return None
+        return current == stored
+
     def should_update_database(self) -> bool:
         """Check if the database should be updated based on configuration."""
         return should_update(self.update_config)
@@ -3106,6 +3152,13 @@ class ZoteroSemanticSearch:
             # zotero_switch_library cannot re-point half a run at another
             # library.
             self._run_group_id = self._client_group_id()
+            # Fingerprint the library as this run starts reading it. Stored
+            # only when the run completes cleanly, so "fingerprint matches"
+            # reliably means "nothing to index"; a change made mid-run leaves
+            # the stored value behind the library and the next check re-runs.
+            run_fingerprint = (
+                self.library_fingerprint(self._run_group_id) if limit is None else None
+            )
 
             # --force-rebuild resets the ENTIRE collection but repopulates
             # only the active library. Combinations that would silently drop
@@ -3280,6 +3333,7 @@ class ZoteroSemanticSearch:
                 except Exception:
                     pass
                 self.update_config["last_update"] = datetime.now().isoformat()
+                self._remember_fingerprint(self._run_group_id, run_fingerprint)
                 self._save_update_config(
                     last_sync_version=target_sync_version,
                     library_key=str(self._run_group_id),
@@ -3559,6 +3613,7 @@ class ZoteroSemanticSearch:
             if stats.get("deletion_skipped_reason") or retry_fail:
                 self._save_update_config()
             else:
+                self._remember_fingerprint(self._run_group_id, run_fingerprint)
                 self._save_update_config(
                     last_sync_version=target_sync_version,
                     library_key=str(self._run_group_id),

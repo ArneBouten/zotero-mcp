@@ -77,6 +77,23 @@ asynchronous: submit the batch, wait for completion, then import the embeddings.
 - **Daily**: Update once per day automatically
 - **Every N days**: Set custom interval
 
+With any automatic setting, an update that is due also runs in the background
+when you search. In local mode the server keeps a fingerprint of your library
+(item count, newest item, latest modification, trash) from the last complete
+update, which makes two things possible:
+
+- **Nothing changed, nothing scanned.** An unchanged library skips the update
+  at startup and at search time, instead of re-reading every item.
+- **Something changed, this search sees it.** When the library has changed —
+  you just added a paper — the search waits for the update before answering,
+  up to `update_config.presearch_wait_seconds` (25 by default; 0 never
+  waits). If the update needs longer, the search answers anyway and says the
+  newest additions may be missing; they appear in the next search.
+
+Updates take a lock in `~/.config/zotero-mcp/update.lock`, on Windows as well
+as macOS and Linux, so the startup update, a search-time update and a manual
+`zotero-mcp update-db` never index the same collection at once.
+
 ## Building and updating the index
 
 After setup, initialize your search database:

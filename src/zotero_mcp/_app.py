@@ -61,6 +61,13 @@ def _sync_semantic_update() -> None:
     search = create_semantic_search(str(config_path))
     if not search.should_update_database():
         return
+    # "Due" by schedule is not the same as "something to do": with
+    # update_frequency "startup" every start is due, and a full scan of a
+    # large library costs minutes of disk and CPU for nothing when the
+    # library has not changed since the last complete update.
+    if search.index_is_current() is True:
+        sys.stderr.write("Semantic search index is current; no update needed.\n")
+        return
 
     sys.stderr.write("Auto-updating semantic search database...\n")
     stats = search.update_database(extract_fulltext=is_local_mode())
