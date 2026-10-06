@@ -10,6 +10,7 @@ from zotero_mcp.tools import (  # noqa: F401
     retrieval,
     search,
     synthesis,
+    word,
     write,
 )
 
