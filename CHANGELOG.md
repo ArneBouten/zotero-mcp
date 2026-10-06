@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.6] - 2026-10-06
+
+### Fixed
+
+- **A rebuilt index could miss the best passages.** `db-rebuild-vectors` copied paper by paper with ChromaDB's default graph settings, and searches got stuck among one paper's near-identical passages. It now copies in random order and builds a denser graph (32 neighbours, ef_construction 200, ef_search 400). Run `zotero-mcp db-rebuild-vectors --force` once if you rebuilt with arne.4 or arne.5.
+
 ## [0.13.2+arne.5] - 2026-10-06
 
 ### Added
