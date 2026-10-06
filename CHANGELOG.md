@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.5] - 2026-10-06
+
+### Added
+
+- **The status tool reports whether the vector index is intact** ("Index Integrity"), checked from the index files directly so it answers even when the index is damaged.
+
 ## [0.13.2+arne.4] - 2026-10-06
 
 ### Added
