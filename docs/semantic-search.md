@@ -110,6 +110,39 @@ zotero-mcp db-status
 
 How much of each PDF is extracted, and which attachment is read when an item has several, is set in [Text extraction settings](configuration.md#text-extraction-settings).
 
+## Passage indexing
+
+By default each item is one vector: its metadata, abstract and as much full
+text as the embedding model accepts. With chunking on, each item is indexed as
+overlapping passages instead, so a search can land on page 14 of a paper and
+quote it, and long documents are searchable past the model's input limit.
+
+```jsonc
+"semantic_search": {
+  "chunking": {
+    "enabled": true,
+    "chunk_size": 1500,            // characters per passage
+    "overlap": 200,                // characters shared by neighbouring passages
+    "max_chunks_per_item": 20      // guard against very long documents
+  }
+}
+```
+
+Changing any of these needs a rebuild (`zotero-mcp update-db --fulltext --force-rebuild`).
+
+### How many papers a search returns
+
+A passage index returns many hits per paper, and the paper most about the
+query contributes the most of them. Search therefore retrieves a wide pool of
+passages, keeps at most a few per paper, and only then groups them into
+results, so asking for 10 results returns 10 papers rather than 10 passages of
+one book.
+
+| Key (under `chunking`) | Default | What it does |
+|---|---|---|
+| `search_pool` | `200` | Passages retrieved per search before thinning. Raised automatically to 20 × `limit`, capped at 1000. |
+| `max_passages_per_item` | `2` | Passages of one paper that may compete. More than one lets a re-ranker pick the passage that answers the query rather than the one nearest in embedding space. |
+
 ## Re-ranking
 
 A re-ranker reads the query and each candidate passage together and scores how
