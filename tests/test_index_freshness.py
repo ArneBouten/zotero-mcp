@@ -288,7 +288,7 @@ def test_startup_skips_an_unchanged_library(monkeypatch, tmp_path):
     (cfg / "config.json").write_text(
         '{"semantic_search": {"update_config": {"auto_update": true, "update_frequency": "startup"}}}'
     )
-    monkeypatch.setattr(_app.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(semantic_search.Path, "home", lambda: tmp_path)
     stub = _StubSearch(current=True)
     monkeypatch.setattr(semantic_search, "create_semantic_search", lambda *a, **k: stub)
     _app._sync_semantic_update()

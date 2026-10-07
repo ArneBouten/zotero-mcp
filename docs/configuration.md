@@ -106,6 +106,9 @@ Environment variables set in the shell you launch a client from (for example `cl
   database is located automatically: a data directory configured in Zotero's
   preferences (read from the profile's `prefs.js`) is tried first, then the
   default `~/Zotero` location.
+- `ZOTERO_MCP_UPDATE_IN_PROCESS=1`: Run the startup index update inside the server
+  instead of in a separate background process (see
+  [Update frequency](semantic-search.md#update-frequency))
 
 **Read backend:**
 

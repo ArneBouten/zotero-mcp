@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -128,6 +129,10 @@ def ocr_pdf_pages(path: str | Path, pages: list[int], settings: OcrSettings) -> 
     import pymupdf
 
     out: dict[int, str] = {}
+    announce = len(pages) >= ANNOUNCE_PAGES
+    started = time.monotonic()
+    if announce:
+        _progress(f"OCR: {Path(path).name}, {len(pages)} pages (can take a while)")
     with pymupdf.open(str(path)) as doc:
         for number in pages:
             if not 0 <= number < doc.page_count:
@@ -146,7 +151,26 @@ def ocr_pdf_pages(path: str | Path, pages: list[int], settings: OcrSettings) -> 
                 continue
             if text and text.strip():
                 out[number] = text
+    if announce:
+        _progress(
+            f"OCR done: {Path(path).name}, text on {len(out)} of {len(pages)} pages "
+            f"in {time.monotonic() - started:.0f}s"
+        )
     return out
+
+
+#: OCR of at least this many pages is announced on stderr, so a long scan
+#: does not look like a hung update.
+ANNOUNCE_PAGES = 10
+
+
+def _progress(message: str) -> None:
+    """One line on stderr, clearing an in-place progress line first."""
+    try:
+        sys.stderr.write(f"\r  {message}{' ' * 20}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 def pdf_page_total(path: str | Path) -> int:

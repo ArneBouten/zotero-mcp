@@ -22,13 +22,13 @@ async def test_lifespan_yields_before_sync_update_completes():
         entered.set()
         proceed.wait(timeout=5)
 
-    with patch("zotero_mcp._app._sync_semantic_update", slow_update):
+    with patch("zotero_mcp._app._start_background_update", slow_update):
         async with server_lifespan(None) as ctx:
             assert ctx == {}
             # Yield to the event loop so the background task can start.
             await asyncio.sleep(0.1)
             assert entered.is_set(), \
-                "_sync_semantic_update was never called in the background"
+                "_start_background_update was never called in the background"
         proceed.set()
 
 
@@ -40,7 +40,7 @@ async def test_lifespan_yields_when_update_raises():
     def exploding_update():
         raise RuntimeError("ChromaDB exploded")
 
-    with patch("zotero_mcp._app._sync_semantic_update", exploding_update):
+    with patch("zotero_mcp._app._start_background_update", exploding_update):
         async with server_lifespan(None) as ctx:
             assert ctx == {}
             await asyncio.sleep(0.05)
@@ -54,7 +54,7 @@ async def test_lifespan_yields_when_config_missing():
     def noop_update():
         pass
 
-    with patch("zotero_mcp._app._sync_semantic_update", noop_update):
+    with patch("zotero_mcp._app._start_background_update", noop_update):
         async with server_lifespan(None) as ctx:
             assert ctx == {}
 

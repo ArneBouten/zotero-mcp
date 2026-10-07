@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.9] - 2026-10-07
+
+### Fixed
+
+- **The server could stop answering while it caught up on new papers.** The startup update extracted and OCR'd new attachments inside the server process, and a few dozen of them kept it too busy to answer: Claude Desktop reported "Request timed out", killed the server, and the next start began the same catch-up again. The startup update now runs in a separate background process at low priority, and the server answers straight away. `ZOTERO_MCP_UPDATE_IN_PROCESS=1` restores the old behaviour.
+- **Papers indexed by another process were missing from a running server's searches.** Passages added by the startup update or a manual `zotero-mcp update-db` while the server was running were counted but not found until a restart. The server now notices the change and loads them before its next search.
+
+### Changed
+
+- **Long OCR runs are announced.** OCR of a document of 10 pages or more prints the file name and page count when it starts and how long it took when it ends, so a long scan no longer looks like a hung update.
+
 ## [0.13.2+arne.8] - 2026-10-07
 
 ### Added

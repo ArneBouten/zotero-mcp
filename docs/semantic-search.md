@@ -94,6 +94,17 @@ Updates take a lock in `~/.config/zotero-mcp/update.lock`, on Windows as well
 as macOS and Linux, so the startup update, a search-time update and a manual
 `zotero-mcp update-db` never index the same collection at once.
 
+The startup update runs in a separate background process, at low priority, so
+the server answers requests straight away even while it extracts and OCRs a
+batch of new papers. Its progress goes to the server log. If the server stops
+first, the update carries on and finishes; one that is cut short anyway picks
+up where it left off at the next start. Set `ZOTERO_MCP_UPDATE_IN_PROCESS=1`
+to run it inside the server instead, as before 0.13.2+arne.9.
+
+A server that is already running notices when another process (the startup
+update, or a manual `zotero-mcp update-db`) has added to the index, and loads
+the new passages before its next search, without a restart.
+
 ## Building and updating the index
 
 After setup, initialize your search database:

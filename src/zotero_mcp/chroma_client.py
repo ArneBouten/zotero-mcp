@@ -28,6 +28,7 @@ from zotero_mcp.embeddings.providers import (  # noqa: F401
     ensure_embedding_functions_registered,
 )
 from zotero_mcp.embeddings.registry import create_embedding_function, merge_env_config
+from zotero_mcp.index_generation import refresh_if_changed_elsewhere
 from zotero_mcp.utils import ensure_private_dir, install_hint, suppress_stdout
 
 try:
@@ -80,6 +81,11 @@ class ChromaClient:
         # the registry lookup used when a persisted collection config is
         # rebuilt below (issue #382).
         ensure_embedding_functions_registered()
+
+        # Vectors another process added since this process loaded the index
+        # are invisible to the cached copy; load it afresh in that case.
+        if refresh_if_changed_elsewhere(self.persist_directory):
+            logger.info("The index was updated by another process; reloading it.")
 
         # Initialize ChromaDB client with stdout suppression
         with suppress_stdout():
@@ -676,6 +682,7 @@ def read_collection_status(
         "persist_directory": persist_directory,
     }
 
+    refresh_if_changed_elsewhere(persist_directory)
     try:
         with suppress_stdout():
             client = chromadb.PersistentClient(

@@ -1447,6 +1447,14 @@ class ZoteroSemanticSearch:
         provider = "openai" if resolved_openai else "gemini"
         return resolved_openai or resolved_gemini, provider
 
+    def _mark_index_changed(self) -> None:
+        """Let other processes' servers know this run changed the index."""
+        persist = getattr(self.chroma_client, "persist_directory", None)
+        if isinstance(persist, (str, os.PathLike)):
+            from zotero_mcp.index_generation import mark_index_changed
+
+            mark_index_changed(persist)
+
     def _client_group_id(self) -> int:
         """group_id of the library ``self.zotero_client`` is actually scoped to.
 
@@ -3687,6 +3695,11 @@ class ZoteroSemanticSearch:
             return stats
         finally:
             self._run_group_id = None
+            if force_full_rebuild or any(
+                stats.get(k) for k in
+                ("added_items", "updated_items", "recovered_items", "deleted_items")
+            ):
+                self._mark_index_changed()
             # Release the update flock on every exit path. Paired with the
             # __enter__ call above; the "not acquired" branch releases
             # separately before its early return, so this finally only runs
@@ -4494,6 +4507,8 @@ class ZoteroSemanticSearch:
                     )
             return stats
         finally:
+            if stats.get("added_items") or stats.get("updated_items"):
+                self._mark_index_changed()
             lock_cm.__exit__(None, None, None)
 
     def import_openai_batch(self, batch_ids: list[str] | None = None) -> dict[str, Any]:
