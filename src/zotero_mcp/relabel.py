@@ -13,6 +13,7 @@ are cached per file, so a second run costs nothing.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import logging
 import time
@@ -26,6 +27,8 @@ from zotero_mcp import structure as st
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-flash-latest"
+# Cached Gemini answers are only reused for the same prompt wording.
+_PROMPT_TAG = hashlib.sha1(st.GEMINI_PROMPT.encode("utf-8")).hexdigest()[:8]
 
 
 def structure_dir() -> Path:
@@ -198,7 +201,7 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
                     sig = st.file_signature(pdf)
 
                     def cached_ask(prompt, _sig=sig):
-                        ck = f"{_sig}-{st.STRUCTURE_VERSION}-{model.replace('/', '_')}"
+                        ck = f"{_sig}-{st.STRUCTURE_VERSION}-{_PROMPT_TAG}-{model.replace('/', '_')}"
                         hit = cache.get(ck)
                         if hit is not None:
                             return hit

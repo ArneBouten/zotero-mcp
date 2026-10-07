@@ -41,7 +41,13 @@ In a test on 40 random articles from this library, 35 got their printed pages an
    - a structured abstract ("Background: … Methods: …");
    - author roles after the references ("Methodology: A.B.").
 
-**APA papers** have no "Introduction" heading. When a paper has a Method heading and no Introduction, the text between the abstract and Method is labelled Introduction.
+**Introductions, with or without a heading.** In papers with a Method heading, text before Method that no heading names is labelled Introduction. This covers:
+
+- APA papers without an "Introduction" heading: the introduction starts after the abstract;
+- topical headings before Method ("Risky play and development"): they are part of the introduction;
+- papers that do have an "Introduction" heading: the introduction starts there, and keywords or highlights above it keep their own label.
+
+"Background", "Literature review" and "The present study" open the Introduction section themselves, whether or not an "Introduction" heading came before them.
 
 **Combined headings** such as "Results and Discussion" get both: `section` Results and `section_2` Discussion, as the JATS standard publishers use allows. A search filtered on Discussion finds them too, and the Location line shows "Results & Discussion".
 

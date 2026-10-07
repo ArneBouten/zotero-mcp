@@ -309,3 +309,36 @@ def test_combined_sections_and_apa_introductions():
     assert _with_second_section({"section": "Discussion"}) == {
         "$or": [{"section": "Discussion"}, {"section_2": "Discussion"}]}
     assert _with_second_section({"item_type": "book"}) == {"item_type": "book"}
+
+
+def test_introductions_with_and_without_a_heading():
+    body = "Children who play outside take risks, and theory says why. " * 30
+    method = "Method Participants Forty children. " * 10
+
+    def sections(headings, chunks):
+        structure = st.Structure(pages=6, headings=headings, headings_from="gemini")
+        return [m.get("section") for m in st.label_passages(chunks, structure, "journalArticle")[0]]
+
+    # APA with topical headings inside the introduction, and no Introduction heading.
+    chunks = [_chunk(0, 1, 0, "Title. Abstract We asked why children play."),
+              _chunk(1, 1, 60, "Abstract We asked why children take risks in play. " * 4),
+              _chunk(2, 2, 3000, body), _chunk(3, 3, 5000, "Risky play and development " + body),
+              _chunk(4, 4, 7000, "The Present Study " + body), _chunk(5, 5, 9000, method)]
+    assert sections([st.Heading(1, "Abstract", 1, "Abstract"),
+                     st.Heading(3, "Risky play and development", 1, None),
+                     st.Heading(4, "The Present Study", 1, "Introduction"),
+                     st.Heading(5, "Method", 1, "Methods")], chunks) == [
+        "Abstract", "Abstract", "Introduction", "Introduction", "Introduction", "Methods"]
+
+    # A paper that does have "1. Introduction": keywords before it stay unlabelled,
+    # a topical section after it, before Method, is introduction too.
+    chunks = [_chunk(0, 1, 0, "Title. Abstract We asked why children play."),
+              _chunk(1, 1, 60, "Abstract We asked why children take risks in play. " * 4),
+              _chunk(2, 1, 400, "Keywords: risky play; outdoor play; children"),
+              _chunk(3, 2, 3000, "1. Introduction " + body),
+              _chunk(4, 3, 5000, "2. Outdoor play in Belgium " + body), _chunk(5, 4, 7000, method)]
+    assert sections([st.Heading(1, "Abstract", 1, "Abstract"),
+                     st.Heading(2, "1. Introduction", 1, "Introduction"),
+                     st.Heading(3, "2. Outdoor play in Belgium", 1, None),
+                     st.Heading(4, "3. Method", 1, "Methods")], chunks) == [
+        "Abstract", "Abstract", "Abstract", "Introduction", "Introduction", "Methods"]

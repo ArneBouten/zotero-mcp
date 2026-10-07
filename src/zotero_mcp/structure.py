@@ -49,7 +49,7 @@ STRUCTURE_VERSION = 1
 SECTIONS = ("Abstract", "Introduction", "Methods", "Results", "Discussion", "Conclusion",
             "References", "Appendix", "Back matter")
 
-# Section names in English, Dutch, French, Spanish and German. Matched against
+# Section names in English, Dutch, French, Spanish, Portuguese, Italian and German. Matched against
 # the whole heading after its numbering, or its first part before "and", ":"
 # or "&" ("Results and discussion" -> Results).
 _ALIASES: tuple[tuple[str, str], ...] = (
@@ -86,6 +86,12 @@ _NUMBERING_RE = re.compile(r"^\s*(?:(?:\d{1,2}(?:\.\d{1,2}){0,3}|[ivxlc]{1,6}|[a
 _CHAPTER_RE = re.compile(r"^\s*(?:chapter|hoofdstuk|chapitre|cap[ií]tulo|kapitel|part|deel|partie|parte|teil)"
                          r"\s+(?:\d{1,3}|[ivxlc]{1,7}|one|two|three|four|five|six|seven|eight|nine|ten|"
                          r"eleven|twelve|een|twee|drie|vier|vijf|zes|zeven|acht|negen|tien)\b", re.I)
+
+
+# A heading that names the introduction itself (not "Background" or "The present
+# study", which APA papers use inside an introduction that has no heading).
+_INTRO_WORD_RE = re.compile(r"\b(?:introduction|inleiding|introductie|introduccion|introducao|introduzione|"
+                            r"einleitung)\b")
 
 
 def fold(text: str) -> str:
@@ -646,8 +652,10 @@ abstract (such as "Background:" or "Methods:" within the abstract itself).
 For each heading give its level ({levels}) and the section it opens, one of:
 Abstract, Introduction, Methods, Results, Discussion, Conclusion, References, Appendix, Back matter, Other.
 Sub-sections inherit the section of their parent ("Participants" under Methods is Methods).
-In APA-style papers the introduction has no "Introduction" heading (the paper's title may be repeated above
-it); return that repeated title, if it is a candidate, with section Introduction.
+Many APA-style papers have no "Introduction" heading (the paper's title may be repeated above the
+introduction); then return that repeated title, if it is a candidate, with section Introduction. Papers that
+do have an "Introduction" heading use it. Topical headings between the introduction and the first Method
+heading ("Risky play and development", "The present study") are part of the introduction.
 {contents_rule}Answer only with the JSON."""
 
 
@@ -834,13 +842,19 @@ def label_passages(chunks: list[dict], st: Structure | None, item_type: str = ""
             report["mismatch"] = True
         marks.sort(key=lambda m: m[0])
 
-    # APA papers have no "Introduction" heading: the text between the abstract
-    # and the first Method heading is the introduction.
-    intro_end = None
-    if marks and not (st and st.book_like) and not any(h.section == "Introduction" for _p, h in marks):
+    # Everything before the first Method heading that no heading names is the
+    # introduction: APA papers start it without a heading, and many papers put it
+    # under topical headings ("Risky play and development") before Method. It
+    # starts at an "Introduction" heading when the paper has one, else after the
+    # abstract (at most about 300 words).
+    intro_start = intro_end = None
+    if marks and not (st and st.book_like):
         intro_end = next((pos for pos, h in marks if h.section == "Methods"), None)
-    # An abstract is at most about 300 words: what follows it, before Method, is the introduction.
-    abstract_end = next((pos + 2500 for pos, h in marks if h.section == "Abstract"), 0)
+        if intro_end is not None:
+            intro_start = next((pos for pos, h in marks if pos < intro_end and _INTRO_WORD_RE.search(fold(h.text))),
+                               None)
+            if intro_start is None:
+                intro_start = next((pos + 2500 for pos, h in marks if h.section == "Abstract"), 0)
 
     n = len(chunks)
     out = []
@@ -876,7 +890,7 @@ def label_passages(chunks: list[dict], st: Structure | None, item_type: str = ""
                 meta["heading"] = " › ".join(h.text for h in chain)[:200]
                 if st and st.book_like and chain[0].level == 1:
                     meta["chapter"] = chain[0].text[:150]
-        if intro_end is not None and idx and abstract_end <= probe < intro_end \
+        if intro_end is not None and idx and intro_start <= probe < intro_end \
                 and meta.get("section") in (None, "Abstract"):
             meta["section"] = "Introduction"
         page = meta.get("page")
