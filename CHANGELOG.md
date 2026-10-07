@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.15] - 2026-10-07
+
+### Fixed
+
+- **ResearchGate could flag the whole network.** Links to ResearchGate and Academia.edu are no longer requested plainly; they go straight to the browser step. The browser step opens at most 20 ResearchGate pages per run (`researchgate_per_run`), 25–45 seconds apart, and stops using ResearchGate for the run when it shows its "unusual activity" page.
+- **"Sign in with Google" was refused in the login window.** `--browser-login` now opens Chrome as an ordinary program with the fetcher's profile, so every sign-in method works. The automated window keeps Chrome's sandbox on.
+
 ## [0.13.2+arne.14] - 2026-10-07
 
 ### Added
