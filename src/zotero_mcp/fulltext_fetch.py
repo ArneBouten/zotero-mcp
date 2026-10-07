@@ -1325,7 +1325,9 @@ def find_pdf_for(
     return None, None, None, attempts
 
 
-_FIGSHARE_RE = re.compile(r"/articles/(?:[^/]+/)*(\d{6,})/?$")
+#: The article id: the first all-digit path part after /articles/, whether
+#: the link is to the page or to one of its files (…/9544121/files/17174…).
+_FIGSHARE_RE = re.compile(r"/articles/(?:[^/]+/)*?(\d{6,})(?:/|$)")
 
 
 def _figshare_pdf(url: str, http: Http) -> str | None:

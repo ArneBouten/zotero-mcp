@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`zotero_fetch_fulltext` timed out in Cowork.** Tool calls that reach the PC through Cowork must answer within a minute, and one paper can take longer. The fetch now runs in its own process: the call returns the report if it finishes within about 40 seconds, otherwise a run id, and the new `zotero_fetch_fulltext_status` tool gives the progress or the result. The ZenRows unblocker now gives up after 60 seconds instead of 120.
+- **Links to a file inside a figshare repository were not recognised** (Loughborough's `…/articles/<title>/9544121/files/…`); only page links were. Both now go through the figshare API.
 
 ### Changed
 
