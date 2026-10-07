@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.19] - 2026-10-07
+
+### Fixed
+
+- **The metadata audit filled nothing when it read items from the local database.** That database leaves empty fields out of an item, and the audit took a missing field for one the item type does not have. Empty fields are now filled whichever way the item was read.
+- **False proposals from registry quirks.** HTML entities in Crossref names (`Accident Analysis &amp; Prevention`), subtitles Crossref keeps in a separate field, series notes in book titles ("(Routledge Revivals)"), ISBN hyphens and degrees inside author names ("Lambiase MS") no longer count as differences.
+- **Wrong abstracts.** OpenAlex's abstract is used only for articles, conference papers and preprints, and only when it shares words with the title: it had given a book chapter another work's abstract, and an old article a citation line.
+
+### Changed
+
+- An article without page numbers gets its article number in Pages (e.g. `e70024`), as APA asks and as most of the library already does.
+- The place of publication is no longer filled: APA 7 does not use it, and Crossref's version is often a whole imprint line.
+
 ## [0.13.2+arne.18] - 2026-10-07
 
 ### Added

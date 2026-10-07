@@ -147,7 +147,7 @@ def test_pages_and_dois_compare_as_values():
 
 
 def test_a_doi_goes_to_extra_for_types_without_a_doi_field():
-    data = {"itemType": "book", "extra": "Citation Key: x\nDOI: old"}
+    data = {"itemType": "webpage", "extra": "Citation Key: x\nDOI: old"}
     ma._set_field(data, ma.Change("DOI", "", "10.1/new", "fill"))
     assert data["extra"] == "DOI: 10.1/new\nCitation Key: x"
 
@@ -248,3 +248,54 @@ def test_reject_tag_is_processed_on_the_next_run():
     report = ma.run(apply=False, log=lambda m: None, settings=ff.Settings(), http=http,
                     backend=FakeBackend(items), pdf_text=lambda k: "", workers=1)
     assert "volume" not in {c.field for c in report.audits[0].changes}
+
+
+# --- what the first real run showed --------------------------------------------------
+
+
+def test_fields_missing_from_a_local_item_are_filled():
+    # The local database leaves empty fields out of the item altogether.
+    raw = item()
+    for name in ("volume", "issue", "pages", "ISSN"):
+        del raw["data"][name]
+    a, _ = audit(raw)
+    assert {("fill", "volume"), ("fill", "issue"), ("fill", "pages"), ("fill", "ISSN")} <= kinds(a)
+
+
+def test_article_numbers_fill_empty_pages():
+    rec = json.loads(json.dumps(CROSSREF))
+    del rec["message"]["page"]
+    rec["message"]["article-number"] = "e70024"
+    raw = item()
+    del raw["data"]["pages"]
+    a, _ = audit(raw, {"api.crossref.org": (200, rec)})
+    fill = next(c for c in a.changes if c.field == "pages")
+    assert (fill.kind, fill.new, fill.why) == ("fill", "e70024", "article number")
+    assert not any("without pages" in f for f in a.flags)
+
+
+def test_registry_quirks_are_not_differences():
+    rec = json.loads(json.dumps(CROSSREF))
+    m = rec["message"]
+    m["container-title"] = ["American Psychologist &amp; Friends"]
+    m["title"] = ["Self-determination theory"]
+    m["subtitle"] = ["And the facilitation of intrinsic motivation"]
+    m["author"] = [{"family": "Ryan", "given": "Richard M"}, {"family": "Deci PhD", "given": "Edward L"}]
+    a, _ = audit(item(publicationTitle="American Psychologist & Friends",
+                      title="Self-determination theory: And the facilitation of intrinsic motivation"),
+                 {"api.crossref.org": (200, rec)})
+    assert not {c.field for c in a.changes} & {"title", "publicationTitle"}
+    assert ("propose", "creators") not in kinds(a)
+    # The registry dropped a subtitle you have: yours stays.
+    m["subtitle"] = []
+    a, _ = audit(item(title="Self-determination theory: And the facilitation of intrinsic motivation"),
+                 {"api.crossref.org": (200, rec)})
+    assert "title" not in {c.field for c in a.changes}
+
+
+def test_series_notes_and_isbn_hyphens_are_ignored():
+    assert ma.same("bookTitle", "Directions in Person-Environment Research and Practice",
+                   "Directions in Person-Environment Research and Practice (Routledge Revivals)")
+    assert ma.same("ISBN", "978-1-85168-480-9", "9781851684809")
+    assert ma.same("ISBN", "1851684808 9781851684809", "1-85168-480-8")
+    assert not ma.same("ISBN", "978-1-85168-480-9", "9780415000000")

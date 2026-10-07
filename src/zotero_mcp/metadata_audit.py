@@ -85,6 +85,7 @@ class Record:
     kind: str = ""
     container: str = ""             # book title for a chapter
     isbn: str = ""
+    article_number: str = ""        # e.g. "e70024": APA's stand-in for pages
 
 
 def _strip_tags(text: str) -> str:
@@ -100,6 +101,17 @@ def _date_from_parts(obj: dict | None) -> str:
     return "-".join(f"{p:02d}" if i else str(p) for i, p in enumerate(parts))
 
 
+#: Degrees publishers sometimes put into a name ("Lambiase MS").
+_DEGREES = {"ms", "msc", "ma", "ba", "bsc", "phd", "md", "mph", "rn", "dphil", "edd", "psyd", "med", "mba"}
+
+
+def _clean_family(name: str) -> str:
+    words = _strip_tags(name).replace(",", " ").split()
+    while len(words) > 1 and words[-1].lower().replace(".", "") in _DEGREES:
+        words.pop()
+    return " ".join(words)
+
+
 def crossref(doi: str, http: ff.Http, settings: ff.Settings) -> Record | None:
     headers = {"User-Agent": f"zotero-mcp metadata-audit (mailto:{settings.email})"} if settings.email else None
     status, data = http.api_json(f"https://api.crossref.org/works/{quote(doi, safe='/')}", headers=headers)
@@ -109,19 +121,25 @@ def crossref(doi: str, http: ff.Http, settings: ff.Settings) -> Record | None:
     # APA dates a journal article by its issue; fall back to the first publication.
     date = _date_from_parts(m.get("published-print")) or _date_from_parts(m.get("issued"))
     kind = m.get("type", "")
-    container = (m.get("container-title") or [""])[0]
+    container = _strip_tags((m.get("container-title") or [""])[0])
+    title = _strip_tags((m.get("title") or [""])[0]).rstrip(".")
+    subtitle = _strip_tags((m.get("subtitle") or [""])[0]).rstrip(".")
+    if subtitle and ff._fold(subtitle) not in ff._fold(title):
+        title = f"{title}: {subtitle}"
     return Record(
         source="Crossref",
-        title=_strip_tags((m.get("title") or [""])[0]).rstrip("."),
-        authors=[(a.get("family", ""), a.get("given", "")) for a in m.get("author") or [] if a.get("family")],
+        title=title,
+        authors=[(_clean_family(a["family"]), _strip_tags(a.get("given", ""))) for a in m.get("author") or []
+                 if a.get("family")],
         year=date[:4], date=date,
         journal=container if kind in ("journal-article", "proceedings-article") else "",
         container=container if kind in ("book-chapter", "book-section", "reference-entry") else "",
         issn=list(m.get("ISSN") or []),
         volume=str(m.get("volume") or ""), issue=str(m.get("issue") or ""), pages=str(m.get("page") or ""),
         doi=(m.get("DOI") or doi).lower(), publisher=m.get("publisher") or "",
-        place=m.get("publisher-location") or "", abstract=_strip_tags(m.get("abstract") or ""),
-        kind=kind, isbn=(m.get("ISBN") or [""])[0],
+        place=m.get("publisher-location") or "",
+        abstract=re.sub(r"^abstract\b\s*[:.]?\s*", "", _strip_tags(m.get("abstract") or ""), flags=re.I),
+        kind=kind, isbn=(m.get("ISBN") or [""])[0], article_number=str(m.get("article-number") or ""),
     )
 
 
@@ -164,9 +182,9 @@ def _openalex_record(work: dict, by: str) -> Record:
             authors.append((family, name[: -len(family)].strip()))
     return Record(
         source="OpenAlex", by=by,
-        title=(work.get("title") or "").rstrip("."), authors=authors,
+        title=_strip_tags(work.get("title") or "").rstrip("."), authors=authors,
         year=str(work.get("publication_year") or ""), date=str(work.get("publication_date") or ""),
-        journal=source.get("display_name", "") if source.get("type") == "journal" else "",
+        journal=_strip_tags(source.get("display_name", "")) if source.get("type") == "journal" else "",
         issn=list(source.get("issn") or []),
         volume=str(biblio.get("volume") or ""), issue=str(biblio.get("issue") or ""), pages=pages,
         doi=re.sub(r"^https?://doi\.org/", "", work.get("doi") or "").lower(),
@@ -214,11 +232,11 @@ def europepmc(doi: str, http: ff.Http, settings: ff.Settings) -> Record | None:
     x = hits[0]
     ji = x.get("journalInfo") or {}
     return Record(
-        source="PubMed", title=(x.get("title") or "").rstrip("."),
+        source="PubMed", title=_strip_tags(x.get("title") or "").rstrip("."),
         authors=[(a.get("lastName", ""), a.get("firstName", "")) for a in (x.get("authorList") or {}).get("author") or []
                  if a.get("lastName")],
         year=str(ji.get("yearOfPublication") or x.get("pubYear") or ""),
-        journal=(ji.get("journal") or {}).get("title", ""),
+        journal=_strip_tags((ji.get("journal") or {}).get("title", "")),
         volume=str(ji.get("volume") or ""), issue=str(ji.get("issue") or ""), pages=str(x.get("pageInfo") or ""),
         doi=doi.lower(), abstract=_strip_tags(x.get("abstractText") or ""),
     )
@@ -268,7 +286,41 @@ def norm_doi(value: str) -> str:
     return re.sub(r"^(https?://(dx\.)?doi\.org/|doi:\s*)", "", (value or "").strip(), flags=re.I).lower()
 
 
+def isbn13s(value: str) -> set[str]:
+    """Every ISBN in a field, as ISBN-13 digits ("978-1-85168-480-9" -> "9781851684809")."""
+    out = set()
+    for raw in re.findall(r"[\dXx][\dXx\-]{8,16}[\dXx]", str(value or "")):
+        d = re.sub(r"[^0-9Xx]", "", raw).upper()
+        if len(d) == 10:
+            core = "978" + d[:9]
+            check = (10 - sum(int(c) * (3 if i % 2 else 1) for i, c in enumerate(core)) % 10) % 10
+            d = core + str(check)
+        if len(d) == 13:
+            out.add(d)
+    return out
+
+
+def norm_title(value: str) -> str:
+    """A title without a trailing series note ("... (Routledge Revivals)") and punctuation."""
+    v = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]\s*$", "", str(value or ""))
+    return ff._fold(v)
+
+
+def same_title(mine: str, theirs: str) -> bool:
+    """Equal, or one is the other's main title and the other only adds a subtitle."""
+    a, b = norm_title(mine), norm_title(theirs)
+    if a == b:
+        return True
+    main_a = ff._fold(re.split(r"[:?!.]\s", str(mine or ""), maxsplit=1)[0])
+    # The registry dropped the subtitle you have: keep yours.
+    return bool(b) and main_a == b and len(a) > len(b)
+
+
 def same(field_name: str, a: str, b: str) -> bool:
+    if field_name == "ISBN":
+        return bool(isbn13s(a) & isbn13s(b))
+    if field_name in ("title", "bookTitle"):
+        return same_title(a, b)
     if field_name == "pages":
         return norm_pages(a) == norm_pages(b)
     if field_name in ("volume", "issue"):
@@ -381,10 +433,11 @@ def _fields_for(item_type: str) -> list[str]:
         "journalArticle": ["publicationTitle", "volume", "issue", "pages", "ISSN"],
         "conferencePaper": ["pages", "publisher"],
         "preprint": [],
-        "book": ["publisher", "place", "ISBN"],
-        "bookSection": ["bookTitle", "pages", "publisher", "place"],
+        # Not the place: APA 7 leaves it out, and the registries' versions are messy.
+        "book": ["publisher", "ISBN"],
+        "bookSection": ["bookTitle", "pages", "publisher"],
         "thesis": [],
-        "report": ["publisher", "place"],
+        "report": ["publisher"],
     }.get(item_type, [])
 
 
@@ -445,14 +498,20 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
             found.append("the item's PDF")
         return found
 
+    # Every field listed is valid for its item type. The local database leaves
+    # empty fields out of an item, so absence means empty, not "no such field".
     for name in _fields_for(info.item_type):
-        if name not in data and name not in ("year", "DOI"):
-            continue
         new = record_value(ref, name)
+        if name == "pages" and not new and ref.article_number and not _current(data, name).strip():
+            # Articles without page numbers: APA cites the article number instead.
+            audit.changes.append(Change(name, "", ref.article_number, "fill", [ref.source], "article number"))
+            continue
         if not new and name == "abstractNote" and not _current(data, name).strip() and (ref.doi or info.doi):
             # Crossref often has no abstract; OpenAlex usually does.
-            oa = ref if ref.source == "OpenAlex" else openalex_by_doi(ref.doi or info.doi, http, settings)
-            if oa and oa.abstract:
+            oa = None
+            if info.item_type in ("journalArticle", "conferencePaper", "preprint"):
+                oa = ref if ref.source == "OpenAlex" else openalex_by_doi(ref.doi or info.doi, http, settings)
+            if oa and _plausible_abstract(oa.abstract, info.title):
                 audit.changes.append(Change(name, "", oa.abstract, "fill", ["OpenAlex"]))
             continue
         if not new:
@@ -472,8 +531,8 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
                 continue
         if same(name, old, new):
             continue
-        if name == "title":
-            if ff.title_similarity(old, new) < 0.97:
+        if name in ("title", "bookTitle"):
+            if ff.title_similarity(norm_title(old), norm_title(new)) < 0.97:
                 audit.changes.append(Change(name, old, new, "propose", [ref.source], "the wording differs"))
             continue
         if name not in AUTO_CORRECT or ref.by not in ("doi", "isbn"):
@@ -497,6 +556,15 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
     rejected = ctx.rejected.get(info.key) or {}
     audit.changes = [c for c in audit.changes if not (c.kind == "propose" and rejected.get(c.field) == c.new)]
     return audit
+
+
+def _plausible_abstract(text: str, title: str) -> bool:
+    """OpenAlex's abstracts are sometimes another work's, or a citation stub."""
+    if len(text or "") < 200 or re.match(r"^\(?\d{4}\)", text.strip()):
+        return False
+    words = {w for w in ff._fold(title).split() if len(w) >= 5}
+    found = sum(1 for w in words if w in ff._fold(text))
+    return found >= min(2, len(words))
 
 
 def _compare_authors(audit: ItemAudit, data: dict, ref: Record) -> None:
@@ -581,7 +649,8 @@ def _set_field(data: dict, change: Change) -> None:
     if name == "year":
         old = str(data.get("date") or "")
         data["date"] = re.sub(r"\d{4}", new, old, count=1) if re.search(r"\d{4}", old) else new
-    elif name == "DOI" and "DOI" not in data:
+    elif name == "DOI" and "DOI" not in data and data.get("itemType") not in AUDITED_TYPES:
+        # Every audited type has a DOI field (Zotero 7); older types keep it in Extra.
         extra = data.get("extra") or ""
         extra = re.sub(r"^DOI:.*$\n?", "", extra, flags=re.I | re.M).strip()
         data["extra"] = (f"DOI: {new}\n{extra}").strip()

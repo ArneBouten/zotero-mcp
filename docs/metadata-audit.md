@@ -16,10 +16,10 @@ Checked item types: journal articles, conference papers, preprints, books, book 
 
 ## The rules
 
-- **Empty fields are filled** from the reference record: volume, issue, pages, DOI, ISSN/ISBN, publisher, place, journal or book title, abstract (OpenAlex when the registry has none), and first names where only initials are given.
+- **Empty fields are filled** from the reference record: volume, issue, pages (the article number when an article has no page numbers, as APA wants), DOI, ISSN/ISBN, publisher, journal or book title, abstract, and first names where only initials are given. When the registry has no abstract, OpenAlex's is used for articles only, and only if it shares words with the title (OpenAlex sometimes attaches another work's abstract to a book chapter). The place of publication is left alone: APA 7 does not use it.
 - **A filled field is corrected only when two independent sources agree** on a different value. This applies to volume, issue, pages, DOI, year, journal name and publisher. The year is the issue year (Crossref's print date before its online date), as APA wants. An abbreviated or misspelt journal name is replaced by the full one; the abbreviation moves to *Journal Abbr*. For a book chapter, only the chapter's own page range is compared.
 - **If the second source agrees with your value, nothing changes**; the report notes it.
-- **Titles and author lists are never changed on their own.** Differences in case or punctuation are ignored. Real wording differences, other surnames or another author order become proposals.
+- **Titles and author lists are never changed on their own.** Differences in case or punctuation are ignored, and so are a series note in brackets ("(Routledge Revivals)"), a subtitle the registry left out, ISBN hyphens, and degrees publishers put into names ("Lambiase MS"). Real wording differences, other surnames or another author order become proposals.
 - **Everything only one source gives becomes a proposal.**
 
 Every change is logged on the item: a child note "Metadata changes by zotero-mcp (date)" lists each field, the old value, the new value and the sources, and the item gets the tag `auto-enriched` (something filled) and/or `auto-corrected` (something overwritten). Undo by hand from the note.
