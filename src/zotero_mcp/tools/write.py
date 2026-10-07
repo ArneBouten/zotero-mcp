@@ -2744,6 +2744,14 @@ def _lookup_isbn_google_books(isbn, ctx):
     normalized fields, or None on miss / error."""
     try:
         url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
+        try:
+            # Optional key (keys.env: GOOGLE_BOOKS_API_KEY) for a higher daily limit.
+            from zotero_mcp.fulltext_fetch import Settings as _FetchSettings
+
+            if key := _FetchSettings.load().keys.get("google_books"):
+                url += f"&key={key}"
+        except Exception:
+            pass
         resp = requests.get(
             url,
             headers={"User-Agent": _utils.USER_AGENT},
