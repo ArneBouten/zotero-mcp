@@ -114,6 +114,7 @@ No Scite account is required; these use public API endpoints.
 
 All add tools take a `collections` parameter accepting collection keys, names, or `parent/child` paths — resolved and validated before the item is created, so unknown or ambiguous specs fail with suggestions instead of producing an unfiled item. They also take `if_exists` (`"duplicate"` — default — always creates; `"file"` reuses an existing item matching the DOI/arXiv ID/ISBN/URL, filing it into missing collections and adding missing tags; `"skip"` leaves a match untouched) and `create_missing_collections` (create unknown collection specs, including path chains, instead of failing). The `zotero-cli add` commands default to `--if-exists file`.
 
+- `zotero_fetch_fulltext`: Find and attach a PDF for items that have none: open-access sources, the publisher's page, Google Scholar (SerpApi) and a web search (Tavily), each PDF checked against the item first — see [Fetching full texts](fulltext-fetch.md)
 - `zotero_attach_file`: Attach a local file or a PDF URL to an existing item by key (no new item created; returns the attachment key; idempotent per filename and content hash)
 - `zotero_set_item_parent`: Set, change, or clear an item's parent (`parent_key=null` makes it top-level)
 - `zotero_create_collection`: Create a new collection (folder/project) in your library

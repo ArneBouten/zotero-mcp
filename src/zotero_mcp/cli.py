@@ -871,6 +871,23 @@ def main():
         help="Rebuild even when the check finds no damage (compacts the index)",
     )
 
+    fetch_parser = subparsers.add_parser(
+        "fetch-fulltext",
+        help="Find and attach PDFs for items without one (open access, publisher, Scholar, web)",
+    )
+    fetch_parser.add_argument("--items", help="Comma-separated item keys (default: every item without a PDF)")
+    fetch_parser.add_argument("--collection", help="Only items in this collection (key)")
+    fetch_parser.add_argument("--limit", type=int, help="At most this many items")
+    fetch_parser.add_argument("--dry-run", action="store_true",
+                              help="Find and check PDFs, attach nothing")
+    fetch_parser.add_argument("--save-dir", help="Save the PDFs found to this folder instead of attaching them")
+    fetch_parser.add_argument("--steps", default="open-access,publisher,scholar,web",
+                              help="Steps to use, in order (default: open-access,publisher,scholar,web)")
+    fetch_parser.add_argument("--retry", action="store_true",
+                              help="Also retry items tagged fulltext/not-found recently")
+    fetch_parser.add_argument("--open-missing", action="store_true",
+                              help="Open a Google Scholar search in the browser for each item still not found")
+
     ocr_parser = subparsers.add_parser(
         "ocr-setup",
         help="Download Tesseract language data so scanned PDFs are OCR'd when indexed",
@@ -1322,6 +1339,37 @@ def main():
         except Exception as e:
             print(f"Error getting database status: {e}")
             sys.exit(1)
+
+    elif args.command == "fetch-fulltext":
+        setup_zotero_environment()
+        from zotero_mcp import fulltext_fetch
+
+        keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
+        steps = [x.strip() for x in args.steps.split(",") if x.strip()]
+        unknown = [x for x in steps if x not in fulltext_fetch.STEPS]
+        if unknown:
+            print(f"Unknown step(s): {', '.join(unknown)}. Choose from {', '.join(fulltext_fetch.STEPS)}.")
+            sys.exit(1)
+        try:
+            report = fulltext_fetch.run(
+                keys=keys, collection=args.collection, limit=args.limit, dry_run=args.dry_run,
+                save_dir=args.save_dir, steps=steps, retry=args.retry,
+            )
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        print()
+        print(report.markdown())
+        if args.open_missing:
+            import webbrowser
+
+            from zotero_mcp import library as _library
+
+            missing = [r.key for r in report.results if r.status == "not found"]
+            found = _library.get_library_backend().get_items(missing) if missing else {}
+            for key in missing[:20]:
+                if key in found:
+                    webbrowser.open(fulltext_fetch.scholar_search_url(fulltext_fetch.ItemInfo.from_zotero(found[key])))
 
     elif args.command == "ocr-setup":
         from zotero_mcp import ocr

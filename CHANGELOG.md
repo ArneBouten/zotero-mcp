@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.10] - 2026-10-07
+
+### Added
+
+- **Fetch full texts for items without a PDF.** `zotero-mcp fetch-fulltext` and the `zotero_fetch_fulltext` tool search open-access sources (Unpaywall, OpenAlex, Semantic Scholar, Europe PMC, arXiv, CORE, OAPEN), the publisher's page (subscriptions work on the university network), Google Scholar through SerpApi and a web search through Tavily, cheapest first. Every PDF is checked against the item (title and first author on its first pages, not a preview) before it is attached, with its version (published, accepted manuscript, preprint) in the attachment title and its source in a note. Items get `fulltext/fetched` or `fulltext/not-found`; each run writes a report and a log of every attempt. Free allowances are counted and never exceeded. Captchas are never solved. See [Fetching full texts](docs/fulltext-fetch.md).
+
 ## [0.13.2+arne.9] - 2026-10-07
 
 ### Fixed
