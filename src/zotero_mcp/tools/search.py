@@ -1575,10 +1575,19 @@ def semantic_search(
             # Section first: it is what tells a reader whether the hit is this
             # paper's own claim or a citation of someone else's, which changes
             # how the result should be read before anything else does.
+            if chapter := result.get("chapter"):
+                loc_bits.append(str(chapter))
             if section := result.get("section"):
                 loc_bits.append(str(section))
-            if (page := result.get("page")) is not None:
-                loc_bits.append(f"p. {page}")
+            if (heading := result.get("heading")) and heading != result.get("chapter"):
+                loc_bits.append(f"under \"{str(heading).split(' › ')[-1]}\"")
+            # The printed page is what a citation needs; the PDF page is where
+            # the reader opens the file. Without a printed one, say which it is.
+            page = result.get("page")
+            if label := result.get("page_label"):
+                loc_bits.append(f"p. {label}" + (f" (PDF p. {page})" if page is not None and str(page) != str(label) else ""))
+            elif page is not None:
+                loc_bits.append(f"PDF p. {page}")
             if (ci := result.get("chunk_index")) is not None and (nc := result.get("n_chunks")):
                 loc_bits.append(f"passage {ci + 1}/{nc}")
             elif off := result.get("char_start", result.get("passage_offset")):

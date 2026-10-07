@@ -73,6 +73,7 @@ KEY_ENV = {
     "zenrows": "ZENROWS_API_KEY",
     "core": "CORE_API_KEY",
     "semantic_scholar": "SEMANTIC_SCHOLAR_API_KEY",
+    "google_books": "GOOGLE_BOOKS_API_KEY",
 }
 
 BROWSER_UA = (

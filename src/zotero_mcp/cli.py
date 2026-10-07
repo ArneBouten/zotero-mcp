@@ -907,6 +907,23 @@ def main():
     meta_parser.add_argument("--process-review", action="store_true",
                              help="Only apply or discard proposals on items tagged metadata/accept or metadata/reject")
     meta_parser.add_argument("--workers", type=int, default=4, help="Items checked at once (default 4)")
+    meta_parser.add_argument("--no-gemini", action="store_true",
+                             help="Check the PDF by rules only; do not let Gemini read its first pages")
+
+    relabel_parser = subparsers.add_parser(
+        "relabel-index",
+        help="Give indexed passages their printed page, heading, chapter and section (no re-embedding)",
+    )
+    relabel_parser.add_argument("--items", help="Comma-separated item keys (default: every item that needs it)")
+    relabel_parser.add_argument("--limit", type=int, help="At most this many items")
+    relabel_parser.add_argument("--force", action="store_true", help="Also items labelled before")
+    relabel_parser.add_argument("--dry-run", action="store_true", help="Report only; write nothing to the index")
+    gem = relabel_parser.add_mutually_exclusive_group()
+    gem.add_argument("--gemini", dest="gemini", action="store_true", default=None,
+                     help="Let Gemini judge headings where bookmarks are missing")
+    gem.add_argument("--no-gemini", dest="gemini", action="store_false", help="Bookmarks and rules only")
+    relabel_parser.add_argument("--workers", type=int, default=3, help="Items read at once (default 3)")
+    relabel_parser.add_argument("--config-path", help="Path to the semantic search config file")
 
     layer_parser = subparsers.add_parser(
         "ocr-pdfs",
@@ -1420,13 +1437,26 @@ def main():
             report = metadata_audit.run(
                 keys=keys, collection=args.collection, limit=args.limit,
                 apply=args.apply or args.process_review, review_only=args.process_review,
-                workers=args.workers,
+                workers=args.workers, gemini=False if args.no_gemini else None,
             )
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)
         print()
         print(report.markdown(limit=60))
+
+    elif args.command == "relabel-index":
+        setup_zotero_environment()
+        from zotero_mcp import relabel
+
+        keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
+        try:
+            relabel.run(keys=keys, limit=args.limit, config_path=str(_semantic_config_path(args.config_path)),
+                        gemini=args.gemini, dry_run=args.dry_run, force=args.force or bool(keys),
+                        workers=args.workers)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
 
     elif args.command == "ocr-pdfs":
         setup_zotero_environment()

@@ -790,6 +790,24 @@ _MAX_PASSAGE_POOL = 1000
 _DEFAULT_PASSAGES_PER_ITEM = 2
 
 
+def _drop_reference_passages(results: dict) -> int:
+    """Remove reference-list passages from a hit list, in place.
+
+    A reference list is a dense block of other papers' titles, so it matches a
+    topic query well without saying anything about the topic. A search that
+    filters on ``section`` (for example to find who cites what) keeps them.
+    """
+    metas = (results.get("metadatas") or [[]])[0] or []
+    keep = [i for i, m in enumerate(metas) if not (isinstance(m, dict) and m.get("section") == "References")]
+    if len(keep) == len(metas):
+        return 0
+    for key in ("ids", "distances", "documents", "metadatas"):
+        rows = (results.get(key) or [[]])[0]
+        if rows:
+            results[key][0] = [rows[i] for i in keep if i < len(rows)]
+    return len(metas) - len(keep)
+
+
 def _diversify_passages(results: dict, max_per_item: int, max_items: int | None) -> int:
     """Thin a passage hit list in place: few passages per paper, few papers.
 
@@ -3680,6 +3698,11 @@ class ZoteroSemanticSearch:
                     library_key=str(self._run_group_id),
                 )
 
+            if self._chunking_enabled and any(
+                stats.get(k) for k in ("added_items", "updated_items", "recovered_items")
+            ):
+                self._label_new_passages(stats)
+
             end_time = datetime.now()
             stats["duration"] = str(end_time - start_time)
             stats["end_time"] = end_time.isoformat()
@@ -3705,6 +3728,25 @@ class ZoteroSemanticSearch:
             # separately before its early return, so this finally only runs
             # for the path where we actually hold the lock.
             lock_cm.__exit__(None, None, None)
+
+    def _label_new_passages(self, stats: dict[str, Any]) -> None:
+        """Printed pages, headings and chapters for items just (re)indexed.
+
+        Opt-in (``semantic_search.structure.enabled``); metadata only, so it
+        never re-embeds. Failures are logged and never fail the update.
+        """
+        try:
+            from zotero_mcp import relabel
+
+            cfg = relabel.structure_config(self.config_path)
+            if not cfg.get("enabled"):
+                return
+            sys.stderr.write("  Labelling new passages (pages, headings)...\n")
+            result = relabel.run(config_path=self.config_path, search=self,
+                                 log=lambda m: sys.stderr.write(f"  {m}\n"))
+            stats["labelled_items"] = (result.get("totals") or {}).get("items", 0)
+        except Exception as e:
+            logger.warning(f"Passage labelling skipped: {e}")
 
     def _prepare_and_classify_slice(
         self,
@@ -4670,6 +4712,9 @@ class ZoteroSemanticSearch:
             results = self.chroma_client.search(query_texts=[query], n_results=fetch_limit, where=where)
 
             _drop_missing_documents(results)
+            if chunked and self._chunking_config.get("exclude_references_from_search", True) \
+                    and "section" not in json.dumps(filters or {}):
+                _drop_reference_passages(results)
             pool_size = len((results.get("ids") or [[]])[0] or [])
 
             if chunked:
@@ -4784,7 +4829,8 @@ class ZoteroSemanticSearch:
                 enriched_result["rerank_score"] = rerank_scores[i]
             # Passage provenance — present only on a chunk-indexed collection.
             if isinstance(meta, dict):
-                for mk in ("chunk_index", "n_chunks", "char_start", "char_end", "page", "section"):
+                for mk in ("chunk_index", "n_chunks", "char_start", "char_end", "page", "section",
+                           "page_label", "heading", "chapter"):
                     if mk in meta:
                         enriched_result[mk] = meta[mk]
             if "char_start" not in enriched_result and passage_offset:

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.21] - 2026-10-07
+
+### Added
+
+- **Printed page numbers, headings and chapters for search passages** (`zotero-mcp relabel-index`).
+  - Each passage gets its page number as printed, from the PDF's page labels, the numbers in its header or footer (by majority vote) or the item's Pages field. It also gets its heading path and, for books, theses and reports, its chapter.
+  - Headings come from the PDF's bookmarks or, with `--gemini`, from Gemini judging candidate lines (set apart by size, weight, typeface, colour, capitals, numbering or space) against the printed table of contents. Rules are the fallback.
+  - Search results show "p. 379 (PDF p. 3)" and the heading in the Location line.
+  - Metadata only: nothing is re-embedded. New items are labelled after each index update with `semantic_search.structure.enabled`.
+  - See [Printed pages, headings and chapters](docs/passage-labels.md).
+- **Reference lists are recognised by their shape** and left out of normal searches; a search filtering on `section` keeps them.
+- **Metadata audit:**
+  - **More sources:** other DOI agencies (mEDRA, JaLC…) through doi.org; Semantic Scholar as a second title search; Google Books for books.
+  - **The item's PDF read by Gemini** when rules find nothing. It confirms differences, decides author proposals (full author list), and gives proposals for items no registry knows.
+  - **Retractions** from Crossref's Retraction Watch data are flagged and tagged `retracted`.
+  - **Learning:** a kind of proposal you decide the same way 10 times is decided for you from then on.
+
+### Changed
+
+- **Metadata audit: the DOI is no longer trusted blindly.** Nothing is compared when the DOI's record is one of these:
+  - a correction or retraction notice;
+  - a table or figure;
+  - the whole book of a chapter;
+  - a CHOICE review;
+  - a work with another title, or with a different title and other authors.
+
+  A preprint DOI on a published article becomes a proposal for the published DOI.
+- **Metadata audit: title matches** need the same first author and year, and generic titles ("Editorial") an exact match. Main titles are compared when only a subtitle differs, and a different work type is only a soft signal.
+- **Metadata audit: fewer false proposals** from the first full-library run:
+  - ISSN hyphens and print/online ISSNs; journal names with clutter ("(Auckland, N.Z.)", " - ELEM SCH J"), a subtitle the registry adds, ", The".
+  - Page ranges shortened to a first page; publisher variants.
+  - Edition notes and "Chapter 4:" in titles; name suffixes, stray initials and garbled accents.
+  - A registry that lists fewer authors.
+  - A DOI alias is left alone; a year more than two years off is only proposed. When yours is the online year, the proposal says so.
+  - An author proposal keeps your fuller first names.
+- Abstracts: PubMed's first for articles; any abstract must share three content words with the title, be 200–6,000 characters, not mostly boilerplate and not in another language.
+- The audit's rules read the first four PDF pages (a cover sheet in front is read but not counted) instead of two.
+
 ## [0.13.2+arne.20] - 2026-10-07
 
 ### Fixed

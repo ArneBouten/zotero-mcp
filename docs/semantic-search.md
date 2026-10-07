@@ -179,9 +179,10 @@ A heading the parser does not recognise ends the current label rather than
 letting it run on, so a passage is left unlabelled rather than mislabelled.
 Two consequences:
 
-- **An existing index has no labels** until it is rebuilt with
-  `zotero-mcp update-db --fulltext --force-rebuild`. Items indexed or
-  re-indexed after upgrading get them as they go.
+- **An existing index gets labels without re-embedding** through
+  `zotero-mcp relabel-index`, which also adds printed page numbers, heading
+  paths, chapters and reference lists recognised by their shape. See
+  [Printed pages, headings and chapters](passage-labels.md).
 - **Books mostly come out unlabelled.** Chapter titles are not section names,
   and many book PDFs extract without any heading the parser can read.
   Unlabelled passages are still searched; only a `section` filter excludes

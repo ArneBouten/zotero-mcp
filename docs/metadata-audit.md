@@ -2,25 +2,74 @@
 
 `zotero-mcp metadata-audit` compares each item with the registries and fills, corrects or proposes changes. Without `--apply` it only writes a report; nothing in Zotero changes.
 
-## What it compares against
+## Where the data comes from
 
-| Item has | Reference record | Second sources (to confirm a difference) |
-|---|---|---|
-| a DOI | Crossref (DataCite when Crossref does not know it) | PubMed (via NCBI and Europe PMC), the item's own PDF, OpenAlex's journal record (journal name only) |
-| an ISBN | Open Library | the item's PDF |
-| neither | OpenAlex, matched by title (≥90 % similar), first author and year (±1) | PubMed, the item's PDF |
+**The item's record** (one per item, first found wins):
 
-OpenAlex copies most of its data from Crossref, so it does not count as a second source, except for the journal name, which it takes from its own journal list. The PDF counts for a year only when the year stands on a copyright line or in a "(year)" citation line, not anywhere on the page.
+| Item has | Source |
+|---|---|
+| a DOI | Crossref; DataCite when Crossref does not know it; other DOI agencies (mEDRA, JaLC, KISTI…) through doi.org |
+| an ISBN (books) | Open Library; Google Books when Open Library has nothing |
+| neither, or nothing found | a title search in OpenAlex, then Semantic Scholar; if the match has a DOI, that DOI's Crossref record, when it too is clearly the item |
 
-Checked item types: journal articles, conference papers, preprints, books, book chapters, theses and reports.
+**Second sources**, to confirm a difference before anything is overwritten:
+
+- PubMed (the NCBI finds the PubMed ID, Europe PMC gives the record): independent of Crossref, health and medical journals only.
+- OpenAlex's journal record, for the journal name only (OpenAlex copies the rest from Crossref).
+- Google Books, for books (year, publisher).
+- The item's own PDF: first by rules (DOI, volume, issue, pages, a copyright or citation-line year), then, when the rules find nothing, read by Gemini (below).
+
+**The item's PDF read by Gemini.** The first four pages (a repository or database cover sheet in front is read too but not counted), and for books, theses and reports also any page within the first 15 with a © or ISBN line, which is usually the copyright page. Gemini returns what is printed there: title, all authors in byline order, year, journal, volume, issue, pages, DOI, book title and editors, publisher, ISBN, university, and whether the PDF is the published version, an accepted manuscript or a preprint. A manuscript or preprint never confirms volume, issue, pages or year. Answers are cached per file (`~/.config/zotero-mcp/metadata/pdf-cache/`), so a second run costs nothing. It is asked only when a difference still has no second source, for author proposals, and for items no registry knows: a few hundred items, a few cents. `--no-gemini` checks the PDF by rules only. It uses the search index's Gemini key; the model is `semantic_search.structure.gemini_model` in config.json (default `gemini-flash-latest`).
+
+## Is the record really this item?
+
+Before anything is compared:
+
+- **A record found by DOI** must describe the item. Nothing is compared, and the report says why, when the DOI's record is:
+  - a correction or retraction notice;
+  - a table, figure or supplement;
+  - the whole book (for a chapter);
+  - a CHOICE review;
+  - a book, chapter or dataset (for a journal article);
+  - a work with another title (character similarity below 0.5);
+  - a work with a fairly different title (below 0.75) and another first author;
+  - a work from more than three years apart with a different title.
+- **A preprint's DOI** on a published article becomes a proposal to use the published version's DOI, when Crossref links it.
+- **A title match** (OpenAlex, Semantic Scholar) needs:
+  - a title at least 90 % similar, or equal main titles (before the colon, four words or more) when only a subtitle differs;
+  - the same first author;
+  - a year within one year;
+  - not a dataset, erratum or peer review.
+
+  Short or generic titles ("Editorial", "Introduction", "Book review") must match exactly. A different work type is otherwise only a soft signal, because OpenAlex often calls a chapter an article.
+- **Similarity** is character-based (difflib's ratio on lower-cased, accent-free words), after removing series notes, editions and "Chapter 4:".
+
+## Retractions and corrections
+
+Crossref's record includes Retraction Watch data. A retracted item is flagged `RETRACTED (date, notice DOI)` in the report and, with `--apply`, tagged `retracted`. Expressions of concern and published corrections are noted.
 
 ## The rules
 
-- **Empty fields are filled** from the reference record: volume, issue, pages (the article number when an article has no page numbers, as APA wants), DOI, ISSN/ISBN, publisher, journal or book title, abstract, and first names where only initials are given. When the registry has no abstract, OpenAlex's is used for articles only, and only if it shares words with the title (OpenAlex sometimes attaches another work's abstract to a book chapter). The place of publication is left alone: APA 7 does not use it.
-- **A filled field is corrected only when two independent sources agree** on a different value. This applies to volume, issue, pages, DOI, year, journal name and publisher. The year is the issue year (Crossref's print date before its online date), as APA wants. An abbreviated or misspelt journal name is replaced by the full one; the abbreviation moves to *Journal Abbr*. For a book chapter, only the chapter's own page range is compared.
-- **If the second source agrees with your value, nothing changes**; the report notes it.
-- **Titles and author lists are never changed on their own.** Differences in case or punctuation are ignored, and so are a series note in brackets ("(Routledge Revivals)"), a subtitle the registry left out, ISBN hyphens, and degrees publishers put into names ("Lambiase MS"). Real wording differences, other surnames or another author order become proposals.
-- **Everything only one source gives becomes a proposal.**
+- **Empty fields are filled** from the reference record:
+  - volume, issue, DOI, ISSN/ISBN, publisher, and journal or book title;
+  - pages; an article without page numbers gets its article number, as APA wants;
+  - the university (theses), the institution (reports);
+  - the abstract;
+  - first names where only initials are given.
+
+  When the registry has no abstract, PubMed's is used for articles, then OpenAlex's. Either only if it shares at least three content words with the title, is 200–6,000 characters long, is not mostly copyright boilerplate and is not in another language than the title. The place of publication is left alone: APA 7 does not use it.
+- **A filled field is corrected only when two independent sources agree** on a different value. This applies to volume, issue, pages, DOI, year, journal name and publisher.
+  - The year is the issue year (Crossref's print date before its online date), as APA wants. When yours is the online year, the proposal says so.
+  - An abbreviated or misspelt journal name, or one with clutter ("(Auckland, N.Z.)", " - ELEM SCH J", "&amp;"), is replaced by the plain name; the abbreviation moves to *Journal Abbr*. A registry name that only adds a subtitle to yours is not a difference.
+  - A year more than two years off is never corrected, only proposed: it usually means a wrong DOI.
+  - A DOI that works is never replaced by another (Crossref aliases).
+- **If the second source agrees with your value, nothing changes**; the report notes it as a registry error.
+- **Without a second source, nothing changes**: the difference becomes a proposal. Publisher differences (imprint, parent company, spelling) are not proposed at all. A one-page value is completed to the registry's range ("68" → "68–78") but a range is never shortened to a first page.
+- **Titles and author lists are never changed on their own.**
+  - **Ignored:** differences in case or punctuation, series notes, editions, a subtitle the registry left out, ISBN hyphens and different valid ISSNs. Also ignored: name suffixes ("Jr."), stray initials, degrees in names ("Lambiase MS") and garbled accents from the registry ("JÃ¤ger").
+  - **Kept:** a registry that lists fewer authors than you have never leads to a proposal to drop yours.
+  - **The PDF decides author proposals:** if the PDF's author list agrees with the registry, the proposal says so; if it agrees with yours, nothing is proposed. An author proposal keeps your fuller first names where the registry has initials.
+- **Items no registry knows** (theses, reports, unpublished work) get proposals from their own PDF, when its title matches the item's.
 
 Every change is logged on the item: a child note "Metadata changes by zotero-mcp (date)" lists each field, the old value, the new value and the sources, and the item gets the tag `auto-enriched` (something filled) and/or `auto-corrected` (something overwritten). Undo by hand from the note.
 
@@ -34,6 +83,8 @@ To decide:
 - **Through Claude:** "show my metadata review list", "accept the volume and pages for item X, reject the title". This uses `zotero_metadata_review`.
 
 A rejected value is remembered (`~/.config/zotero-mcp/metadata/state.json`) and not proposed again. Accepting only some fields counts the rest as rejected.
+
+**Learning from your decisions.** Each proposal has a kind: its field plus its reason, such as "Year | yours is the online year; APA uses the issue year". Once you have decided at least 10 proposals of one kind the same way at least 90 % of the time, later runs decide that kind for you. The change then says "you accepted 12 of 12 like this"; a kind you keep rejecting is no longer proposed. The counts are in `state.json` under `_learned`.
 
 ## Running it
 
@@ -53,8 +104,8 @@ py -3.12 -m zotero_mcp.cli metadata-audit --apply
 py -3.12 -m zotero_mcp.cli metadata-audit --process-review
 ```
 
-`--workers N` sets how many items are checked at once (default 4). Each item takes one to a few seconds; a library of a few thousand items takes about an hour. Every run writes its report to `~/.config/zotero-mcp/metadata/runs/<date-time>.md`.
+`--workers N` sets how many items are checked at once (default 4). With an OpenAlex key, the whole library (about 2,200 items) takes a few minutes. Every run writes its report to `~/.config/zotero-mcp/metadata/runs/<date-time>.md`.
 
-Writing goes the same way as the other write tools (the Zotero web API key). The OpenAlex and Unpaywall settings come from the full-text fetcher's keys (`keys.env`); without an OpenAlex key, title matching is slow and may be rate-limited.
+Writing goes the same way as the other write tools (the Zotero web API key). The OpenAlex, Semantic Scholar and Unpaywall keys, and an optional `GOOGLE_BOOKS_API_KEY`, come from the full-text fetcher's `keys.env`.
 
 From Claude, `zotero_metadata_audit` checks up to 15 items per call (`apply` false by default); use the command line for whole collections or the library.

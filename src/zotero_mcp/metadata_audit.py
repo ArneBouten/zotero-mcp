@@ -41,6 +41,7 @@ TAG_ACCEPT = "metadata/accept"
 TAG_REJECT = "metadata/reject"
 TAG_FILLED = "auto-enriched"
 TAG_CORRECTED = "auto-corrected"
+TAG_RETRACTED = "retracted"
 NOTE_MARK = "zotero-mcp-proposals"
 SAVED_SEARCH = "Metadata to review"
 
@@ -86,11 +87,25 @@ class Record:
     container: str = ""             # book title for a chapter
     isbn: str = ""
     article_number: str = ""        # e.g. "e70024": APA's stand-in for pages
+    online_year: str = ""           # Crossref's published-online year, when it differs from the issue's
+    updates: list = field(default_factory=list)     # (type, date, doi): retractions, corrections
+    published_doi: str = ""         # a preprint's published version
+    editors: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _demojibake(text: str) -> str:
+    """UTF-8 read as Latin-1 somewhere upstream ("JÃ¤ger" -> "Jäger")."""
+    if text and re.search(r"Ã.|â€", text):
+        try:
+            return text.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return text
+    return text
 
 
 def _strip_tags(text: str) -> str:
     text = re.sub(r"<[^>]+>", " ", text or "")
-    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+    return _demojibake(re.sub(r"\s+", " ", html.unescape(text)).strip())
 
 
 def _date_from_parts(obj: dict | None) -> str:
@@ -120,6 +135,7 @@ def crossref(doi: str, http: ff.Http, settings: ff.Settings) -> Record | None:
     m = data.get("message") or {}
     # APA dates a journal article by its issue; fall back to the first publication.
     date = _date_from_parts(m.get("published-print")) or _date_from_parts(m.get("issued"))
+    online = _date_from_parts(m.get("published-online"))
     kind = m.get("type", "")
     container = _strip_tags((m.get("container-title") or [""])[0])
     title = _strip_tags((m.get("title") or [""])[0]).rstrip(".")
@@ -140,6 +156,12 @@ def crossref(doi: str, http: ff.Http, settings: ff.Settings) -> Record | None:
         place=m.get("publisher-location") or "",
         abstract=re.sub(r"^abstract\b\s*[:.]?\s*", "", _strip_tags(m.get("abstract") or ""), flags=re.I),
         kind=kind, isbn=(m.get("ISBN") or [""])[0], article_number=str(m.get("article-number") or ""),
+        online_year=online[:4] if online[:4] != date[:4] else "",
+        updates=[(u.get("type", ""), _date_from_parts(u.get("updated")), (u.get("DOI") or "").lower())
+                 for u in m.get("updated-by") or [] if isinstance(u, dict)],
+        published_doi=(((m.get("relation") or {}).get("is-preprint-of") or [{}])[0].get("id") or "").lower(),
+        editors=[(_clean_family(a["family"]), _strip_tags(a.get("given", ""))) for a in m.get("editor") or []
+                 if a.get("family")],
     )
 
 
@@ -174,6 +196,7 @@ def _openalex_record(work: dict, by: str) -> Record:
     if inv:
         words = sorted(((pos, w) for w, positions in inv.items() for pos in positions))
         abstract = re.sub(r"\s+", " ", " ".join(w for _pos, w in words)).strip()
+        abstract = re.sub(r"^abstract\b\s*[:.]?\s*", "", abstract, flags=re.I)
     authors = []
     for au in work.get("authorships") or []:
         name = ((au.get("author") or {}).get("display_name") or "").strip()
@@ -198,22 +221,158 @@ def openalex_by_doi(doi: str, http: ff.Http, settings: ff.Settings) -> Record | 
     return _openalex_record(data, "doi") if status == 200 and data else None
 
 
+#: Titles too generic to match on without an exact match.
+GENERIC_TITLES = {
+    "introduction", "editorial", "book review", "review", "foreword", "preface", "commentary", "reply",
+    "response", "letter", "correction", "erratum", "abstract", "abstracts", "conclusion", "discussion", "index",
+    "contents", "notes", "news", "obituary", "in memoriam", "guest editorial", "editorial introduction",
+    "introduction to the special issue", "afterword", "epilogue", "prologue", "acknowledgements",
+}
+#: Work types that are never the same thing as a Zotero item (a dataset or an
+#: erratum with the same title). Other type differences are only a soft
+#: signal: OpenAlex often calls a chapter an article.
+_REJECT_KINDS = {"dataset", "paratext", "peer-review", "erratum", "retraction", "grant", "supplementary-materials",
+                 "libguides", "component"}
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in ff._fold(text).split() if len(w) >= 4 and w not in ff._STOPWORDS]
+
+
+def _main_title(text: str) -> str:
+    return ff._fold(re.split(r"[:?!.]\s", str(text or ""), maxsplit=1)[0])
+
+
+def title_match(mine: str, theirs: str) -> float:
+    """How alike two titles are, 0..1.
+
+    Character-based (difflib's ratio on lower-cased, accent-free words), with
+    a series note, edition or "Chapter 4:" removed first. When the main titles
+    (before a colon) are equal and at least four words long, a missing or
+    different subtitle still counts as 0.95.
+    """
+    sim = ff.title_similarity(norm_title(mine), norm_title(theirs))
+    a, b = _main_title(mine), _main_title(theirs)
+    if len(a.split()) >= 4 and a == b:
+        sim = max(sim, 0.95)
+    return sim
+
+
+def _matches_item(item: ff.ItemInfo, rec: Record, year_tolerance: int = 1) -> bool:
+    """Is this record clearly the item: title, first author, year (and not a dataset)?"""
+    if not item.title or not rec.title:
+        return False
+    if norm_title(item.title) in GENERIC_TITLES or len(_content_words(item.title)) < 3:
+        if norm_title(item.title) != norm_title(rec.title):
+            return False
+    if title_match(item.title, rec.title) < 0.9:
+        return False
+    if item.first_author and rec.authors:
+        mine = _family_key(item.first_author).split()[-1:] or [""]
+        theirs = {(_family_key(f).split() or [""])[-1] for f, _g in rec.authors[:5]}
+        if mine[0] and mine[0] not in theirs:
+            return False
+    if item.year.isdigit() and rec.year.isdigit() and abs(int(item.year) - int(rec.year)) > year_tolerance:
+        return False
+    return (rec.kind or "").lower() not in _REJECT_KINDS
+
+
 def openalex_by_title(item: ff.ItemInfo, http: ff.Http, settings: ff.Settings) -> Record | None:
     """A work that is clearly the same: title, first author and year."""
+    if not item.title or (norm_title(item.title) in GENERIC_TITLES):
+        return None
     work = ff._openalex_work(ff.ItemInfo(**{**asdict(item), "doi": ""}), http, settings)
     if not work:
         return None
     rec = _openalex_record(work, "title")
-    if ff.title_similarity(item.title, rec.title) < 0.9:
+    return rec if _matches_item(item, rec) else None
+
+
+def _split_name(name: str) -> tuple[str, str]:
+    parts = (name or "").split()
+    return (parts[-1], " ".join(parts[:-1])) if parts else ("", "")
+
+
+_S2_KINDS = {"Dataset": "dataset", "Book": "book", "BookSection": "book-chapter", "JournalArticle": "article",
+             "Conference": "proceedings-article", "Review": "article", "Editorial": "editorial"}
+
+
+def semantic_scholar_by_title(item: ff.ItemInfo, http: ff.Http, settings: ff.Settings) -> Record | None:
+    """Semantic Scholar's best title match, when it is clearly the item."""
+    if not item.title or norm_title(item.title) in GENERIC_TITLES:
         return None
-    if item.first_author and rec.authors:
-        mine = ff._fold(item.first_author).split()[-1:] or [""]
-        theirs = {ff._fold(f).split()[-1] for f, _g in rec.authors[:5] if ff._fold(f)}
-        if mine[0] not in theirs:
-            return None
-    if item.year.isdigit() and rec.year.isdigit() and abs(int(item.year) - int(rec.year)) > 1:
+    headers = {"x-api-key": settings.keys["semantic_scholar"]} if settings.has("semantic_scholar") else None
+    status, data = http.api_json(
+        "https://api.semanticscholar.org/graph/v1/paper/search/match",
+        params={"query": item.title[:300],
+                "fields": "title,authors,year,venue,journal,externalIds,publicationTypes"},
+        headers=headers)
+    hits = (data or {}).get("data") or [] if status == 200 else []
+    if not hits:
         return None
-    return rec
+    p = hits[0]
+    journal = p.get("journal") or {}
+    kinds = [_S2_KINDS.get(t, "") for t in p.get("publicationTypes") or []]
+    rec = Record(
+        source="Semantic Scholar", by="title", title=(p.get("title") or "").rstrip("."),
+        authors=[_split_name(a.get("name", "")) for a in p.get("authors") or [] if a.get("name")],
+        year=str(p.get("year") or ""), journal=journal.get("name") or p.get("venue") or "",
+        volume=str(journal.get("volume") or "").strip(), pages=re.sub(r"\s", "", str(journal.get("pages") or "")),
+        doi=((p.get("externalIds") or {}).get("DOI") or "").lower(), kind=next((k for k in kinds if k), ""),
+    )
+    return rec if _matches_item(item, rec) else None
+
+
+_CSL_KINDS = {"article-journal": "journal-article", "chapter": "book-chapter", "book": "book",
+              "paper-conference": "proceedings-article", "dataset": "dataset", "report": "report",
+              "thesis": "dissertation"}
+
+
+def doi_registry(doi: str, http: ff.Http, settings: ff.Settings) -> Record | None:
+    """The record from another DOI agency (mEDRA, JaLC, KISTI, ...) through doi.org."""
+    status, ra = http.api_json(f"https://doi.org/ra/{quote(doi, safe='/')}")
+    agency = (ra[0].get("RA") if status == 200 and isinstance(ra, list) and ra and isinstance(ra[0], dict)
+              else "") or ""
+    if not agency or agency in ("Crossref", "DataCite") or "not" in agency.lower():
+        return None
+    status, m = http.api_json(f"https://doi.org/{quote(doi, safe='/')}",
+                              headers={"Accept": "application/vnd.citationstyles.csl+json"})
+    if status != 200 or not isinstance(m, dict):
+        return None
+    date = _date_from_parts(m.get("issued"))
+    kind = _CSL_KINDS.get(m.get("type", ""), m.get("type", ""))
+    container = _strip_tags(m.get("container-title") or "")
+    container = container[0] if isinstance(container, list) else container
+    return Record(
+        source=f"{agency} (DOI registry)", title=_strip_tags(m.get("title") or "").rstrip("."),
+        authors=[(_clean_family(a["family"]), _strip_tags(a.get("given", ""))) for a in m.get("author") or []
+                 if isinstance(a, dict) and a.get("family")],
+        year=date[:4], date=date,
+        journal=container if kind in ("journal-article", "proceedings-article") else "",
+        container=container if kind == "book-chapter" else "",
+        volume=str(m.get("volume") or ""), issue=str(m.get("issue") or ""), pages=str(m.get("page") or ""),
+        doi=doi.lower(), publisher=m.get("publisher") or "", kind=kind,
+        issn=[m["ISSN"]] if isinstance(m.get("ISSN"), str) else list(m.get("ISSN") or []),
+    )
+
+
+def google_books(isbn: str, http: ff.Http, settings: ff.Settings) -> Record | None:
+    """Google Books' record for an ISBN: a second source for books (year, publisher)."""
+    params = {"q": f"isbn:{isbn}"}
+    if settings.has("google_books"):
+        params["key"] = settings.keys["google_books"]   # optional: a higher daily limit
+    status, data = http.api_json("https://www.googleapis.com/books/v1/volumes", params=params)
+    items = (data or {}).get("items") or [] if status == 200 else []
+    if not items:
+        return None
+    v = items[0].get("volumeInfo") or {}
+    m = re.search(r"\d{4}", v.get("publishedDate") or "")
+    title = v.get("title") or ""
+    if v.get("subtitle"):
+        title += ": " + v["subtitle"]
+    return Record(source="Google Books", by="isbn", title=title, year=m.group(0) if m else "",
+                  publisher=v.get("publisher") or "", isbn=isbn, kind="book",
+                  authors=[_split_name(a) for a in v.get("authors") or []])
 
 
 def europepmc(doi: str, http: ff.Http, settings: ff.Settings) -> Record | None:
@@ -279,7 +438,17 @@ def norm_simple(value: str) -> str:
 
 def norm_journal(value: str) -> str:
     v = ff._fold(value or "").replace(" and ", " ")
-    return re.sub(r"^the ", "", v).strip()
+    return re.sub(r"^the | the$", "", v).strip()
+
+
+def journal_core(value: str) -> str:
+    """A journal name without the clutter some imports add: "(Auckland, N.Z.)",
+    " - ELEM SCH J", ": A Journal of the American Psychological Society"."""
+    v = str(value or "")
+    v = re.sub(r"\s+-\s+[A-Z][A-Z .&]+$", "", v)
+    v = re.sub(r"\s*\([^)]*\)\s*$", "", v)
+    v = re.split(r"\s*:\s+", v, maxsplit=1)[0]
+    return norm_journal(v)
 
 
 def norm_doi(value: str) -> str:
@@ -301,8 +470,11 @@ def isbn13s(value: str) -> set[str]:
 
 
 def norm_title(value: str) -> str:
-    """A title without a trailing series note ("... (Routledge Revivals)") and punctuation."""
+    """A title without a series note ("(Routledge Revivals)"), edition, "Chapter 4:" or punctuation."""
     v = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]\s*$", "", str(value or ""))
+    v = re.sub(r"^\s*(?:chapter|ch\.)\s+(?:\d+|[ivxlc]+)\s*[:.\-–]\s*", "", v, flags=re.I)
+    v = re.sub(r"[,:\s]+(?:\d+(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|revised|new)"
+               r"\s+(?:ed\.?|edition)\s*$", "", v, flags=re.I)
     return ff._fold(v)
 
 
@@ -399,6 +571,7 @@ class ItemAudit:
     flags: list[str] = field(default_factory=list)
     reference: str = ""
     error: str = ""
+    retracted: bool = False
 
     def by_kind(self, kind: str) -> list[Change]:
         return [c for c in self.changes if c.kind == kind]
@@ -408,11 +581,15 @@ class Context:
     """What an audit run shares: HTTP, settings, the PDF reader, rejections."""
 
     def __init__(self, http: ff.Http, settings: ff.Settings, pdf_text: Callable[[str], str] | None = None,
-                 rejected: dict | None = None):
+                 rejected: dict | None = None, learned: dict | None = None,
+                 pdf_read: Callable[[str], dict | None] | None = None):
         self.http = http
         self.settings = settings
         self.pdf_text = pdf_text or (lambda key: "")
         self.rejected = rejected or {}
+        self.learned = learned or {}
+        #: Gemini's reading of the item's PDF (first pages): a dict of fields, or None.
+        self.pdf_read = pdf_read
 
 
 def _current(data: dict, field_name: str) -> str:
@@ -436,8 +613,8 @@ def _fields_for(item_type: str) -> list[str]:
         # Not the place: APA 7 leaves it out, and the registries' versions are messy.
         "book": ["publisher", "ISBN"],
         "bookSection": ["bookTitle", "pages", "publisher"],
-        "thesis": [],
-        "report": ["publisher"],
+        "thesis": ["university"],
+        "report": ["institution"],
     }.get(item_type, [])
 
 
@@ -447,29 +624,76 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
     audit = ItemAudit(info.key, info.label, info.item_type)
     http, settings = ctx.http, ctx.settings
 
+    pdf_cache: list = []
+
+    def pdf_reading() -> dict | None:
+        """Gemini's reading of the item's PDF, at most once per item."""
+        if not pdf_cache:
+            try:
+                pdf_cache.append(ctx.pdf_read(info.key) if ctx.pdf_read else None)
+            except Exception:
+                pdf_cache.append(None)
+        return pdf_cache[0]
+
     ref: Record | None = None
     if info.doi:
-        ref = crossref(info.doi, http, settings) or datacite(info.doi, http, settings)
+        ref = (crossref(info.doi, http, settings) or datacite(info.doi, http, settings)
+               or doi_registry(info.doi, http, settings))
         if ref is None:
-            audit.flags.append(f"DOI {info.doi} not found in Crossref or DataCite (wrong DOI?)")
+            audit.flags.append(f"DOI {info.doi} not found at any DOI registry (wrong DOI?)")
     elif info.isbn and info.item_type == "book":
-        ref = openlibrary(info.isbn, http, settings)
+        ref = openlibrary(info.isbn, http, settings) or google_books(info.isbn, http, settings)
     if ref is None and not info.doi:
-        match = openalex_by_title(info, http, settings)
+        match = openalex_by_title(info, http, settings) or semantic_scholar_by_title(info, http, settings)
         if match and match.doi:
-            ref = crossref(match.doi, http, settings) or match
+            # The title match points to a DOI: use its Crossref record only if
+            # that is clearly the item too (OpenAlex sometimes links a preprint).
+            cr = crossref(match.doi, http, settings)
+            preprint = cr is not None and cr.kind == "posted-content" and info.item_type != "preprint"
+            if cr is not None and not preprint and _matches_item(info, cr, 1):
+                ref = cr
+            else:
+                ref = match
+                if cr is None or preprint or not _matches_item(info, cr, 1):
+                    ref.doi = ""    # not a DOI to fill in
             ref.by = "title"
         elif match:
             ref = match
     if ref is None:
         audit.flags.append("no registry record found")
+        _from_pdf_only(audit, data, info, pdf_reading())
         _type_flags(audit, data)
         return audit
     audit.reference = f"{ref.source} (by {ref.by})"
+    if (problem := _kind_mismatch(info.item_type, ref)):
+        audit.flags.append(problem)
+        _type_flags(audit, data)
+        return audit
+    if ref.by == "doi":
+        if ref.kind == "posted-content" and info.item_type not in ("preprint", "report", "manuscript"):
+            if ref.published_doi:
+                audit.changes.append(Change("DOI", info.doi, ref.published_doi, "propose", [ref.source],
+                                            "your DOI is the preprint's; this is the published version's"))
+            else:
+                audit.flags.append("the DOI is a preprint's; the published version has its own DOI")
+            _type_flags(audit, data)
+            return audit
+        if (problem := _doi_identity_problem(info, ref)):
+            audit.flags.append(problem)
+            _type_flags(audit, data)
+            return audit
+        _note_updates(audit, ref)
 
     second: list[Record] = []          # independent records, fetched only when needed
     fetched_second = False
     pdf_text: str | None = None
+    pm_cache: list = []
+
+    def pubmed() -> Record | None:
+        if not pm_cache:
+            doi = ref.doi or info.doi
+            pm_cache.append(europepmc(doi, http, settings) if doi else None)
+        return pm_cache[0]
 
     def confirmations(field_name: str, value: str) -> list[str]:
         nonlocal fetched_second, pdf_text
@@ -478,13 +702,17 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
             fetched_second = True
             doi = ref.doi or info.doi
             if doi:
-                pm = europepmc(doi, http, settings)
+                pm = pubmed()
                 if pm:
                     second.append(pm)
                 if field_name == "publicationTitle" and ref.source != "OpenAlex":
                     oa = openalex_by_doi(doi, http, settings)
                     if oa and oa.journal:
                         second.append(Record(source="OpenAlex journal record", journal=oa.journal))
+            if info.item_type == "book" and info.isbn and ref.source != "Google Books":
+                gb = google_books(info.isbn, http, settings)
+                if gb:
+                    second.append(gb)
         for rec in second:
             other = record_value(rec, field_name)
             if other and same(field_name, other, value):
@@ -496,6 +724,11 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
                 pdf_text = ""
         if pdf_confirms(pdf_text, field_name, value):
             found.append("the item's PDF")
+        elif not found and field_name in _PDF_FIELDS:
+            # Rules found nothing: let Gemini read the first pages (once per item).
+            read = _pdf_value(pdf_reading(), field_name)
+            if read and same(field_name, read, value):
+                found.append(PDF_SOURCE)
         return found
 
     # Every field listed is valid for its item type. The local database leaves
@@ -508,13 +741,17 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
             continue
         if not new and name == "abstractNote" and not _current(data, name).strip() and (ref.doi or info.doi):
             # Crossref often has no abstract; OpenAlex usually does.
+            pm = pubmed() if info.item_type == "journalArticle" else None
+            if pm and pm.abstract and _plausible_abstract(pm.abstract, info.title):
+                audit.changes.append(Change(name, "", pm.abstract, "fill", ["PubMed"]))
+                continue
             oa = None
             if info.item_type in ("journalArticle", "conferencePaper", "preprint"):
                 oa = ref if ref.source == "OpenAlex" else openalex_by_doi(ref.doi or info.doi, http, settings)
             if oa and _plausible_abstract(oa.abstract, info.title):
                 audit.changes.append(Change(name, "", oa.abstract, "fill", ["OpenAlex"]))
             continue
-        if not new:
+        if not new or not re.search(r"[A-Za-z0-9]", new):
             continue
         old = _current(data, name)
         if name == "abstractNote":
@@ -526,19 +763,36 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
                                         "matched by title" if ref.by == "title" else ""))
             continue
         if name == "ISSN":
-            mine = {x.strip().upper() for x in re.split(r"[,;\s]+", old) if x.strip()}
-            if mine & {x.upper() for x in ref.issn}:
-                continue
+            continue    # a journal has several valid ISSNs (print, online); only empty ones are filled
         if same(name, old, new):
             continue
+        if name == "pages":
+            mine, theirs = norm_pages(old), norm_pages(new)
+            if "-" in mine and theirs == mine.split("-")[0]:
+                continue    # the registry only has the first page
+            if "-" not in mine and "-" in theirs and theirs.split("-")[0] == mine:
+                audit.changes.append(Change(name, old, new, "fill", [ref.source], "completed the page range"))
+                continue
+        if name == "DOI":
+            if norm_doi(old).replace("//", "/") != norm_doi(new).replace("//", "/"):
+                audit.flags.append(f"DOI: {ref.source} lists this work under {new} as well; "
+                                   f"yours ({old}) works, so it is left as is")
+                continue
         if name in ("title", "bookTitle"):
             if ff.title_similarity(norm_title(old), norm_title(new)) < 0.97:
                 audit.changes.append(Change(name, old, new, "propose", [ref.source], "the wording differs"))
             continue
-        if name not in AUTO_CORRECT or ref.by not in ("doi", "isbn"):
+        if name not in AUTO_CORRECT:
             audit.changes.append(Change(name, old, new, "propose", [ref.source], "only one source"))
             continue
-        if name == "publicationTitle" and not looks_abbreviated(old, new) and ff.title_similarity(old, new) < 0.8:
+        if name == "publicationTitle" and norm_journal(new).startswith(norm_journal(old) + " "):
+            continue    # the registry adds a subtitle or suffix to the same name: yours is fine
+        if name == "year" and old.isdigit() and new.isdigit() and abs(int(old) - int(new)) > 2:
+            audit.changes.append(Change(name, old, new, "propose", [ref.source],
+                                        "a large difference: check that the DOI belongs to this item"))
+            continue
+        if name == "publicationTitle" and not looks_abbreviated(old, new) \
+                and journal_core(old) != journal_core(new) and ff.title_similarity(old, new) < 0.8:
             audit.changes.append(Change(name, old, new, "propose", [ref.source], "a different journal name"))
             continue
         agree = confirmations(name, new)
@@ -547,37 +801,205 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
         elif any(same(name, record_value(r, name), old) for r in second if record_value(r, name)):
             audit.flags.append(f"{FIELD_LABELS.get(name, name)}: {ref.source} says {new!r}, "
                                f"but another source agrees with yours ({old!r}); left as is")
+        elif name == "publisher":
+            continue    # imprint, parent company or spelling: not worth a decision
+        elif name == "year" and ref.online_year == old:
+            audit.changes.append(Change(name, old, new, "propose", [ref.source],
+                                        "yours is the online year; APA uses the issue year"))
         else:
             audit.changes.append(Change(name, old, new, "propose", [ref.source], "no second source to confirm"))
 
-    _compare_authors(audit, data, ref)
+    _compare_authors(audit, data, ref, pdf_reading)
     _type_flags(audit, data, ref)
     # Proposals the user rejected before are not made again.
     rejected = ctx.rejected.get(info.key) or {}
     audit.changes = [c for c in audit.changes if not (c.kind == "propose" and rejected.get(c.field) == c.new)]
+    _apply_learning(audit, ctx.learned)
     return audit
 
 
+#: A kind of proposal you decided the same way this often (and at least this
+#: share of the time) is decided for you from then on.
+LEARN_MIN = 10
+LEARN_SHARE = 0.9
+
+
+def category(change: Change) -> str:
+    """What kind of proposal this is, without its values: "year|yours is the online year..."."""
+    why = re.sub(r"\d+", "N", change.why or "")
+    why = re.sub(r"^first names:.*", "first names", why)
+    return f"{change.field}|{why[:80]}"
+
+
+def _apply_learning(audit: ItemAudit, learned: dict | None) -> None:
+    if not learned:
+        return
+    kept = []
+    for c in audit.changes:
+        if c.kind == "propose":
+            st = learned.get(category(c)) or {}
+            yes, no = int(st.get("accepted", 0)), int(st.get("rejected", 0))
+            if yes + no >= LEARN_MIN and yes >= LEARN_SHARE * (yes + no):
+                c.kind = "correct"
+                c.why = f"{c.why}; you accepted {yes} of {yes + no} like this"
+            elif yes + no >= LEARN_MIN and no >= LEARN_SHARE * (yes + no):
+                continue
+        kept.append(c)
+    audit.changes = kept
+
+
+_BOILERPLATE_RE = re.compile(r"©|all rights reserved|protected by copyright|this is an open access article|"
+                             r"creative commons|published by elsevier|apa psycinfo database record", re.I)
+_EN_WORDS = {"the", "and", "of", "to", "in", "for", "with", "on", "is", "are", "was", "were", "that", "this",
+             "by", "from", "as", "we", "these", "their"}
+
+
+def _english_share(text: str) -> float:
+    words = ff._fold(text).split()
+    return sum(w in _EN_WORDS for w in words) / max(1, len(words))
+
+
 def _plausible_abstract(text: str, title: str) -> bool:
-    """OpenAlex's abstracts are sometimes another work's, or a citation stub."""
-    if len(text or "") < 200 or re.match(r"^\(?\d{4}\)", text.strip()):
+    """An abstract that belongs to this item: not another work's, a citation
+    stub, a thesis title page, boilerplate or another language."""
+    t = (text or "").strip()
+    if not 200 <= len(t) <= 6000 or re.match(r"^\(?\d{4}\)", t):
         return False
-    # A thesis's title page rather than its abstract.
-    if re.search(r"submitted in (partial )?fulfil|^(a )?(doctoral |master'?s? )?(thesis|dissertation)\b",
-                 text.strip(), re.I):
+    if re.search(r"submitted in (partial )?fulfil|^(a )?(doctoral |master'?s? )?(thesis|dissertation)\b", t, re.I):
         return False
-    words = {w for w in ff._fold(title).split() if len(w) >= 5}
-    found = sum(1 for w in words if w in ff._fold(text))
-    return found >= min(2, len(words))
+    if len(_BOILERPLATE_RE.findall(t)) >= 2:
+        return False
+    words = set(_content_words(title))
+    if words:
+        found = sum(1 for w in words if w in ff._fold(t))
+        if found < (3 if len(words) >= 5 else min(2, len(words))):
+            return False
+    if _english_share(title) >= 0.12 and _english_share(t) < 0.04:
+        return False    # an English item with an abstract in another language
+    return True
 
 
-def _compare_authors(audit: ItemAudit, data: dict, ref: Record) -> None:
+_NOTICE_RE = re.compile(r"^(?:correction|corrigendum|erratum|retraction|retracted|notice of retraction|"
+                        r"expression of concern|withdrawn)\b", re.I)
+
+
+def _doi_identity_problem(info: ff.ItemInfo, ref: Record) -> str | None:
+    """Does the record found by the item's DOI describe this item at all?"""
+    if ref.title and _NOTICE_RE.match(ref.title) and not _NOTICE_RE.match(info.title or ""):
+        return "the DOI is a correction or retraction notice, not the work itself (check the DOI)"
+    if not (info.title and ref.title) or same_title(info.title, ref.title):
+        return None
+    sim = title_match(info.title, ref.title)
+    a, b = norm_title(info.title), norm_title(ref.title)
+    if sim < 0.5 and a not in b and b not in a:
+        return f"the DOI's record has another title ({ref.title[:90]}): check the DOI"
+    if info.first_author and ref.authors and sim < 0.75:
+        mine = (_family_key(info.first_author).split() or [""])[-1]
+        theirs = {(_family_key(f).split() or [""])[-1] for f, _g in ref.authors[:5]}
+        if mine and mine not in theirs:
+            return f"the DOI's record has another title and other authors ({ref.title[:90]}): check the DOI"
+    if info.year.isdigit() and ref.year.isdigit() and abs(int(info.year) - int(ref.year)) > 3 and sim < 0.9:
+        return f"the DOI's record is from {ref.year} with another title: check the DOI"
+    return None
+
+
+def _note_updates(audit: ItemAudit, ref: Record) -> None:
+    """Retractions, expressions of concern and corrections Crossref knows of."""
+    for kind, date, doi in ref.updates:
+        k = (kind or "").lower().replace("-", "_")
+        where = f" ({date[:10]}{', ' + doi if doi else ''})"
+        if k in ("retraction", "withdrawal", "removal", "partial_retraction"):
+            audit.retracted = True
+            audit.flags.append(f"RETRACTED{where}")
+        elif k == "expression_of_concern":
+            audit.flags.append(f"an expression of concern was published{where}")
+        elif k in ("correction", "erratum", "corrigendum", "addendum", "clarification"):
+            audit.flags.append(f"a {k} was published{where}")
+
+
+PDF_SOURCE = "the item's PDF (read by Gemini)"
+_PDF_FIELDS = {"year": "year", "publicationTitle": "journal", "volume": "volume", "issue": "issue",
+               "pages": "pages", "DOI": "doi", "publisher": "publisher", "ISBN": "isbn",
+               "bookTitle": "book_title", "university": "university", "institution": "publisher"}
+
+
+def _pdf_value(reading: dict | None, field_name: str) -> str:
+    """A field as Gemini read it from the PDF; volume and pages only from a published version."""
+    if not reading:
+        return ""
+    if field_name in ("volume", "issue", "pages", "year") and reading.get("version") in ("preprint",
+                                                                                         "accepted manuscript"):
+        return ""
+    return str(reading.get(_PDF_FIELDS.get(field_name, "")) or "").strip()
+
+
+def _from_pdf_only(audit: ItemAudit, data: dict, info: ff.ItemInfo, reading: dict | None) -> None:
+    """No registry knows the item: what its own PDF says becomes proposals."""
+    if not reading or not reading.get("title"):
+        return
+    if info.title and title_match(info.title, reading["title"]) < 0.8:
+        audit.flags.append(f"the attached PDF looks like another work (its title: {reading['title'][:90]})")
+        return
+    for name in _fields_for(info.item_type):
+        if name in ("title", "abstractNote"):
+            continue
+        new = _pdf_value(reading, name)
+        if not new:
+            continue
+        old = _current(data, name)
+        if not old.strip():
+            audit.changes.append(Change(name, "", new, "propose", [PDF_SOURCE], "read from the PDF"))
+        elif not same(name, old, new):
+            audit.changes.append(Change(name, old, new, "propose", [PDF_SOURCE], "the PDF says otherwise"))
+
+
+def _kind_mismatch(item_type: str, ref: Record) -> str | None:
+    """A DOI that belongs to something else than the item: nothing is compared then."""
+    kind = (ref.kind or "").lower()
+    if (ref.doi or "").startswith("10.5860/choice"):
+        return "the DOI is a CHOICE review of the book, not the book (check the DOI)"
+    if kind == "component" or re.search(r":\s*(?:table|figure|fig\.|supplementary\b.*)\s*\d*$", ref.title or "", re.I):
+        return "the DOI points to a table, figure or supplement, not the work itself (check the DOI)"
+    if item_type == "bookSection" and kind in ("book", "edited-book", "monograph", "reference-book"):
+        return "the DOI is the whole book's, not this chapter's (check the DOI)"
+    if item_type == "journalArticle" and kind in ("book", "edited-book", "monograph", "book-chapter", "dataset"):
+        return f"the DOI is registered as a {kind}, not a journal article (check the DOI or the item type)"
+    return None
+
+
+def _family_key(name: str) -> str:
+    """A surname for comparing: no suffix (Jr., III) and no stray initials ("B. Owen")."""
+    words = [w for w in ff._fold(name or "").split() if len(w) > 1 and w not in {"jr", "sr", "ii", "iii", "iv"}]
+    return " ".join(words)
+
+
+def _letters(text: str) -> int:
+    return len(re.sub(r"[^A-Za-zÀ-ÿ]", "", text or ""))
+
+
+def _last_names(names: list[str]) -> list[str]:
+    return [(ff._fold(n).split() or [""])[-1] for n in names]
+
+
+def _compare_authors(audit: ItemAudit, data: dict, ref: Record,
+                     pdf_reading: Callable[[], dict | None] | None = None) -> None:
     mine = [c for c in data.get("creators") or [] if c.get("creatorType", "author") == "author"]
     if not mine or not ref.authors or ref.source == "OpenAlex":
         return
-    my_family = [ff._fold(c.get("lastName") or c.get("name") or "") for c in mine]
-    their_family = [ff._fold(f) for f, _g in ref.authors]
-    fmt = "; ".join(f"{f}, {g}".strip(", ") for f, g in ref.authors)
+    my_family = [_family_key(c.get("lastName") or c.get("name") or "") for c in mine]
+    their_family = [_family_key(f) for f, _g in ref.authors]
+    # The proposal keeps your fuller first names where the registry has initials.
+    my_given = {k: (c.get("firstName") or "") for k, c in zip(my_family, mine)}
+    merged = []
+    for f, g in ref.authors:
+        have = my_given.get(_family_key(f), "")
+        if have and _letters(have) > _letters(g) and ff._fold(have)[:1] == ff._fold(g)[:1]:
+            g = have
+        merged.append((f, g))
+    fmt = "; ".join(f"{f}, {g}".strip(", ") for f, g in merged)
+    if my_family != their_family and len(their_family) < len(my_family) \
+            and all(f in my_family for f in their_family):
+        return    # the registry left out authors you have (group authors, often): keep yours
     if my_family != their_family:
         if set(my_family) == set(their_family):
             why = "the author order differs"
@@ -586,7 +1008,18 @@ def _compare_authors(audit: ItemAudit, data: dict, ref: Record) -> None:
         else:
             why = "the author names differ"
         old = "; ".join(f"{c.get('lastName') or c.get('name')}, {c.get('firstName', '')}".strip(", ") for c in mine)
-        audit.changes.append(Change("creators", old, fmt, "propose", [ref.source], why))
+        sources = [ref.source]
+        reading = pdf_reading() if pdf_reading else None
+        printed = _last_names(list((reading or {}).get("authors") or []))
+        if printed:
+            if printed == _last_names([f for f, _g in ref.authors]):
+                sources.append(PDF_SOURCE)
+                why += "; the PDF lists the same authors"
+            elif printed == _last_names([c.get("lastName") or c.get("name") or "" for c in mine]):
+                audit.flags.append(f"Authors: {ref.source}'s list differs from yours, but the PDF agrees "
+                                   "with yours; left as is")
+                return
+        audit.changes.append(Change("creators", old, fmt, "propose", sources, why))
         return
     # Same people in the same order: complete missing or initial-only first names.
     fills, givens = [], []
@@ -775,11 +1208,110 @@ def _pdf_text_reader() -> Callable[[str], str]:
         for att in reader.get_attachment_paths(key):
             path = att.get("resolved_path")
             if att.get("exists") and path and str(path).lower().endswith(".pdf"):
-                probe = ff.probe_pdf(path, pages=2)
-                return (probe or {}).get("text", "")
+                from zotero_mcp import structure
+
+                pages = structure.read_first_pages(path, 4, 0)
+                return "\n".join(t for _p, t in (pages or {}).get("texts") or [])
         return ""
 
     return text
+
+
+PDF_PROMPT = """Below is the text of the first pages of a PDF from a researcher's library (a cover sheet from a
+repository or database may come first; its citation data counts too). Give the bibliographic data of the
+document itself as printed there. Leave a field empty when it is not printed; never guess.
+
+- authors: every author in byline order, as "Given Family" (not only the corresponding author).
+- year: the year of the issue or publication in the citation line; for a book the year of this edition
+  (its copyright year, not a reprint or an earlier edition).
+- pages: the document's own printed page range ("68-78") or article number ("e70024").
+- version: "published" for the typeset version of record, "accepted manuscript" or "preprint" when the PDF
+  says so or is clearly an author's manuscript, else "unknown".
+- book_title, editors: for a chapter in an edited book; university: for a thesis.
+
+Text:
+{text}
+"""
+
+PDF_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "document": {"type": "STRING", "enum": ["journal article", "book chapter", "book", "thesis", "report",
+                                                 "conference paper", "preprint", "other"]},
+        "version": {"type": "STRING", "enum": ["published", "accepted manuscript", "preprint", "unknown"]},
+        "title": {"type": "STRING"}, "authors": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "year": {"type": "STRING"}, "journal": {"type": "STRING"}, "volume": {"type": "STRING"},
+        "issue": {"type": "STRING"}, "pages": {"type": "STRING"}, "doi": {"type": "STRING"},
+        "book_title": {"type": "STRING"}, "editors": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "publisher": {"type": "STRING"}, "isbn": {"type": "STRING"}, "university": {"type": "STRING"},
+    },
+    "required": ["document", "version", "title"],
+}
+
+
+def _pdf_gemini_reader(model: str | None = None, config_path: str | None = None,
+                       log: Callable[[str], None] = print) -> Callable[[str], dict | None] | None:
+    """Gemini reading the first pages of an item's PDF; answers cached per file.
+
+    None when Gemini is unavailable (no key, no package).
+    """
+    from zotero_mcp import gemini_util, structure
+
+    cfg = gemini_util.load_semantic_config(config_path)
+    model = model or (cfg.get("structure") or {}).get("gemini_model") or gemini_util.DEFAULT_MODEL
+    try:
+        raw_ask = gemini_util.json_asker(model, PDF_SCHEMA, cfg.get("embedding_config"))
+    except Exception:
+        return None
+    failures: list[str] = []
+
+    def ask(prompt: str) -> str:
+        try:
+            return raw_ask(prompt)
+        except Exception as e:
+            if not failures:
+                log(f"Gemini ({model}) failed: {type(e).__name__}: {str(e)[:200]}; PDFs are checked by rules only.")
+            failures.append(type(e).__name__)
+            raise
+    try:
+        from zotero_mcp.local_db import get_local_zotero_reader
+
+        reader = get_local_zotero_reader()
+    except Exception:
+        reader = None
+    if reader is None:
+        return None
+    cache = meta_dir() / "pdf-cache"
+
+    def read(key: str) -> dict | None:
+        for att in reader.get_attachment_paths(key):
+            path = att.get("resolved_path")
+            if not (att.get("exists") and path and str(path).lower().endswith(".pdf")):
+                continue
+            sig = structure.file_signature(path)
+            hit = cache / f"{sig}.json"
+            try:
+                return json.loads(hit.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            pages = structure.read_first_pages(path, 4, 15)
+            if not pages or not pages.get("texts"):
+                return None
+            text = "\n\n".join(f"[PDF page {p}]\n{t}" for p, t in pages["texts"])[:40000]
+            if len(text.strip()) < 200:
+                return None
+            data = gemini_util.ask_json(ask, PDF_PROMPT.format(text=text))
+            if isinstance(data, dict):
+                try:
+                    cache.mkdir(parents=True, exist_ok=True)
+                    hit.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                except OSError:
+                    pass
+                return data
+            return None
+        return None
+
+    return read
 
 
 def decide(writer, raw: dict, accept: bool, state: dict, fields: list[str] | None = None,
@@ -801,6 +1333,9 @@ def decide(writer, raw: dict, accept: bool, state: dict, fields: list[str] | Non
     rejected = state.setdefault(key, {}).setdefault("rejected", {})
     for c in drop:
         rejected[c.field] = c.new
+    stats = state.setdefault("_learned", {})
+    for c, verdict in [(c, "accepted") for c in take] + [(c, "rejected") for c in drop]:
+        stats.setdefault(category(c), {"accepted": 0, "rejected": 0})[verdict] += 1
     for n in notes:
         writer.trash(n)
     log(f"{label} [{key}]: {len(take)} applied, {len(drop)} discarded")
@@ -846,7 +1381,7 @@ class AuditReport:
 
     def totals(self) -> dict[str, int]:
         t = {"items": len(self.audits), "filled": 0, "corrected": 0, "proposals": 0, "items_to_review": 0,
-             "flags": 0, "no_source": 0, "errors": 0}
+             "flags": 0, "no_source": 0, "errors": 0, "retracted": 0}
         for a in self.audits:
             t["filled"] += len(a.by_kind("fill"))
             t["corrected"] += len(a.by_kind("correct"))
@@ -855,6 +1390,7 @@ class AuditReport:
             t["flags"] += len(a.flags)
             t["no_source"] += any("no registry record" in f for f in a.flags)
             t["errors"] += bool(a.error)
+            t["retracted"] += a.retracted
         return t
 
     def markdown(self, limit: int | None = None) -> str:
@@ -866,7 +1402,8 @@ class AuditReport:
             + f"{t['items']} items checked. {verb} {t['filled']} empty fields; "
             f"{'corrected' if self.applied else 'would correct'} {t['corrected']} fields confirmed by two sources; "
             f"{t['proposals']} proposals on {t['items_to_review']} items for your review; "
-            f"{t['flags']} other findings; no registry record for {t['no_source']} items.",
+            f"{t['flags']} other findings; no registry record for {t['no_source']} items"
+            + (f"; {t['retracted']} retracted item(s), tagged '{TAG_RETRACTED}'" if t["retracted"] else "") + ".",
             "",
         ]
         if self.review_counts:
@@ -914,6 +1451,8 @@ def run(
     writer_factory: Callable[[], Any] | None = None,
     pdf_text: Callable[[str], str] | None = None,
     workers: int = 4,
+    gemini: bool | None = None,
+    pdf_read: Callable[[str], dict | None] | None = None,
 ) -> AuditReport:
     from zotero_mcp import library as _library
 
@@ -939,8 +1478,14 @@ def run(
     if limit:
         items = items[:limit]
     state = _load_state()
+    if pdf_read is None and gemini is not False and pdf_text is None:
+        pdf_read = _pdf_gemini_reader(log=log)
+        if pdf_read is None and gemini:
+            log("Gemini is not available (key or package missing); the PDF is checked by rules only.")
     ctx = Context(http, settings, pdf_text or _pdf_text_reader(),
-                  {k: v.get("rejected", {}) for k, v in state.items() if isinstance(v, dict)})
+                  {k: v.get("rejected", {}) for k, v in state.items() if isinstance(v, dict) and k != "_learned"},
+                  pdf_read=pdf_read,
+                  learned=state.get("_learned") or {})
     log(f"{len(items)} item(s) to check{'' if apply else ' (report only)'}.")
 
     def one(raw):
@@ -984,6 +1529,8 @@ def _write(writer, audit: ItemAudit, log: Callable[[str], None]) -> None:
     auto = audit.by_kind("fill") + audit.by_kind("correct")
     props = audit.by_kind("propose")
     try:
+        if audit.retracted:
+            writer.apply(audit, [], tags_add=[TAG_RETRACTED])
         if auto:
             tags = ([TAG_FILLED] if audit.by_kind("fill") else []) + ([TAG_CORRECTED] if audit.by_kind("correct") else [])
             writer.apply(audit, auto, tags_add=tags)

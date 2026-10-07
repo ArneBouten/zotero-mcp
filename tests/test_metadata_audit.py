@@ -206,7 +206,7 @@ class FakeBackend:
 
 
 def test_apply_writes_changes_tags_notes_and_proposals():
-    raw = item(issue="", volume="56", title="A different title altogether")
+    raw = item(issue="", volume="56", title="Self-determination theory and the growth of intrinsic motivation")
     items = {"ABCD1234": raw}
     writer = FakeWriter(items)
     report = ma.run(apply=True, log=lambda m: None, settings=ff.Settings(),
@@ -226,7 +226,7 @@ def test_apply_writes_changes_tags_notes_and_proposals():
     # Accept only the volume: it is applied, the title proposal is remembered as rejected.
     state = ma._load_state()
     ma.decide(writer, items["ABCD1234"], True, state, fields=["volume"], log=lambda m: None)
-    assert data["volume"] == "55" and data["title"] == "A different title altogether"
+    assert data["volume"] == "55" and data["title"] == "Self-determination theory and the growth of intrinsic motivation"
     assert ma.TAG_REVIEW not in {t["tag"] for t in data["tags"]}
     assert state["ABCD1234"]["rejected"] == {"title": "Self-determination theory and the facilitation of intrinsic motivation"}
     assert not writer.proposal_notes("ABCD1234")
@@ -314,3 +314,207 @@ def test_title_pages_and_other_works_are_not_abstracts():
     good = ("This thesis describes the development of an electronic outdoor play device designed to maximise "
             "energy expenditure in children during break times, and tests it in four primary schools over a term, measuring heart rate and step counts against ordinary play.")
     assert ma._plausible_abstract(good, title)
+
+
+# --- what the full-library run showed -------------------------------------------------
+
+
+def _rec(**changes):
+    rec = json.loads(json.dumps(CROSSREF))
+    rec["message"].update(changes)
+    return {"api.crossref.org": (200, rec)}
+
+
+def test_issn_differences_and_hyphens_are_not_proposals():
+    for mine in ("0003066X", "1935-990X", "1234-5678"):
+        a, _ = audit(item(ISSN=mine))
+        assert "ISSN" not in {c.field for c in a.changes}
+
+
+def test_page_ranges_completed_but_never_shortened():
+    a, _ = audit(item(pages="68"))
+    fill = next(c for c in a.changes if c.field == "pages")
+    assert (fill.kind, fill.new) == ("fill", "68-78")
+    a, _ = audit(item(pages="68-78"), _rec(page="68"))
+    assert "pages" not in {c.field for c in a.changes}
+
+
+def test_journal_clutter_is_corrected_but_subtitles_are_not_added():
+    routes = {**_rec(**{"container-title": ["Sports Medicine"]}), "eutils.ncbi": (200, PUBMED_ID)}
+    pm = json.loads(json.dumps(EUROPEPMC))
+    pm["resultList"]["result"][0]["journalInfo"]["journal"]["title"] = "Sports medicine"
+    routes["europepmc"] = (200, pm)
+    a, _ = audit(item(publicationTitle="Sports Medicine (Auckland, N.Z.)"), routes)
+    fix = next(c for c in a.changes if c.field == "publicationTitle")
+    assert fix.kind == "correct" and fix.new == "Sports Medicine"
+    a, _ = audit(item(publicationTitle="American Psychologist"),
+                 _rec(**{"container-title": ["American Psychologist: The Voice of Psychology"]}))
+    assert "publicationTitle" not in {c.field for c in a.changes}
+
+
+def test_a_doi_alias_is_left_alone_and_large_year_gaps_are_only_proposed():
+    a, _ = audit(item(DOI="10.1111/j.1467-8624.1991.tb01588.x"), _rec(DOI="10.2307/1131151"))
+    assert "DOI" not in {c.field for c in a.changes}
+    assert any("lists this work under" in f for f in a.flags)
+    routes = {**_rec(issued={"date-parts": [[2016]]}), "eutils.ncbi": (200, PUBMED_ID)}
+    pm = json.loads(json.dumps(EUROPEPMC))
+    pm["resultList"]["result"][0]["journalInfo"]["yearOfPublication"] = 2016
+    routes["europepmc"] = (200, pm)
+    a, _ = audit(item(date="2000"), routes)
+    year = next(c for c in a.changes if c.field == "year")
+    assert year.kind == "propose" and "check that the DOI" in year.why
+
+
+def test_a_doi_for_a_table_or_the_whole_book_compares_nothing():
+    a, _ = audit(item(), _rec(title=["Self-determination theory and the facilitation of intrinsic motivation: Table 1"]))
+    assert not a.changes and "table, figure" in a.flags[0]
+    a, _ = audit(item(itemType="bookSection", bookTitle=""), _rec(type="book", title=["Handbook of Motivation"]))
+    assert not a.changes and "whole book" in a.flags[0]
+
+
+def test_chapter_prefixes_and_editions_are_not_title_differences():
+    assert ma.same("title", "Writing to teach and reading to learn",
+                   "Chapter IV: Writing to Teach and Reading to Learn")
+    assert ma.same("title", "Multilevel analysis: Techniques and applications, Third Edition",
+                   "Multilevel Analysis: Techniques and Applications")
+
+
+def test_registry_mojibake_suffixes_and_initials_in_names_are_not_differences():
+    names = [{"family": "RyanÃ¤", "given": "Richard M."}, {"family": "Deci Jr.", "given": "Edward L."}]
+    a, _ = audit(item(creators=[{"creatorType": "author", "lastName": "Ryanä", "firstName": "Richard M."},
+                                {"creatorType": "author", "lastName": "Deci", "firstName": "Edward L."}]),
+                 _rec(author=names))
+    assert not any(c.field == "creators" and c.kind == "propose" for c in a.changes)
+
+
+def test_author_proposals_keep_your_fuller_first_names():
+    names = [{"family": "Ryan", "given": "R"}, {"family": "Van Deci", "given": "E"}]
+    a, _ = audit(item(creators=[{"creatorType": "author", "lastName": "Ryan", "firstName": "Richard M."},
+                                {"creatorType": "author", "lastName": "Deci", "firstName": "Edward L."}]),
+                 _rec(author=names))
+    prop = next(c for c in a.changes if c.field == "creators")
+    assert prop.new == "Ryan, Richard M.; Van Deci, E"
+
+
+def test_a_doi_whose_record_has_another_title_is_flagged_not_compared():
+    a, _ = audit(item(volume="99"), _rec(title=["Handbook of motivation at school"]))
+    assert not a.changes and "another title" in a.flags[0]
+
+
+def test_online_year_and_publisher_differences():
+    routes = _rec(**{"published-print": {"date-parts": [[2001]]}, "published-online": {"date-parts": [[2000]]},
+                     "publisher": "Taylor & Francis"})
+    a, _ = audit(item(date="2000", publisher="Routledge"), routes)
+    year = next(c for c in a.changes if c.field == "year")
+    assert year.kind == "propose" and "online year" in year.why
+    assert "publisher" not in {c.field for c in a.changes}
+
+
+def test_decisions_you_make_consistently_are_made_for_you_later():
+    learned = {"volume|no second source to confirm": {"accepted": 12, "rejected": 0}}
+    http = FakeHttp({"api.crossref.org": (200, CROSSREF)})
+    ctx = ma.Context(http, ff.Settings(), pdf_text=lambda k: "", learned=learned)
+    a = ma.audit_item(item(volume="56"), ctx)
+    fix = next(c for c in a.changes if c.field == "volume")
+    assert fix.kind == "correct" and "you accepted 12 of 12" in fix.why
+    learned = {"volume|no second source to confirm": {"accepted": 0, "rejected": 11}}
+    ctx = ma.Context(http, ff.Settings(), pdf_text=lambda k: "", learned=learned)
+    assert "volume" not in {c.field for c in ma.audit_item(item(volume="56"), ctx).changes}
+
+
+def test_a_registry_with_fewer_authors_does_not_propose_deleting_yours():
+    a, _ = audit(item(), _rec(author=[{"family": "Ryan", "given": "Richard M."}]))
+    assert not any(c.field == "creators" and c.kind == "propose" for c in a.changes)
+
+
+# --- identity, retractions, other registries, the PDF -------------------------------
+
+
+def test_retractions_and_corrections_are_flagged():
+    routes = _rec(**{"updated-by": [{"type": "retraction", "DOI": "10.1/notice",
+                                     "updated": {"date-parts": [[2010, 2, 6]]}}]})
+    a, _ = audit(item(), routes)
+    assert a.retracted and a.flags[0].startswith("RETRACTED (2010-02-06")
+
+
+def test_a_doi_with_other_authors_and_another_title_is_not_compared():
+    routes = _rec(title=["Self-determination theory and teachers motivation at work"],
+                  author=[{"family": "Smith", "given": "A."}])
+    a, _ = audit(item(volume="99"), routes)
+    assert not a.changes and "other authors" in a.flags[0]
+
+
+def test_a_preprint_doi_proposes_the_published_one():
+    routes = _rec(type="posted-content", relation={"is-preprint-of": [{"id": "10.1037/published"}]})
+    a, _ = audit(item(), routes)
+    (c,) = a.changes
+    assert (c.field, c.kind, c.new) == ("DOI", "propose", "10.1037/published")
+
+
+def test_other_doi_agencies_through_doi_org():
+    csl = {"type": "article-journal", "title": "Self-determination theory and the facilitation of intrinsic motivation",
+           "author": [{"family": "Ryan", "given": "Richard M."}, {"family": "Deci", "given": "Edward L."}],
+           "issued": {"date-parts": [[2000]]}, "container-title": "American Psychologist", "volume": "55",
+           "issue": "1", "page": "68-78"}
+    routes = {"doi.org/ra/": (200, [{"DOI": "10.1400/1", "RA": "mEDRA"}]), "https://doi.org/10.": (200, csl)}
+    a, _ = audit(item(DOI="10.1400/1", issue=""), routes)
+    assert a.reference.startswith("mEDRA") and ("fill", "issue") in kinds(a)
+
+
+def test_generic_titles_need_an_exact_match():
+    info = ff.ItemInfo.from_zotero(item(title="Editorial", DOI=""))
+    rec = ma.Record(source="OpenAlex", title="Editorial: new directions", authors=[("Ryan", "R.")], year="2000")
+    assert not ma._matches_item(info, rec)
+    info = ff.ItemInfo.from_zotero(item(DOI=""))
+    rec = ma.Record(source="OpenAlex", title="Self-determination theory and the facilitation of intrinsic motivation",
+                    authors=[("Ryan", "R.")], year="2000", kind="dataset")
+    assert not ma._matches_item(info, rec)
+    rec.kind = "book-chapter"   # a soft signal only
+    assert ma._matches_item(info, rec)
+
+
+def test_abstracts_in_another_language_or_boilerplate_are_refused():
+    title = "Self-determination theory and the facilitation of intrinsic motivation, social development and well-being"
+    spanish = ("La teoría de la autodeterminación y la motivación intrínseca: el desarrollo social y el bienestar "
+               "de los estudiantes se estudian en una muestra de escuelas con cuestionarios validados. " * 2)
+    assert not ma._plausible_abstract(spanish, title)
+    english = ("Self-determination theory proposes that intrinsic motivation and social development depend on the "
+               "satisfaction of needs for autonomy, competence and relatedness, which supports well-being. " * 2)
+    assert ma._plausible_abstract(english, title)
+    assert not ma._plausible_abstract("© 2020 Elsevier. All rights reserved. " * 10, title)
+
+
+def test_the_pdf_read_by_gemini_confirms_a_difference():
+    http = FakeHttp({"api.crossref.org": (200, CROSSREF)})
+    reading = {"version": "published", "title": "Self-determination theory", "volume": "55",
+               "authors": ["Richard M. Ryan", "Edward L. Deci"]}
+    ctx = ma.Context(http, ff.Settings(), pdf_text=lambda k: "", pdf_read=lambda k: reading)
+    fix = next(c for c in ma.audit_item(item(volume="56"), ctx).changes if c.field == "volume")
+    assert fix.kind == "correct" and ma.PDF_SOURCE in fix.sources
+    reading["version"] = "accepted manuscript"
+    fix = next(c for c in ma.audit_item(item(volume="56"), ctx).changes if c.field == "volume")
+    assert fix.kind == "propose"
+
+
+def test_the_pdfs_author_list_decides_author_proposals():
+    routes = {"api.crossref.org": (200, json.loads(json.dumps(CROSSREF)))}
+    swapped = item(creators=[{"creatorType": "author", "lastName": "Deci", "firstName": "Edward"},
+                             {"creatorType": "author", "lastName": "Ryan", "firstName": "Richard"}])
+    agree = {"version": "published", "title": "x", "authors": ["Richard M. Ryan", "Edward L. Deci"]}
+    ctx = ma.Context(FakeHttp(routes), ff.Settings(), pdf_text=lambda k: "", pdf_read=lambda k: agree)
+    prop = next(c for c in ma.audit_item(swapped, ctx).changes if c.field == "creators")
+    assert ma.PDF_SOURCE in prop.sources
+    yours = {"version": "published", "title": "x", "authors": ["Edward Deci", "Richard Ryan"]}
+    ctx = ma.Context(FakeHttp(routes), ff.Settings(), pdf_text=lambda k: "", pdf_read=lambda k: yours)
+    a = ma.audit_item(swapped, ctx)
+    assert "creators" not in {c.field for c in a.changes} and any("PDF agrees" in f for f in a.flags)
+
+
+def test_items_no_registry_knows_get_proposals_from_their_pdf():
+    reading = {"version": "published", "title": "Self-determination theory and the facilitation of intrinsic motivation",
+               "year": "2000", "university": "Ghent University"}
+    ctx = ma.Context(FakeHttp({}), ff.Settings(), pdf_text=lambda k: "", pdf_read=lambda k: reading)
+    thesis = item(itemType="thesis", DOI="", date="")
+    a = ma.audit_item(thesis, ctx)
+    props = {(c.field, c.new) for c in a.changes if c.kind == "propose"}
+    assert ("year", "2000") in props and ("university", "Ghent University") in props
