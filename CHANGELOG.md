@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.28] - 2026-10-07
+
+### Fixed
+
+- **Metadata audit: a registry that does not answer is no longer "no record".** The third full run of the day found no record for 207 items instead of 147: OpenAlex's free daily allowance (about 1,000 title searches) was used up and its HTTP 429 answers were taken for "not found". Such items are now reported as *not checked this time* and counted separately, and a service that refuses three times is not asked again in that run.
+- **Metadata audit: title searches start with Crossref**, which is free, before OpenAlex and Semantic Scholar.
+- **Passage labels: headings are located in reading order on their own page**, each after the previous one, preferring a line where the heading stands alone. A "Methods" in a structured abstract, a "Phase 1" under Results or two-column text no longer put headings in the wrong place.
+- Bookmarks: a top bookmark holding only the title is dropped, bookmarks for tables and figures are ignored, and bookmarks that stop halfway are not used (Gemini or the rules take over). Invisible characters are removed from bookmark text.
+- PDF page labels that cannot be printed numbers ("image 1", a page 0, numbers running backwards, roman numerals throughout an article) are not used.
+
+### Changed
+
+- Metadata audit: a publisher is only filled in, never changed ("Association for Computing Machinery" was about to become "ACM"). Semantic Scholar no longer changes journal names. No correction or proposal makes a field worse: an abbreviated journal, a name without its first words ("Advances in Neural ..."), a lost accent or supplement, a year as the volume, or pages such as "Article # 3". "04" and "4" are the same volume.
+- Passage labels: "Abstract: ..." lines and "Appendix 2: ..." headings get their section; "Study 1" and "Experiment 2" headings have no section of their own. Gemini is told to leave out boxed summaries ("Practice points", "Key points"). Labels are version 2, so items labelled before are labelled again.
+
 ## [0.13.2+arne.27] - 2026-10-07
 
 ### Changed

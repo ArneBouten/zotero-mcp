@@ -27,12 +27,14 @@ import datetime as _dt
 import html
 import json
 import re
+import threading
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from zotero_mcp import fulltext_fetch as ff
 
@@ -127,12 +129,42 @@ def _clean_family(name: str) -> str:
     return " ".join(words)
 
 
+def _crossref_headers(settings: ff.Settings) -> dict | None:
+    return {"User-Agent": f"zotero-mcp metadata-audit (mailto:{settings.email})"} if settings.email else None
+
+
 def crossref(doi: str, http: ff.Http, settings: ff.Settings) -> Record | None:
-    headers = {"User-Agent": f"zotero-mcp metadata-audit (mailto:{settings.email})"} if settings.email else None
-    status, data = http.api_json(f"https://api.crossref.org/works/{quote(doi, safe='/')}", headers=headers)
+    status, data = http.api_json(f"https://api.crossref.org/works/{quote(doi, safe='/')}",
+                                 headers=_crossref_headers(settings))
     if status != 200 or not data:
         return None
-    m = data.get("message") or {}
+    return _crossref_record(data.get("message") or {}, doi)
+
+
+def crossref_by_title(item: ff.ItemInfo, http: ff.Http, settings: ff.Settings) -> Record | None:
+    """Crossref's bibliographic search (free, unlike OpenAlex's): a work that is clearly the item."""
+    if not item.title or norm_title(item.title) in GENERIC_TITLES:
+        return None
+    query = f"{item.title[:250]} {item.first_author or ''}".strip()
+    params = {"query.bibliographic": query, "rows": "5"}
+    if item.year.isdigit():
+        y = int(item.year)
+        params["filter"] = f"from-pub-date:{y - 1},until-pub-date:{y + 1}"
+    status, data = http.api_json("https://api.crossref.org/works", params=params,
+                                 headers=_crossref_headers(settings))
+    if status != 200 or not data:
+        return None
+    for m in ((data.get("message") or {}).get("items") or [])[:5]:
+        if not isinstance(m, dict) or not m.get("DOI"):
+            continue
+        rec = _crossref_record(m, m["DOI"])
+        rec.by = "title"
+        if _matches_item(item, rec):
+            return rec
+    return None
+
+
+def _crossref_record(m: dict, doi: str) -> Record:
     # APA dates a journal article by its issue; fall back to the first publication.
     date = _date_from_parts(m.get("published-print")) or _date_from_parts(m.get("issued"))
     online = _date_from_parts(m.get("published-online"))
@@ -550,7 +582,7 @@ def same(field_name: str, a: str, b: str) -> bool:
     if field_name == "pages":
         return norm_pages(a) == norm_pages(b)
     if field_name in ("volume", "issue"):
-        return norm_simple(a) == norm_simple(b)
+        return re.sub(r"^0+(?=\d)", "", norm_simple(a)) == re.sub(r"^0+(?=\d)", "", norm_simple(b))
     if field_name == "publicationTitle":
         return norm_journal(a) == norm_journal(b)
     if field_name == "DOI":
@@ -567,6 +599,46 @@ def looks_abbreviated(journal: str, full: str) -> bool:
     words = [w for w in ff._fold(journal).split() if w]
     full_words = [w for w in ff._fold(full).split() if w not in ("of", "and", "the", "for", "in")]
     return bool(words) and len(words) == len(full_words) and all(f.startswith(w) for w, f in zip(words, full_words))
+
+
+def _loses_accents(old: str, new: str) -> bool:
+    """"Revista electrónica ..." -> "Revista Electronica ...": a word lost its accents."""
+    words = {ff._fold(w): w for w in re.findall(r"[^\W\d_]+", old)}
+    for w in re.findall(r"[^\W\d_]+", new):
+        mine = words.get(ff._fold(w))
+        if mine and not mine.isascii() and w.isascii():
+            return True
+    return False
+
+
+_PAGE_LIKE = re.compile(r"(?:[A-Za-z]{0,2}\d+[A-Za-z]?|[ivxlcdm]+)(?:\s*[-–—]\s*(?:[A-Za-z]{0,2}\d+[A-Za-z]?|[ivxlcdm]+))?",
+                        re.I)
+
+
+def worth_proposing(field_name: str, old: str, new: str) -> bool:
+    """Leave out differences that would only make the field worse: an abbreviated journal,
+    a lost accent or supplement, a year as the volume, "Article # 3" as pages."""
+    old, new = str(old or "").strip(), str(new or "").strip()
+    if old and _loses_accents(old, new):
+        return False
+    if field_name == "publicationTitle" and old:
+        if looks_abbreviated(new, old):
+            return False
+        o, n = norm_journal(old), norm_journal(new)
+        # Shorter is fine only as the same name without clutter ("Sensors (Basel, Switzerland)"),
+        # not with its first words gone ("Advances in Neural ..." -> "Neural ...").
+        if len(n) < len(o) and not o.startswith(n) and journal_core(old) != n:
+            return False
+    if field_name in ("volume", "issue"):
+        if re.search(r"suppl", old, re.I) and not re.search(r"suppl", new, re.I):
+            return False
+        if re.search(r"_suppl|\s", new) and not re.search(r"\s", old):
+            return False
+        if field_name == "volume" and re.fullmatch(r"(?:19|20)\d\d", new) and not re.fullmatch(r"(?:19|20)\d\d", old):
+            return False
+    if field_name == "pages" and not _PAGE_LIKE.fullmatch(new):
+        return False
+    return True
 
 
 def record_value(rec: Record, field_name: str) -> str:
@@ -631,6 +703,34 @@ class ItemAudit:
         return [c for c in self.changes if c.kind == kind]
 
 
+class _Recorder:
+    """The run's Http for one item, noting which services could not answer
+    (HTTP 429, a server error or no connection): their silence is not "no record"."""
+
+    def __init__(self, http):
+        self._http = http
+        self.failed: set[str] = set()
+        self.answered: set[str] = set()
+
+    @staticmethod
+    def service(url: str) -> str:
+        host = urlparse(url).hostname or ""
+        return ".".join(host.split(".")[-2:])
+
+    def api_json(self, url, *args, **kwargs):
+        status, data = self._http.api_json(url, *args, **kwargs)
+        (self.failed if status in (0, None, 429) or (status or 0) >= 500 else self.answered).add(self.service(url))
+        return status, data
+
+    def __getattr__(self, name):
+        return getattr(self._http, name)
+
+
+#: Services that refused this many times are not asked again in this run
+#: (OpenAlex's free daily allowance, for instance, is used up).
+DOWN_AFTER = 3
+
+
 class Context:
     """What an audit run shares: HTTP, settings, the PDF reader, rejections."""
 
@@ -647,6 +747,20 @@ class Context:
         self.pdf_read = pdf_read
         #: Google Scholar's Cite (SerpApi), for items with no record and no readable PDF.
         self.scholar = scholar
+        #: refusals per service in this run, and the services given up on
+        self.refusals: Counter = Counter()
+        self.down: set[str] = set()
+        self.log: Callable[[str], None] = lambda m: None
+        self._lock = threading.Lock()
+
+    def note_failures(self, failed: set[str]) -> None:
+        with self._lock:
+            for service in failed:
+                self.refusals[service] += 1
+                if self.refusals[service] == DOWN_AFTER and service not in self.down:
+                    self.down.add(service)
+                    self.log(f"  {service} keeps refusing (HTTP 429 or no connection, e.g. a used-up daily "
+                             f"allowance); not asked again in this run.")
 
 
 def _current(data: dict, field_name: str) -> str:
@@ -679,7 +793,16 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
     data = raw.get("data", raw)
     info = ff.ItemInfo.from_zotero(raw)
     audit = ItemAudit(info.key, info.label, info.item_type)
-    http, settings = ctx.http, ctx.settings
+    settings = ctx.settings
+    http = _Recorder(ctx.http)
+    try:
+        return _audit_item(raw, data, info, audit, http, settings, ctx)
+    finally:
+        ctx.note_failures(http.failed)
+
+
+def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http: _Recorder,
+                settings: ff.Settings, ctx: Context) -> ItemAudit:
 
     pdf_cache: list = []
 
@@ -697,12 +820,29 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
         ref = (crossref(info.doi, http, settings) or datacite(info.doi, http, settings)
                or doi_registry(info.doi, http, settings))
         if ref is None:
+            if http.failed:
+                return _not_checked(audit, data, http)
             audit.flags.append(f"DOI {info.doi} not found at any DOI registry (wrong DOI?)")
     elif info.isbn and info.item_type == "book":
         ref = openlibrary(info.isbn, http, settings) or google_books(info.isbn, http, settings)
     if ref is None and not info.doi:
-        match = openalex_by_title(info, http, settings) or semantic_scholar_by_title(info, http, settings)
-        if match and match.doi:
+        match = crossref_by_title(info, http, settings)
+        if match is not None and match.kind == "posted-content" and info.item_type != "preprint":
+            match = None    # a preprint of the item: look for the published record elsewhere
+        if match is not None:
+            ref = match
+        else:
+            if "openalex.org" not in ctx.down:
+                match = openalex_by_title(info, http, settings)
+            else:
+                http.failed.add("openalex.org")
+            if match is None and "semanticscholar.org" not in ctx.down:
+                match = semantic_scholar_by_title(info, http, settings)
+            elif match is None:
+                http.failed.add("semanticscholar.org")
+        if ref is None and match is None and http.failed:
+            return _not_checked(audit, data, http)
+        if ref is None and match and match.doi:
             # The title match points to a DOI: use its Crossref record only if
             # that is clearly the item too (OpenAlex sometimes links a preprint).
             cr = crossref(match.doi, http, settings)
@@ -714,7 +854,7 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
                 if cr is None or preprint or not _matches_item(info, cr, 1):
                     ref.doi = ""    # not a DOI to fill in
             ref.by = "title"
-        elif match:
+        elif ref is None and match:
             ref = match
     if ref is None:
         audit.flags.append("no registry record found")
@@ -840,8 +980,14 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
                                    f"yours ({old}) works, so it is left as is")
                 continue
         if name in ("title", "bookTitle"):
-            if ff.title_similarity(norm_title(old), norm_title(new)) < 0.97:
+            if ff.title_similarity(norm_title(old), norm_title(new)) < 0.97 and not _loses_accents(old, new):
                 audit.changes.append(Change(name, old, new, "propose", [ref.source], "the wording differs"))
+            continue
+        if name == "publisher":
+            continue    # imprint, parent company or spelling ("ACM"): not worth a decision
+        if name == "publicationTitle" and ref.source == "Semantic Scholar":
+            continue    # its venue names are normalised, not the journal's own title
+        if not worth_proposing(name, old, new):
             continue
         if name not in AUTO_CORRECT:
             audit.changes.append(Change(name, old, new, "propose", [ref.source], "only one source"))
@@ -862,8 +1008,6 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
         elif any(same(name, record_value(r, name), old) for r in second if record_value(r, name)):
             audit.flags.append(f"{FIELD_LABELS.get(name, name)}: {ref.source} says {new!r}, "
                                f"but another source agrees with yours ({old!r}); left as is")
-        elif name == "publisher":
-            continue    # imprint, parent company or spelling: not worth a decision
         elif name == "year" and ref.online_year == old:
             audit.changes.append(Change(name, old, new, "propose", [ref.source],
                                         "yours is the online year; APA uses the issue year"))
@@ -876,6 +1020,17 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
     rejected = ctx.rejected.get(info.key) or {}
     audit.changes = [c for c in audit.changes if not (c.kind == "propose" and rejected.get(c.field) == c.new)]
     _apply_learning(audit, ctx.learned)
+    return audit
+
+
+NOT_CHECKED = "not checked this time"
+
+
+def _not_checked(audit: ItemAudit, data: dict, http: _Recorder) -> ItemAudit:
+    """A registry could not be asked (refused or unreachable): no conclusion, try again later."""
+    audit.flags.append(f"{NOT_CHECKED}: {', '.join(sorted(http.failed))} did not answer "
+                       f"(HTTP 429, a server error or no connection); run the audit again later")
+    _type_flags(audit, data)
     return audit
 
 
@@ -1005,6 +1160,8 @@ def _from_scholar(audit: ItemAudit, data: dict, info: ff.ItemInfo, rec: Record |
         if not new:
             continue
         old = _current(data, name)
+        if not worth_proposing(name, old, new):
+            continue
         if not old.strip():
             audit.changes.append(Change(name, "", new, "propose", [rec.source], "from Google Scholar"))
         elif not same(name, old, new):
@@ -1025,6 +1182,8 @@ def _from_pdf_only(audit: ItemAudit, data: dict, info: ff.ItemInfo, reading: dic
         if not new:
             continue
         old = _current(data, name)
+        if not worth_proposing(name, old, new):
+            continue
         if not old.strip():
             audit.changes.append(Change(name, "", new, "propose", [PDF_SOURCE], "read from the PDF"))
         elif not same(name, old, new):
@@ -1459,7 +1618,7 @@ class AuditReport:
 
     def totals(self) -> dict[str, int]:
         t = {"items": len(self.audits), "filled": 0, "corrected": 0, "proposals": 0, "items_to_review": 0,
-             "flags": 0, "no_source": 0, "errors": 0, "retracted": 0}
+             "flags": 0, "no_source": 0, "errors": 0, "retracted": 0, "not_checked": 0}
         for a in self.audits:
             t["filled"] += len(a.by_kind("fill"))
             t["corrected"] += len(a.by_kind("correct"))
@@ -1467,6 +1626,7 @@ class AuditReport:
             t["items_to_review"] += bool(a.by_kind("propose"))
             t["flags"] += len(a.flags)
             t["no_source"] += any("no registry record" in f for f in a.flags)
+            t["not_checked"] += any(f.startswith(NOT_CHECKED) for f in a.flags)
             t["errors"] += bool(a.error)
             t["retracted"] += a.retracted
         return t
@@ -1481,7 +1641,9 @@ class AuditReport:
             f"{'corrected' if self.applied else 'would correct'} {t['corrected']} fields confirmed by two sources; "
             f"{t['proposals']} proposals on {t['items_to_review']} items for your review; "
             f"{t['flags']} other findings; no registry record for {t['no_source']} items"
-            + (f"; {t['retracted']} retracted item(s), tagged '{TAG_RETRACTED}'" if t["retracted"] else "") + ".",
+            + (f"; {t['retracted']} retracted item(s), tagged '{TAG_RETRACTED}'" if t["retracted"] else "")
+            + (f"; {t['not_checked']} item(s) not checked because a registry did not answer (run again later)"
+               if t["not_checked"] else "") + ".",
             "",
         ]
         if self.review_counts:
@@ -1566,6 +1728,7 @@ def run(
                   scholar=(lambda info, _b=ff.Budget(): scholar_cite(info, http, settings, _b))
                   if settings.has("serpapi") and pdf_text is None else None,
                   learned=state.get("_learned") or {})
+    ctx.log = log
     log(f"{len(items)} item(s) to check{'' if apply else ' (report only)'}.")
 
     def one(raw):

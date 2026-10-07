@@ -534,3 +534,56 @@ def test_google_scholar_cite_is_parsed_and_only_proposed():
                      scholar=lambda info: rec)
     a = ma.audit_item(item(DOI="", volume="", issue="", pages="", publicationTitle=""), ctx)
     assert {c.kind for c in a.changes} == {"propose"} and ("volume", "37") in {(c.field, c.new) for c in a.changes}
+
+
+def test_title_search_asks_crossref_first_and_fills_the_doi():
+    found = {"message": {"items": [CROSSREF["message"]]}}
+    routes = {"api.crossref.org/works/": (200, CROSSREF), "api.crossref.org/works": (200, found)}
+    a, http = audit(item(DOI=""), routes=routes)
+    assert a.reference == "Crossref (by title)"
+    doi = next(c for c in a.changes if c.field == "DOI")
+    assert (doi.kind, doi.new) == ("fill", "10.1037/0003-066x.55.1.68")
+    assert not any("openalex" in u for u in http.calls)   # OpenAlex's paid search was not needed
+
+
+def test_a_registry_that_does_not_answer_is_not_a_missing_record():
+    a, _ = audit(item(), routes={"api.crossref.org": (429, None)})
+    assert a.flags and a.flags[0].startswith(ma.NOT_CHECKED) and "crossref.org" in a.flags[0]
+    assert not any("wrong DOI" in f for f in a.flags)
+    report = ma.AuditReport([a], False, "now")
+    assert report.totals()["not_checked"] == 1 and report.totals()["no_source"] == 0
+    assert "1 item(s) not checked" in report.markdown()
+
+
+def test_a_service_that_keeps_refusing_is_given_up_for_the_run():
+    http = FakeHttp({"api.openalex.org": (429, None), "semanticscholar": (429, None)})
+    ctx = ma.Context(http, ff.Settings(), pdf_text=lambda k: "")
+    for _ in range(ma.DOWN_AFTER):
+        a = ma.audit_item(item(DOI=""), ctx)
+        assert a.flags[0].startswith(ma.NOT_CHECKED)
+    assert "openalex.org" in ctx.down and "semanticscholar.org" in ctx.down
+    http.calls.clear()
+    a = ma.audit_item(item(DOI=""), ctx)
+    assert a.flags[0].startswith(ma.NOT_CHECKED)
+    assert not any("openalex" in u or "semanticscholar" in u for u in http.calls)
+
+
+def test_publisher_differences_are_never_corrected():
+    a, _ = audit(item(itemType="book", DOI="10.1/x", publisher="Association for Computing Machinery"),
+                 routes=_rec(type="book", publisher="ACM"), pdf="ACM Press, New York")
+    assert "publisher" not in {c.field for c in a.changes}
+
+
+def test_values_that_would_make_a_field_worse_are_not_proposed():
+    w = ma.worth_proposing
+    assert not w("publicationTitle", "Journal of consulting and clinical psychology", "J Consult Clin Psychol")
+    assert not w("publicationTitle", "Advances in neural information processing systems",
+                 "Neural Information Processing Systems")
+    assert w("publicationTitle", "Sensors (Basel, Switzerland)", "Sensors")
+    assert w("publicationTitle", "Lancet (London, England)", "The Lancet")
+    assert not w("publicationTitle", "Revista electrónica interuniversitaria de formación del profesorado",
+                 "Revista Electronica Interuniversitaria de Formación del Profesorado")
+    assert not w("issue", "Supplement 5", "5") and not w("volume", "27 Suppl 3", "27")
+    assert not w("volume", "19", "2019") and not w("volume", "19", "19 3") and not w("issue", "3", "3_suppl")
+    assert not w("pages", "1-18", "Article # 3") and w("pages", "1-18", "e30") and w("pages", "", "363-378")
+    assert ma.same("volume", "4", "04") and ma.same("issue", "06", "6")
