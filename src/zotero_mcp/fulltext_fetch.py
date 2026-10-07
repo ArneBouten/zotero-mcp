@@ -114,7 +114,8 @@ def state_dir() -> Path:
 class Settings:
     """What the fetcher may use. Read from the environment and config.json.
 
-    Keys come from the environment first, then from ``client_env`` in
+    Keys come from the environment first, then from ``keys.env`` beside the
+    config (one ``KEY=value`` per line), then from ``client_env`` in
     ``~/.config/zotero-mcp/config.json``. Limits come from the
     ``fulltext_fetch`` section of the same file.
     """
@@ -139,7 +140,8 @@ class Settings:
             cfg = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             cfg = {}
-        client_env = cfg.get("client_env") or {}
+        client_env = dict(cfg.get("client_env") or {})
+        client_env.update(read_keys_file(path.with_name("keys.env")))
         section = cfg.get("fulltext_fetch") or {}
         keys = {}
         for name, env in KEY_ENV.items():
@@ -167,6 +169,27 @@ class Settings:
 
     def has(self, name: str) -> bool:
         return bool(self.keys.get(name))
+
+
+def read_keys_file(path: Path) -> dict[str, str]:
+    """``KEY=value`` lines from a plain text file (``keys.env``). Lines that
+    are empty or start with ``#`` are ignored; quotes around a value are
+    dropped. A missing file is an empty result."""
+    out: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip().removeprefix("export ").strip()
+        value = value.strip().strip('"').strip("'")
+        if key and value:
+            out[key] = value
+    return out
 
 
 class Budget:

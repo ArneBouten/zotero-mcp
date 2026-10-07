@@ -298,3 +298,18 @@ def test_dry_run_and_save_dir_write_nothing_to_zotero(tmp_path, monkeypatch):
                     settings=ff.Settings(host_delay=0), http=http, writer_factory=no_writer, backend=_backend())
     assert {r.key: r.status for r in report.results} == {"HAVE0001": "skipped", "ABCD1234": "found"}
     assert len(list(out.glob("ABCD1234 - *.pdf"))) == 1
+
+
+def test_keys_file_wins_over_config_and_loses_to_the_environment(home, monkeypatch):
+    cfg = home / ".config" / "zotero-mcp"
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "config.json").write_text('{"client_env": {"SERPAPI_API_KEY": "old", "TAVILY_API_KEY": "t0"}}')
+    (cfg / "keys.env").write_text(
+        "﻿# my keys\nSERPAPI_API_KEY = new\nCORE_API_KEY=\"c1\"\n\nUNPAYWALL_EMAIL=me@ugent.be\n",
+        encoding="utf-8",
+    )
+    s = ff.Settings.load()
+    assert s.keys["serpapi"] == "new" and s.keys["tavily"] == "t0" and s.keys["core"] == "c1"
+    assert s.email == "me@ugent.be"
+    monkeypatch.setenv("SERPAPI_API_KEY", "env")
+    assert ff.Settings.load().keys["serpapi"] == "env"

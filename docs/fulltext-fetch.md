@@ -53,9 +53,20 @@ at least 6 seconds apart, so a run of 25 items takes several minutes.
 
 ## Keys and limits
 
-Keys are read from the environment, then from `client_env` in
-`~/.config/zotero-mcp/config.json`, so the command line and the MCP server see
-the same ones:
+The simplest place for keys is a plain text file, `~/.config/zotero-mcp/keys.env`
+(on Windows `C:\Users\<you>\.config\zotero-mcp\keys.env`), one per line:
+
+```
+SERPAPI_API_KEY=...
+TAVILY_API_KEY=...
+OPENALEX_API_KEY=...
+CORE_API_KEY=...
+ZENROWS_API_KEY=...
+UNPAYWALL_EMAIL=you@example.org
+```
+
+Lines starting with `#` are ignored. The environment wins over this file,
+and this file over `client_env` in `~/.config/zotero-mcp/config.json`:
 
 ```json
 "client_env": {

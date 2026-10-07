@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.13] - 2026-10-07
+
+### Added
+
+- **Searchable PDFs.** With `extraction.ocr.write_text_layer: true`, the text OCR recognises is also written into the PDF as an invisible layer behind the page images, so Zotero's own search and reader see it and it syncs with the file to other computers, which then skip the OCR. `zotero-mcp ocr-pdfs` does the same for the scans already in the library. Only files in Zotero's storage folder are changed; each is checked before it replaces the original. See [Configuration](docs/configuration.md#searchable-pdfs).
+- **`keys.env` for the fetcher's keys.** One `KEY=value` per line in `~/.config/zotero-mcp/keys.env`, edited in any text editor.
+
 ## [0.13.2+arne.12] - 2026-10-07
 
 ### Changed

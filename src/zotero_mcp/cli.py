@@ -888,6 +888,15 @@ def main():
     fetch_parser.add_argument("--open-missing", action="store_true",
                               help="Open a Google Scholar search in the browser for each item still not found")
 
+    layer_parser = subparsers.add_parser(
+        "ocr-pdfs",
+        help="OCR scanned PDFs in Zotero storage and write the text into the files (searchable PDFs)",
+    )
+    layer_parser.add_argument("--items", help="Comma-separated item or attachment keys (default: all PDFs)")
+    layer_parser.add_argument("--limit", type=int, help="At most this many files")
+    layer_parser.add_argument("--dry-run", action="store_true", help="Only list the scans that need OCR")
+    layer_parser.add_argument("--workers", type=int, default=2, help="Files processed at once (default 2)")
+
     ocr_parser = subparsers.add_parser(
         "ocr-setup",
         help="Download Tesseract language data so scanned PDFs are OCR'd when indexed",
@@ -1370,6 +1379,31 @@ def main():
             for key in missing[:20]:
                 if key in found:
                     webbrowser.open(fulltext_fetch.scholar_search_url(fulltext_fetch.ItemInfo.from_zotero(found[key])))
+
+    elif args.command == "ocr-pdfs":
+        setup_zotero_environment()
+        from zotero_mcp import ocr
+
+        cfg = {}
+        try:
+            with open(_semantic_config_path(None)) as f:
+                cfg = json.load(f).get("semantic_search", {}).get("extraction", {}).get("ocr") or {}
+        except Exception:
+            pass
+        settings = ocr.resolve_settings(cfg)
+        if settings is None:
+            print("OCR is not set up: run `zotero-mcp ocr-setup` first.")
+            sys.exit(1)
+        keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
+        try:
+            counts = ocr.add_text_layers(settings, keys=keys, limit=args.limit,
+                                         dry_run=args.dry_run, workers=args.workers)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        print("Done: " + (", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "nothing to do"))
+        if not args.dry_run and counts.get("written"):
+            print("Zotero uploads the changed files at its next sync.")
 
     elif args.command == "ocr-setup":
         from zotero_mcp import ocr

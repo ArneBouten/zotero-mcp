@@ -49,6 +49,9 @@ class OcrSettings:
     languages: str = DEFAULT_LANGUAGES
     max_pages: int = DEFAULT_MAX_PAGES
     dpi: int = DEFAULT_DPI
+    #: Write the recognised text into the PDF as an invisible layer, so the
+    #: file itself becomes searchable and the text syncs with it.
+    write_text_layer: bool = False
 
 
 def user_tessdata_dir() -> Path:
@@ -103,7 +106,8 @@ def resolve_settings(cfg: dict | None) -> OcrSettings | None:
 
     On by default whenever language data can be found; ``"enabled": false``
     turns it off. Keys: ``languages`` ("eng", or "eng+nld" for several),
-    ``max_pages``, ``dpi``, ``tessdata`` (a folder).
+    ``max_pages``, ``dpi``, ``tessdata`` (a folder), ``write_text_layer``
+    (true: put the recognised text into the PDF file itself).
     """
     cfg = cfg if isinstance(cfg, dict) else {}
     if cfg.get("enabled") is False:
@@ -121,6 +125,7 @@ def resolve_settings(cfg: dict | None) -> OcrSettings | None:
         languages="+".join(langs),
         max_pages=max(1, int(cfg.get("max_pages") or DEFAULT_MAX_PAGES)),
         dpi=max(72, int(cfg.get("dpi") or DEFAULT_DPI)),
+        write_text_layer=bool(cfg.get("write_text_layer", False)),
     )
 
 
@@ -129,6 +134,7 @@ def ocr_pdf_pages(path: str | Path, pages: list[int], settings: OcrSettings) -> 
     import pymupdf
 
     out: dict[int, str] = {}
+    words: dict[int, list] = {}
     announce = len(pages) >= ANNOUNCE_PAGES
     started = time.monotonic()
     if announce:
@@ -146,6 +152,8 @@ def ocr_pdf_pages(path: str | Path, pages: list[int], settings: OcrSettings) -> 
                     tessdata=settings.tessdata,
                 )
                 text = page.get_text(textpage=textpage)
+                if settings.write_text_layer:
+                    words[number] = page.get_text("words", textpage=textpage)
             except Exception as e:
                 logger.debug("OCR failed on page %s of %s: %s", number + 1, path, e)
                 continue
@@ -156,7 +164,110 @@ def ocr_pdf_pages(path: str | Path, pages: list[int], settings: OcrSettings) -> 
             f"OCR done: {Path(path).name}, text on {len(out)} of {len(pages)} pages "
             f"in {time.monotonic() - started:.0f}s"
         )
+    if settings.write_text_layer and words and is_zotero_storage_file(path):
+        status = apply_text_layer(path, words)
+        if announce or status != "written":
+            _progress(f"Text layer {status}: {Path(path).name}")
     return out
+
+
+def is_zotero_storage_file(path: str | Path) -> bool:
+    """Only files Zotero manages (``storage/<KEY>/``) are rewritten, never a
+    linked file somewhere else on the disk."""
+    parts = Path(path).resolve().parts
+    return len(parts) >= 3 and parts[-3].lower() == "storage" and len(parts[-2]) == 8
+
+
+def apply_text_layer(path: str | Path, words_by_page: dict[int, list]) -> str:
+    """Put OCR'd words into the PDF as invisible text, behind each page image.
+
+    The page images are left exactly as they are; only text is added, in
+    render mode 3 (invisible), at each word's position, the way scanners
+    make "searchable PDFs". Pages that already have text are skipped. The
+    new file is written beside the original, checked, then swapped in.
+    Returns "written", "unchanged" or the reason it could not be done.
+    """
+    import pymupdf
+
+    src = Path(path)
+    tmp = src.with_name(src.name + ".textlayer.tmp")
+    added = 0
+    try:
+        with pymupdf.open(str(src)) as doc:
+            if doc.needs_pass or doc.is_encrypted:
+                return "skipped (encrypted PDF)"
+            pages = doc.page_count
+            for number, words in words_by_page.items():
+                if not 0 <= number < pages:
+                    continue
+                page = doc[number]
+                if page.get_text().strip():
+                    continue
+                writer = pymupdf.TextWriter(page.rect)
+                for w in words:
+                    x0, y0, x1, y1, word = w[0], w[1], w[2], w[3], w[4]
+                    height = y1 - y0
+                    if height <= 0 or not str(word).strip():
+                        continue
+                    try:
+                        # Size each word to its box, so selecting text in a
+                        # viewer highlights roughly the right stretch.
+                        unit = pymupdf.get_text_length(str(word), fontname="helv", fontsize=1) or 1.0
+                        size = max(1.0, min(0.85 * height, (x1 - x0) / unit))
+                        writer.append((x0, y1 - 0.2 * height), str(word), fontsize=size)
+                        added += 1
+                    except Exception:
+                        continue
+                writer.write_text(page, render_mode=3)
+            if not added:
+                return "unchanged"
+            doc.save(str(tmp), garbage=0, deflate=True)
+        with pymupdf.open(str(tmp)) as check:
+            if check.page_count != pages or not any(
+                check[n].get_text().strip() for n in words_by_page if 0 <= n < pages
+            ):
+                raise ValueError("the rewritten file did not check out")
+        os.replace(tmp, src)
+        return "written"
+    except PermissionError:
+        return "skipped (file in use; is it open in Zotero?)"
+    except Exception as e:
+        return f"skipped ({type(e).__name__}: {e})"
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def text_layer_status(path: str | Path, max_pages: int = DEFAULT_MAX_PAGES) -> dict:
+    """Pages, and which of the first ``max_pages`` have no text."""
+    import pymupdf
+
+    with pymupdf.open(str(path)) as doc:
+        total = doc.page_count
+        limit = min(total, max_pages)
+        empty = [n for n in range(limit) if not doc[n].get_text().strip()]
+    return {"pages": total, "checked": limit, "empty": empty,
+            "needs_ocr": limit > 0 and (limit - len(empty)) < TEXT_PAGE_SHARE * limit}
+
+
+def add_text_layer_to_file(path: str | Path, settings: OcrSettings, check_only: bool = False) -> dict:
+    """OCR a scanned PDF's empty pages and write the text into the file."""
+    info = text_layer_status(path, settings.max_pages)
+    if not info["needs_ocr"]:
+        return {**info, "status": "has text"}
+    if check_only:
+        return {**info, "status": "needs OCR"}
+    started = time.monotonic()
+    layered = OcrSettings(settings.tessdata, settings.languages, settings.max_pages, settings.dpi, True)
+    recognised = ocr_pdf_pages(path, info["empty"], layered)
+    if not recognised:
+        return {**info, "status": "no text recognised"}
+    after = text_layer_status(path, settings.max_pages)
+    status = "written" if len(after["empty"]) < len(info["empty"]) else "not written"
+    return {**info, "status": status, "ocr_pages": len(recognised), "seconds": round(time.monotonic() - started)}
 
 
 #: OCR of at least this many pages is announced on stderr, so a long scan
@@ -200,3 +311,137 @@ def download_languages(languages: list[str], dest: Path | None = None, progress=
             raise RuntimeError(f"{url} did not return language data")
         tmp.replace(target)
     return dest
+
+
+def _state_path() -> Path:
+    return Path.home() / ".config" / "zotero-mcp" / "textlayer-state.json"
+
+
+def library_pdfs(reader) -> list[tuple[str, str, Path]]:
+    """``(attachment key, parent key, file)`` for every PDF in Zotero storage."""
+    rows = reader._get_connection().execute(
+        """
+        SELECT att.key AS attachmentKey, parent.key AS parentKey, ia.path AS path
+        FROM itemAttachments ia
+        JOIN items att ON att.itemID = ia.itemID
+        LEFT JOIN items parent ON parent.itemID = ia.parentItemID
+        LEFT JOIN deletedItems d ON d.itemID = ia.itemID
+        WHERE ia.contentType = 'application/pdf' AND ia.path LIKE 'storage:%' AND d.itemID IS NULL
+        ORDER BY ia.itemID
+        """
+    ).fetchall()
+    out = []
+    for row in rows:
+        path = reader._resolve_attachment_path(row["attachmentKey"], row["path"])
+        if path and path.exists():
+            out.append((row["attachmentKey"], row["parentKey"] or "", path))
+    return out
+
+
+def add_text_layers(
+    settings: OcrSettings,
+    *,
+    keys: list[str] | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
+    workers: int = 2,
+    log=print,
+    reader=None,
+) -> dict[str, int]:
+    """OCR every scanned PDF in Zotero storage that has no text, into the file.
+
+    Each file is handled in its own process (PyMuPDF can crash on a damaged
+    file), and files already checked are remembered by size and date, so a
+    second run only looks at new or changed files.
+    """
+    import json
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import asdict
+
+    if reader is None:
+        from zotero_mcp.local_db import get_local_zotero_reader
+
+        reader = get_local_zotero_reader()
+        if reader is None:
+            raise RuntimeError("cannot read the local Zotero database")
+    pdfs = library_pdfs(reader)
+    if keys:
+        wanted = set(keys)
+        pdfs = [p for p in pdfs if p[0] in wanted or p[1] in wanted]
+    try:
+        state = json.loads(_state_path().read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+
+    def stamp(path: Path) -> list:
+        st = path.stat()
+        return [st.st_size, int(st.st_mtime)]
+
+    todo = [p for p in pdfs if keys or state.get(p[0], {}).get("stamp") != stamp(p[2])]
+    if limit:
+        todo = todo[:limit]
+    log(f"{len(pdfs)} PDF(s) in Zotero storage; {len(todo)} to check"
+        + (" (dry run: nothing is written)" if dry_run else ""))
+    counts: dict[str, int] = {}
+    raw = json.dumps(asdict(settings))
+    timeout = max(900, 10 * settings.max_pages)
+
+    def one(entry):
+        key, parent, path = entry
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-I", "-m", "zotero_mcp.ocr", "check" if dry_run else "layer", str(path), raw],
+                capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
+            )
+            result = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.stdout.strip() else {
+                "status": f"error (exit {proc.returncode})"}
+        except subprocess.TimeoutExpired:
+            result = {"status": f"error (took over {timeout // 60} min)"}
+        except Exception as e:
+            result = {"status": f"error ({type(e).__name__})"}
+        return entry, result
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for (key, parent, path), result in pool.map(one, todo):
+            done += 1
+            status = result.get("status", "error")
+            counts[status] = counts.get(status, 0) + 1
+            if status != "has text":
+                extra = ""
+                if result.get("ocr_pages"):
+                    extra = f", {result['ocr_pages']} pages OCR'd in {result.get('seconds', 0)}s"
+                log(f"[{done}/{len(todo)}] {path.name} [{parent or key}]: {status}{extra}")
+            elif done % 100 == 0:
+                log(f"[{done}/{len(todo)}] checked")
+            if not dry_run and (status in ("has text", "written", "no text recognised")):
+                try:
+                    state[key] = {"stamp": stamp(path), "status": status}
+                except OSError:
+                    pass
+    if not dry_run:
+        try:
+            _state_path().parent.mkdir(parents=True, exist_ok=True)
+            _state_path().write_text(json.dumps(state), encoding="utf-8")
+        except OSError:
+            pass
+    return counts
+
+
+def _main(argv: list[str]) -> int:  # pragma: no cover - run as a child process
+    """``python -m zotero_mcp.ocr layer|check <pdf> <settings-json>``."""
+    import json
+
+    mode, path, raw = argv[0], argv[1], json.loads(argv[2])
+    settings = OcrSettings(**raw)
+    try:
+        result = add_text_layer_to_file(path, settings, check_only=(mode == "check"))
+    except Exception as e:
+        result = {"status": f"error ({type(e).__name__}: {e})"}
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(_main(sys.argv[1:]))

@@ -286,3 +286,33 @@ def test_extraction_watch_reports_each_file_and_long_ones(capsys):
     assert "still extracting Long scan.pdf [KEY1]" in err
     assert "[1/2] Long scan.pdf [KEY1]: 1,234 characters (pdf)" in err
     assert "[2/2] empty.pdf [KEY2]: no text" in err
+
+
+# --- OCR text layers --------------------------------------------------------------
+
+
+def test_text_layer_is_written_into_storage_files_only(tmp_path):
+    pymupdf = pytest.importorskip("pymupdf")
+    from zotero_mcp import ocr
+
+    folder = tmp_path / "storage" / "ABCD1234"
+    folder.mkdir(parents=True)
+    doc = pymupdf.open()
+    page = doc.new_page()
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 100), 0)
+    pix.clear_with(220)
+    page.insert_image(pymupdf.Rect(72, 72, 272, 172), pixmap=pix)
+    pdf = folder / "scan.pdf"
+    doc.save(str(pdf))
+    doc.close()
+
+    assert ocr.is_zotero_storage_file(pdf)
+    assert not ocr.is_zotero_storage_file(tmp_path / "linked.pdf")
+    assert ocr.text_layer_status(pdf)["needs_ocr"] is True
+    words = {0: [(72, 80, 140, 95, "Autonomy", 0, 0, 0), (145, 80, 200, 95, "support", 0, 0, 1)]}
+    assert ocr.apply_text_layer(pdf, words) == "written"
+    with pymupdf.open(str(pdf)) as check:
+        assert check[0].search_for("Autonomy support")
+    assert ocr.apply_text_layer(pdf, words) == "unchanged"  # a page with text is left alone
+    assert sorted(p.name for p in folder.iterdir()) == ["scan.pdf"]  # no temp file left
+    assert ocr.text_layer_status(pdf)["needs_ocr"] is False

@@ -236,8 +236,23 @@ This downloads the files into `~/.config/zotero-mcp/tessdata` (an existing Tesse
 | `max_pages` | `300` | Pages recognised per document; about one to two seconds a page. |
 | `dpi` | `300` | Rendering resolution for recognition. |
 | `tessdata` | — | A folder with the `.traineddata` files, if not in a standard place. |
+| `write_text_layer` | `false` | `true` also writes the recognised text into the PDF as an invisible layer behind the page images (a "searchable PDF"). Only files in Zotero's own storage folder are changed, never linked files. |
 
-OCR runs only while indexing, never in the interactive tools. The recognised text is searchable through semantic search; the PDF in Zotero itself stays a scan. Large first runs are fastest from the command line (`zotero-mcp update-db --fulltext`), which uses `extraction.workers` processes.
+OCR runs only while indexing, never in the interactive tools. Without `write_text_layer` the recognised text is searchable through semantic search only, and the PDF in Zotero stays a scan. Large first runs are fastest from the command line (`zotero-mcp update-db --fulltext`), which uses `extraction.workers` processes.
+
+#### Searchable PDFs
+
+With a text layer in the file, Zotero's own search and reader see the text, and it syncs with the file: another computer that indexes the PDF reads the text instead of OCR'ing it again. The page images are not touched; your annotations live in Zotero's database and are unaffected. Zotero uploads each changed file once at its next sync.
+
+`zotero-mcp ocr-pdfs` does this for the scans already in the library:
+
+```bash
+zotero-mcp ocr-pdfs --dry-run        # list the scans without a text layer
+zotero-mcp ocr-pdfs                  # OCR them and write the text into the files
+zotero-mcp ocr-pdfs --items ABCD1234 --workers 4
+```
+
+Each file is handled in its own process, checked after writing and swapped in only then; a file open in Zotero's reader is skipped and done on the next run. Files already checked are remembered, so a second run only looks at new or changed PDFs. Run it on one computer only, so two computers never upload different versions of the same file.
 
 Extracted text is reliable for prose and unreliable for math and tables. `zotero_read_pdf_pages` flags the pages where that happens and can return those pages as images (`format='image'`).
 
