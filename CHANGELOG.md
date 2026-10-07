@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.26] - 2026-10-07
+
+### Fixed
+
+- An APA introduction's level-2 headings ("The Present Study") are no longer nested under the Abstract when the repeated title was not found as a heading.
+
 ## [0.13.2+arne.25] - 2026-10-07
 
 ### Changed
@@ -15,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Combined headings carry both sections**, as in the JATS standard: "Results and Discussion" is `section` Results and `section_2` Discussion. A search filtered on Discussion finds it, and the Location line shows "Results & Discussion".
 - Section names in Portuguese and Italian for the rules fallback.
 - Gemini's heading answers are cached per prompt wording, so a changed prompt is asked again.
-- An APA introduction's level-2 headings ("The Present Study") are no longer nested under the Abstract when the repeated title was not found as a heading.
 
 ## [0.13.2+arne.24] - 2026-10-07
 
