@@ -1274,9 +1274,9 @@ def _save_state(state: dict) -> None:
 def _pdf_text_reader() -> Callable[[str], str]:
     """First pages of an item's PDF, read in a child process (PyMuPDF can crash)."""
     try:
-        from zotero_mcp.local_db import get_local_zotero_reader
+        from zotero_mcp.local_db import get_serial_reader
 
-        reader = get_local_zotero_reader()
+        reader = get_serial_reader()
     except Exception:
         reader = None
 
@@ -1352,9 +1352,9 @@ def _pdf_gemini_reader(model: str | None = None, config_path: str | None = None,
             failures.append(type(e).__name__)
             raise
     try:
-        from zotero_mcp.local_db import get_local_zotero_reader
+        from zotero_mcp.local_db import get_serial_reader
 
-        reader = get_local_zotero_reader()
+        reader = get_serial_reader()
     except Exception:
         reader = None
     if reader is None:

@@ -67,6 +67,12 @@ class _Cache:
 
 
 def _item_fields(reader, key: str) -> dict:
+    if hasattr(reader, "run"):   # a SerialReader: query on its own thread
+        return reader.run(lambda r: _item_fields_direct(r, key))
+    return _item_fields_direct(reader, key)
+
+
+def _item_fields_direct(reader, key: str) -> dict:
     out = {"pages": "", "title": "", "itemType": ""}
     try:
         conn = reader._get_connection()
@@ -146,9 +152,9 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
 
         search = create_semantic_search(config_path)
     if reader is None:
-        from zotero_mcp.local_db import get_local_zotero_reader
+        from zotero_mcp.local_db import get_serial_reader
 
-        reader = get_local_zotero_reader()
+        reader = get_serial_reader()
     collection = search.chroma_client.collection
     cfg = structure_config(config_path)
     use_gemini = cfg.get("gemini", False) if gemini is None else gemini

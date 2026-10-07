@@ -3519,6 +3519,44 @@ def get_local_zotero_reader() -> LocalZoteroReader | None:
         return None
 
 
+class SerialReader:
+    """A LocalZoteroReader shared by many threads.
+
+    While Zotero is open, the reader works on a snapshot of its database, and
+    that SQLite connection may only be used by the thread that opened it. Every
+    call therefore runs on one dedicated thread, which also creates the reader.
+    """
+
+    def __init__(self, factory=None):
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="zotero-db")
+        self._reader = self._pool.submit(factory or get_local_zotero_reader).result()
+
+    def __bool__(self) -> bool:
+        return self._reader is not None
+
+    def run(self, fn):
+        """``fn(reader)`` on the reader's own thread."""
+        return self._pool.submit(fn, self._reader).result()
+
+    def __getattr__(self, name):
+        attr = getattr(self._reader, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            return self._pool.submit(attr, *args, **kwargs).result()
+
+        return call
+
+
+def get_serial_reader() -> SerialReader | None:
+    """``get_local_zotero_reader`` for use from several threads (None when not local)."""
+    reader = SerialReader()
+    return reader if reader else None
+
+
 def is_local_db_available() -> bool:
     """
     Check if local Zotero database is available.

@@ -259,3 +259,30 @@ def test_the_child_process_survives_a_windows_console_encoding(tmp_path, monkeyp
     assert scan is not None and scan["toc"][0][1] == "Résultats ≥ 3: ﬁnal"
     pages = st.read_first_pages(path, 1)
     assert pages is not None and pages["texts"]
+
+
+def test_a_thread_bound_database_reader_is_used_from_one_thread_only(tmp_path):
+    """While Zotero is open the reader's SQLite snapshot may only be used by the
+    thread that opened it; SerialReader runs every call on that thread."""
+    import sqlite3
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from zotero_mcp.local_db import SerialReader
+
+    class ThreadBound:
+        def __init__(self):
+            self.conn = sqlite3.connect(":memory:", check_same_thread=True)
+            self.owner = threading.get_ident()
+
+        def lookup(self, x):
+            self.conn.execute("select 1")   # raises from any other thread
+            return x * 2
+
+    serial = SerialReader(ThreadBound)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert list(pool.map(serial.lookup, range(20))) == [x * 2 for x in range(20)]
+    assert serial.run(lambda r: r.owner) != threading.get_ident()
+    plain = ThreadBound()
+    with ThreadPoolExecutor(max_workers=2) as pool, pytest.raises(sqlite3.ProgrammingError):
+        list(pool.map(plain.lookup, range(4)))

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.24] - 2026-10-07
+
+### Fixed
+
+- **`relabel-index` and the metadata audit found "no PDF" for almost every item while Zotero was open.** Zotero's database is then read from a snapshot whose connection may only be used by the thread that opened it; the parallel workers got an error that was taken for a missing PDF. All database calls of these two commands now run on one dedicated thread (`SerialReader`).
+
 ## [0.13.2+arne.23] - 2026-10-07
 
 ### Fixed
