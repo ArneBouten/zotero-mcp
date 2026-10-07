@@ -518,3 +518,19 @@ def test_items_no_registry_knows_get_proposals_from_their_pdf():
     a = ma.audit_item(thesis, ctx)
     props = {(c.field, c.new) for c in a.changes if c.kind == "propose"}
     assert ("year", "2000") in props and ("university", "Ghent University") in props
+
+
+def test_google_scholar_cite_is_parsed_and_only_proposed():
+    apa = ("Gardner, R. C., & Smyihe, P. C. (1981). On the development of the attitude/motivation test battery. "
+           "Canadian Modern Language Review, 37(3), 510-525.")
+    f = ma.parse_apa(apa)
+    assert (f["year"], f["journal"], f["volume"], f["issue"], f["pages"]) == (
+        "1981", "Canadian Modern Language Review", "37", "3", "510-525")
+    assert ma.parse_apa("Apter, M. J. (2007). Reversal theory: The dynamics of motivation. Oneworld.")["publisher"] \
+        == "Oneworld"
+    rec = ma.Record(source="Google Scholar (Cite)", year="1981", volume="37", issue="3", pages="510-525",
+                    journal="Canadian Modern Language Review")
+    ctx = ma.Context(FakeHttp({}), ff.Settings(), pdf_text=lambda k: "", pdf_read=lambda k: None,
+                     scholar=lambda info: rec)
+    a = ma.audit_item(item(DOI="", volume="", issue="", pages="", publicationTitle=""), ctx)
+    assert {c.kind for c in a.changes} == {"propose"} and ("volume", "37") in {(c.field, c.new) for c in a.changes}

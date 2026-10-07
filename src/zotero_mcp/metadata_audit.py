@@ -356,6 +356,60 @@ def doi_registry(doi: str, http: ff.Http, settings: ff.Settings) -> Record | Non
     )
 
 
+#: SerpApi searches the audit leaves for the full-text fetcher each month.
+SCHOLAR_RESERVE = 60
+
+
+def parse_apa(citation: str) -> dict:
+    """Fields of an APA reference as Google Scholar's Cite gives it (plain text)."""
+    m = re.match(r"^(?P<authors>.+?)\s\((?P<year>\d{4})[a-z]?\)\.\s(?P<rest>.+)$", (citation or "").strip())
+    if not m:
+        return {}
+    out = {"year": m.group("year")}
+    parts = re.split(r"(?<=[.?!])\s+(?=[A-Z0-9])", m.group("rest"), maxsplit=1)
+    out["title"] = parts[0].rstrip(".").strip()
+    tail = parts[1].strip() if len(parts) > 1 else ""
+    j = re.match(r"^(?P<journal>[^,]+?),\s*(?P<volume>\d+)(?:\((?P<issue>[^)]+)\))?"
+                 r"(?:,\s*(?P<pages>[eE]?\d+(?:\s*[-–]\s*[eE]?\d+)?))?\.?$", tail)
+    if j:
+        out.update({k: v for k, v in j.groupdict().items() if v})
+    elif tail and not re.search(r"\d", tail):
+        out["publisher"] = tail.rstrip(".").strip()
+    return out
+
+
+def scholar_cite(item: ff.ItemInfo, http: ff.Http, settings: ff.Settings, budget=None) -> Record | None:
+    """Google Scholar's record (search, then Cite) through SerpApi: last resort, two searches."""
+    if not settings.has("serpapi") or not item.title or norm_title(item.title) in GENERIC_TITLES:
+        return None
+    budget = budget or ff.Budget()
+    if not budget.allows("serpapi", settings.serpapi_monthly - SCHOLAR_RESERVE, cost=2):
+        return None
+    budget.spend("serpapi")
+    status, data = http.api_json("https://serpapi.com/search.json", timeout=60, params={
+        "engine": "google_scholar", "q": item.title[:250], "num": "5", "api_key": settings.keys["serpapi"]})
+    hits = (data or {}).get("organic_results") or [] if status == 200 else []
+    family = (_family_key(item.first_author).split() or [""])[-1] if item.first_author else ""
+    hit = None
+    for r in hits:
+        summary = ff._fold((r.get("publication_info") or {}).get("summary") or "")
+        if title_match(item.title, r.get("title") or "") >= 0.9 and (not family or family in summary):
+            hit = r
+            break
+    if not hit or not hit.get("result_id"):
+        return None
+    budget.spend("serpapi")
+    status, data = http.api_json("https://serpapi.com/search.json", timeout=60, params={
+        "engine": "google_scholar_cite", "q": hit["result_id"], "api_key": settings.keys["serpapi"]})
+    apa = next((c.get("snippet", "") for c in (data or {}).get("citations") or [] if c.get("title") == "APA"), "")
+    f = parse_apa(apa) if status == 200 else {}
+    if not f:
+        return None
+    return Record(source="Google Scholar (Cite)", by="title", title=f.get("title", hit.get("title", "")),
+                  year=f.get("year", ""), journal=f.get("journal", ""), volume=f.get("volume", ""),
+                  issue=f.get("issue", ""), pages=f.get("pages", ""), publisher=f.get("publisher", ""))
+
+
 def google_books(isbn: str, http: ff.Http, settings: ff.Settings) -> Record | None:
     """Google Books' record for an ISBN: a second source for books (year, publisher)."""
     params = {"q": f"isbn:{isbn}"}
@@ -582,7 +636,8 @@ class Context:
 
     def __init__(self, http: ff.Http, settings: ff.Settings, pdf_text: Callable[[str], str] | None = None,
                  rejected: dict | None = None, learned: dict | None = None,
-                 pdf_read: Callable[[str], dict | None] | None = None):
+                 pdf_read: Callable[[str], dict | None] | None = None,
+                 scholar: Callable[[ff.ItemInfo], Record | None] | None = None):
         self.http = http
         self.settings = settings
         self.pdf_text = pdf_text or (lambda key: "")
@@ -590,6 +645,8 @@ class Context:
         self.learned = learned or {}
         #: Gemini's reading of the item's PDF (first pages): a dict of fields, or None.
         self.pdf_read = pdf_read
+        #: Google Scholar's Cite (SerpApi), for items with no record and no readable PDF.
+        self.scholar = scholar
 
 
 def _current(data: dict, field_name: str) -> str:
@@ -661,7 +718,11 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
             ref = match
     if ref is None:
         audit.flags.append("no registry record found")
-        _from_pdf_only(audit, data, info, pdf_reading())
+        reading = pdf_reading()
+        if reading and reading.get("title"):
+            _from_pdf_only(audit, data, info, reading)
+        elif ctx.scholar is not None:
+            _from_scholar(audit, data, info, ctx.scholar(info))
         _type_flags(audit, data)
         return audit
     audit.reference = f"{ref.source} (by {ref.by})"
@@ -931,6 +992,23 @@ def _pdf_value(reading: dict | None, field_name: str) -> str:
                                                                                          "accepted manuscript"):
         return ""
     return str(reading.get(_PDF_FIELDS.get(field_name, "")) or "").strip()
+
+
+def _from_scholar(audit: ItemAudit, data: dict, info: ff.ItemInfo, rec: Record | None) -> None:
+    """No registry and no readable PDF: Google Scholar's Cite, as proposals only."""
+    if rec is None:
+        return
+    for name in _fields_for(info.item_type):
+        if name in ("title", "abstractNote", "DOI", "ISSN", "ISBN"):
+            continue
+        new = record_value(rec, name)
+        if not new:
+            continue
+        old = _current(data, name)
+        if not old.strip():
+            audit.changes.append(Change(name, "", new, "propose", [rec.source], "from Google Scholar"))
+        elif not same(name, old, new):
+            audit.changes.append(Change(name, old, new, "propose", [rec.source], "Google Scholar says otherwise"))
 
 
 def _from_pdf_only(audit: ItemAudit, data: dict, info: ff.ItemInfo, reading: dict | None) -> None:
@@ -1485,6 +1563,8 @@ def run(
     ctx = Context(http, settings, pdf_text or _pdf_text_reader(),
                   {k: v.get("rejected", {}) for k, v in state.items() if isinstance(v, dict) and k != "_learned"},
                   pdf_read=pdf_read,
+                  scholar=(lambda info, _b=ff.Budget(): scholar_cite(info, http, settings, _b))
+                  if settings.has("serpapi") and pdf_text is None else None,
                   learned=state.get("_learned") or {})
     log(f"{len(items)} item(s) to check{'' if apply else ' (report only)'}.")
 

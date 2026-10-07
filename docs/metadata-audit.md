@@ -11,6 +11,7 @@
 | a DOI | Crossref; DataCite when Crossref does not know it; other DOI agencies (mEDRA, JaLC, KISTI…) through doi.org |
 | an ISBN (books) | Open Library; Google Books when Open Library has nothing |
 | neither, or nothing found | a title search in OpenAlex, then Semantic Scholar; if the match has a DOI, that DOI's Crossref record, when it too is clearly the item |
+| no record anywhere | the item's own PDF, read by Gemini; without a readable PDF, Google Scholar's "Cite" (through SerpApi, two searches per item, at most the monthly allowance minus 60 kept for the full-text fetcher). Both only give proposals: Scholar's data is extracted automatically and often has errors. |
 
 **Second sources**, to confirm a difference before anything is overwritten:
 

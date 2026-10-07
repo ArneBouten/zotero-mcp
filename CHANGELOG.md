@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.22] - 2026-10-07
+
+### Added
+
+- **Metadata audit: Google Scholar's "Cite" as a last resort.** For items no registry knows and without a readable PDF. It goes through SerpApi (two searches per item, keeping 60 a month for the full-text fetcher), and only gives proposals.
+
 ## [0.13.2+arne.21] - 2026-10-07
 
 ### Added
