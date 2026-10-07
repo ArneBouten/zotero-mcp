@@ -256,6 +256,14 @@ def test_several_markers_in_one_paragraph_and_citekeys(tmp_path):
     assert xml.count('fldCharType="begin"') == xml.count('fldCharType="end"') == 3
 
 
+def test_text_after_a_marker_that_ends_its_run_survives(tmp_path):
+    # Regression: a marker ending exactly at a run boundary took every later
+    # run of the paragraph with it.
+    src = make_docx(tmp_path / "p.docx", para(run("A [@SOEN2009]"), run(" and B.", bold=True), run(" C.")))
+    wc.convert_docx(src, resolver())
+    assert visible_text(read(tmp_path / "p (Zotero).docx")) == "A (Soenens et al., 2009) and B. C."
+
+
 def test_marker_at_paragraph_start_and_end(tmp_path):
     src = make_docx(tmp_path / "p.docx", para(run("[@SOEN2009]")), para(run("x [@BION1962]")))
     wc.convert_docx(src, resolver())
