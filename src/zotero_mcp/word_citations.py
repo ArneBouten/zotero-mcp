@@ -443,18 +443,29 @@ def _replace_span(etree, paragraph, span: _Span, code: str, text: str) -> bool:
     rpr = deepcopy(rpr) if rpr is not None else None
 
     # Split at the end first: the start's text node stays in the left part.
+    # When the marker ends exactly where its run ends there is no tail run,
+    # so a placeholder marks where the marker stops; without it everything
+    # after the marker in the paragraph would be taken for marker text.
     _, tail = _split_run(etree, end_run, span.end_t, span.end_off)
+    stop = tail
+    if stop is None:
+        stop = etree.Element(f"{W}proofErr")  # placeholder, removed below
+        end_run.addnext(stop)
     _, marker_first = _split_run(etree, start_run, span.start_t, span.start_off)
     if marker_first is None:
+        if tail is None:
+            stop.getparent().remove(stop)
         return False
 
     parent = marker_first.getparent()
     doomed = []
     node = marker_first
-    while node is not None and node is not tail:
+    while node is not None and node is not stop:
         if node.tag == f"{W}r":
             doomed.append(node)
         node = node.getnext()
+    if tail is None:
+        parent.remove(stop)
     for r in _field_runs(etree, rpr, code, text):
         marker_first.addprevious(r)
     for r in doomed:
