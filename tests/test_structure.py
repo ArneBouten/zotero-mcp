@@ -359,3 +359,28 @@ def test_level_two_introduction_headings_are_not_parts_of_the_abstract():
     assert [(m.get("section"), m.get("heading")) for m in metas[1:]] == [
         ("Abstract", "Abstract"), ("Introduction", None), ("Introduction", "Risky Play and Development"),
         ("Introduction", "The Present Study"), ("Methods", "Method")]
+
+
+def test_gemini_asker_sends_no_temperature_and_low_thinking(monkeypatch):
+    from types import SimpleNamespace
+
+    from zotero_mcp import gemini_batch, gemini_util
+
+    sent = []
+
+    class Models:
+        def generate_content(self, model, contents, config):
+            sent.append(config)
+            if config.thinking_config is not None and len(sent) == 1 and model == "gemini-2.5-flash":
+                raise ValueError("thinking_level is not supported for this model")
+            return SimpleNamespace(text='{"ok": true}')
+
+    monkeypatch.setattr(gemini_batch, "create_gemini_client", lambda cfg: SimpleNamespace(models=Models()))
+    ask = gemini_util.json_asker(gemini_util.DEFAULT_MODEL, {"type": "object"})
+    assert ask("x") == '{"ok": true}'
+    assert sent[0].temperature is None and str(sent[0].thinking_config.thinking_level).endswith("LOW")
+    assert gemini_util.DEFAULT_MODEL == "gemini-3.8-flash"
+    sent.clear()
+    old = gemini_util.json_asker("gemini-2.5-flash", {"type": "object"})
+    assert old("x") == '{"ok": true}' and old("y") == '{"ok": true}'
+    assert [c.thinking_config is None for c in sent] == [False, True, True]

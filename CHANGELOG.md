@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.27] - 2026-10-07
+
+### Changed
+
+- **Gemini model fixed at `gemini-3.8-flash`** (passage labels and the metadata audit's PDF reading) instead of the `gemini-flash-latest` alias, which Google moves to each new Flash model; cached answers would otherwise mix models. 3.8 Flash also costs half of 3.5 Flash. Set `semantic_search.structure.gemini_model` to choose another.
+- **No `temperature` in Gemini requests** (deprecated by Google in July 2026; newer models reject it) and thinking set to `low`: these are reading tasks, and thinking tokens are billed as output. A model without thinking levels is asked again without one.
+
 ## [0.13.2+arne.26] - 2026-10-07
 
 ### Fixed

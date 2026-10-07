@@ -23,10 +23,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from zotero_mcp import structure as st
+from zotero_mcp.gemini_util import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-flash-latest"
 # Cached Gemini answers are only reused for the same prompt wording.
 _PROMPT_TAG = hashlib.sha1(st.GEMINI_PROMPT.encode("utf-8")).hexdigest()[:8]
 

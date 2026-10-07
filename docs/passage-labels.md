@@ -79,8 +79,8 @@ Each run writes a report with examples to check to `~/.config/zotero-mcp/structu
 
 ```json
 "semantic_search": {
-  "structure": {"enabled": true, "gemini": true, "gemini_model": "gemini-flash-latest"}
+  "structure": {"enabled": true, "gemini": true, "gemini_model": "gemini-3.8-flash"}
 }
 ```
 
-**Cost with Gemini:** only items whose bookmarks do not name their sections are sent, about two thirds of articles and most books. An article is about 4,000 tokens, a book up to 20,000: roughly 1 cent per book and 0.5 cent per article at Gemini Flash prices, once, because answers are cached.
+**Cost with Gemini:** only items whose bookmarks do not name their sections are sent, about two thirds of articles and most books. An article is about 4,000 tokens, a book up to 20,000: about 0.5 cent per article and 2 cents per book with Gemini 3.8 Flash (2026 prices; Google doubles them in January 2027), once, because answers are cached. The model is fixed (`gemini-3.8-flash`) rather than the `gemini-flash-latest` alias, which Google moves to each new model.
