@@ -9,6 +9,7 @@ from zotero_mcp import client as _client
 from zotero_mcp import library as _library
 from zotero_mcp import utils as _utils
 from zotero_mcp import word_citations as _wc
+from zotero_mcp import word_edit as _we
 from zotero_mcp._app import mcp
 from zotero_mcp._context import Context
 from zotero_mcp.client import with_zotero_api_lock
@@ -225,4 +226,272 @@ def format_report(report: _wc.ConversionReport) -> str:
             "Open it in Word and click Refresh in the Zotero tab once: Zotero then "
             "applies whole-document formatting (ordering, disambiguation, et al.)."
         )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Inspecting and editing citations in an existing document
+# ---------------------------------------------------------------------------
+
+
+def library_names() -> dict[str, str]:
+    """Readable names for this computer's libraries, keyed as in citation URIs."""
+    names: dict[str, str] = {}
+    reader = get_local_zotero_reader()
+    if reader is None:
+        return names
+    try:
+        with reader:
+            account = reader.account_info()
+            if account.get("userID"):
+                names[f"users/{account['userID']}"] = "your library"
+            if account.get("localUserKey"):
+                names[f"users/local/{account['localUserKey']}"] = "your library"
+            try:
+                rows = reader._get_connection().execute("SELECT groupID, name FROM groups").fetchall()
+            except Exception:
+                rows = []
+            for gid, name in rows:
+                names[f"groups/{gid}"] = f"group \"{name}\""
+    except Exception:
+        pass
+    return names
+
+
+def _library_label(lib: str, names: dict[str, str]) -> str:
+    if lib in names:
+        return names[lib]
+    if lib.startswith("users/local/"):
+        return f"someone else's unsynced library ({lib.rsplit('/', 1)[-1]})"
+    if lib.startswith("users/"):
+        return f"another Zotero user's library ({lib.rsplit('/', 1)[-1]})"
+    if lib.startswith("groups/"):
+        return f"a group library you're not in ({lib.rsplit('/', 1)[-1]})"
+    return "unknown library"
+
+
+def format_inventory(inv: _we.Inventory, limit: int = 400, names: dict[str, str] | None = None) -> str:
+    names = names or {}
+    mixed = len(inv.libraries) > 1
+    lines = [f"# Citations in {os.path.basename(inv.path)}", ""]
+    lines.append(
+        f"Style: {inv.style or 'no Zotero settings yet'} · {len(inv.citations)} Zotero citation(s) · "
+        f"{len(inv.bibliographies)} Zotero bibliograph{'y' if len(inv.bibliographies) == 1 else 'ies'} · "
+        f"{len(inv.reference_lists)} typed reference list(s) · "
+        f"{len(inv.plain_citations)} possible plain-text citation(s) · {len(inv.markers)} marker(s)"
+    )
+    lines.append("Ids (C = citation, B = bibliography, R = typed reference list, P = plain-text "
+                 "citation, D/F/E = paragraph in body/footnotes/endnotes) are what "
+                 "zotero_edit_word_citations takes; they hold until the document changes.")
+    if inv.citations:
+        lines += ["", "## Zotero citations"]
+        for c in inv.citations[:limit]:
+            items = "; ".join(
+                f"{it.key} {it.label}".strip()
+                + (f", {it.locator_label or 'page'} {it.locator}" if it.locator else "")
+                + (" [author suppressed]" if it.suppress_author else "")
+                for it in c.items
+            ) or "(no items readable)"
+            flag = " · edited by hand in Word" if c.hand_edited else ""
+            if mixed:
+                libs = sorted({_library_label(it.library, names) for it in c.items})
+                flag += " · from " + ", ".join(libs)
+            lines.append(f"- **{c.id}** · {c.paragraph} · `{c.text}` → {items}{flag}")
+            if c.context:
+                lines.append(f"  > {c.context}")
+        if len(inv.citations) > limit:
+            lines.append(f"- … and {len(inv.citations) - limit} more")
+    if inv.libraries:
+        lines += ["", "## Where the cited items come from"]
+        for lib, n in sorted(inv.libraries.items(), key=lambda kv: -kv[1]):
+            lines.append(f"- {n} from {_library_label(lib, names)}")
+        if mixed:
+            lines.append("Items from a library someone else owns stay linked to it: their copy "
+                         "stored in the citation keeps them working on Refresh. To cite such a "
+                         "work again without a second bibliography entry, use [@C5] (the item "
+                         "of citation C5) or [@C5.2] (its second item).")
+    if inv.duplicates:
+        lines += ["", "## The same work cited as different items (two bibliography entries)"]
+        for group in inv.duplicates:
+            label = group[0][1].label
+            where = "; ".join(f"{cid} ({_library_label(it.library, names)})" for cid, it in group)
+            lines.append(f"- {label}: {where}")
+        lines.append("Fix: the merge_duplicates edit points each work's citations to one item.")
+    if inv.bibliographies:
+        lines += ["", "## Zotero bibliographies"]
+        for b in inv.bibliographies:
+            lines.append(f"- **{b.id}** · {b.paragraph}–{b.end_paragraph} · {b.text}")
+    if inv.reference_lists:
+        lines += ["", "## Typed reference lists (not linked to Zotero)"]
+        for r in inv.reference_lists:
+            lines.append(f"- **{r.id}** · heading {r.heading} \"{r.heading_text}\" · {len(r.entries)} entries")
+            for pid, text in r.entries[:limit]:
+                lines.append(f"  - {pid}: {text[:200]}")
+    if inv.plain_citations:
+        lines += ["", "## Possible plain-text citations (typed, not linked)"]
+        for p in inv.plain_citations[:limit]:
+            lines.append(f"- **{p.id}** · {p.paragraph} · `{p.text}`")
+            lines.append(f"  > {p.context}")
+    if inv.markers:
+        lines += ["", "## Markers not yet converted"]
+        for m in inv.markers[:limit]:
+            lines.append(f"- {m.paragraph} · `{m.text}`")
+    if inv.bibliography_markers:
+        lines.append("")
+        lines.append("{{bibliography}} placeholder in: " + ", ".join(inv.bibliography_markers))
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    name="zotero_inspect_word_citations",
+    description=(
+        "List what a Word .docx cites, read-only: its live Zotero citations "
+        "(with the Zotero item key, author and year behind each, locator, and "
+        "the sentence around it), Zotero bibliographies, typed reference lists, "
+        "citations typed as plain text such as '(Smith, 2020)', and unconverted "
+        "[@KEY] markers. Each gets an id (C3, B1, R1, P2; paragraphs D14, F2, E1) "
+        "for zotero_edit_word_citations. It also says which library each "
+        "cited item comes from (yours, a group, a co-author's) and flags the "
+        "same work cited as different items, which gives two bibliography "
+        "entries. Use it first when asked to check, fix "
+        "or reformat the citations or references in a document; to check "
+        "whether a source supports a claim, read the item's full text "
+        "(zotero_get_item_fulltext) with the key listed here. "
+        "docx_path: absolute path to the .docx on this computer. "
+        "Works without Zotero running."
+    ),
+)
+def inspect_word_citations(docx_path: str, *, ctx: Context) -> str:
+    """List the citations, bibliographies and reference lists in a .docx."""
+    try:
+        return format_inventory(_we.inspect_docx(docx_path), names=library_names())
+    except _wc.WordCitationError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        ctx.error(f"Reading Word citations failed: {e}")
+        return f"Error reading {docx_path}: {e}"
+
+
+_WRITE_MODE_QUESTION = (
+    "Before writing, ask the user how to save the changes (unless they already said):\n"
+    "- new_file: a new document '<name> (Zotero).docx' beside the original, which stays untouched;\n"
+    "- tracked_changes: in the original, as tracked changes they accept or reject in Word;\n"
+    "- overwrite: in the original, without tracking.\n"
+    "Both of the last two first copy the original to a 'Zotero backups' folder beside it. "
+    "Then call zotero_edit_word_citations again with write_mode set."
+)
+
+
+@mcp.tool(
+    name="zotero_edit_word_citations",
+    description=(
+        "Change the citations and references in a Word .docx, writing the "
+        "same live fields the Zotero Word plugin uses. Run "
+        "zotero_inspect_word_citations first for the ids. ASK THE USER which "
+        "write_mode they want unless they said: 'new_file' (new '<name> "
+        "(Zotero).docx'), 'tracked_changes' (in the original, tracked), or "
+        "'overwrite'; the last two back up the original first. "
+        "edits: a list of objects, applied together:\n"
+        "{op:'replace_citation', citation:'C3', marker:'[@KEY1; @KEY2, p. 4]'};\n"
+        "{op:'delete_citation', citation:'C3'};\n"
+        "{op:'replace_text', paragraph:'D12', find:'(Smith, 2020)', with:'[@KEY]', occurrence:1} — "
+        "'with' may hold markers and words;\n"
+        "{op:'comment', citation:'C3' | paragraph:'D12' (+ find:'exact words'), text:'…'};\n"
+        "{op:'insert_bibliography', after:'D40'} (no 'after': end of document);\n"
+        "{op:'rebuild_bibliography', bibliography:'B1'}; {op:'delete_bibliography', bibliography:'B1'};\n"
+        "{op:'replace_reference_list', reference_list:'R1'} — typed list to Zotero bibliography;\n"
+        "{op:'merge_duplicates', keep:'C3'?} — one item per work cited as several.\n"
+        "Citation ops take expect:'<visible text>' as a guard. Markers and "
+        "{{bibliography}} placeholders already in the text are converted too. "
+        "Keys: Zotero item keys or Better BibTeX citekeys; '@C5' reuses the "
+        "item of citation C5. A work the document already cites is reused "
+        "automatically. dry_run=True reports without writing. Needs "
+        "Zotero running. Afterwards: open in Word, accept tracked changes, "
+        "Zotero tab, Refresh."
+    ),
+)
+@with_zotero_api_lock
+def edit_word_citations(
+    docx_path: str,
+    write_mode: str | None = None,
+    edits: list[dict] | str | None = None,
+    output_path: str | None = None,
+    author: str | None = None,
+    style: str | None = None,
+    locale: str | None = None,
+    dry_run: bool = False,
+    *,
+    ctx: Context,
+) -> str:
+    """Edit citations, comments and bibliographies in a .docx."""
+    if not write_mode and not dry_run:
+        return _WRITE_MODE_QUESTION
+    try:
+        resolver = build_resolver(ctx, style or "apa")
+        report = _we.edit_docx(
+            docx_path,
+            resolver,
+            write_mode=write_mode or "new_file",
+            edits=edits,
+            output_path=output_path,
+            author=author,
+            style=style,
+            locale=locale,
+            dry_run=dry_run,
+        )
+    except _wc.WordCitationError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        ctx.error(f"Word citation edit failed: {e}")
+        return (
+            f"Error editing citations: {e}\n\n"
+            "Rendering uses Zotero's CSL engine: in local mode, check that "
+            "Zotero is running with the local API enabled."
+        )
+    return format_edit_report(report)
+
+
+def format_edit_report(report: _we.EditReport) -> str:
+    lines = ["# Word citation edits", ""]
+    done = [r for r in report.results if r.status == "done"]
+    skipped = [r for r in report.results if r.status != "done"]
+    verb = "Would apply" if report.dry_run else "Applied"
+    lines.append(f"{verb} {len(done)} of {len(report.results)} edit(s); "
+                 f"{report.markers_converted} marker(s) converted; style {report.style}.")
+    for r in done:
+        lines.append(f"- ✓ {r.op} {r.target}" + (f": {r.detail}" if r.detail else ""))
+    for r in skipped:
+        lines.append(f"- ✗ {r.op} {r.target}: {r.detail}")
+    if report.bibliography_written:
+        lines.append("Bibliography " + ("would be written." if report.dry_run else "written from the citations in the document."))
+    if report.unresolved:
+        lines.append("Not found in the library: " + ", ".join(f"`{k}`" for k in report.unresolved))
+    if report.skipped_markers:
+        lines.append("Markers left as typed: " + ", ".join(f"`{m}`" for m in report.skipped_markers[:10]))
+    for n in report.notes:
+        lines.append(f"Note: {n}")
+    for w in report.warnings:
+        lines.append(f"Warning: {w}")
+    if report.dry_run:
+        lines += ["", "Dry run: nothing was written."]
+        return "\n".join(lines)
+    if not done and not report.markers_converted and not report.bibliography_written:
+        lines += ["", "Nothing changed; the document was not written."]
+        return "\n".join(lines)
+    lines.append("")
+    mode = {"new_file": "New file", "tracked_changes": "Tracked changes in the original",
+            "overwrite": "Overwrote the original"}[report.write_mode]
+    lines.append(f"{mode}: {report.output_path}")
+    if report.backup_path:
+        lines.append(f"Backup of the original: {report.backup_path}")
+    if report.write_mode == "tracked_changes":
+        lines.append(f"Changes are tracked under the name \"{report.author}\".")
+    if report.comments:
+        lines.append(f"{report.comments} comment(s) added.")
+    lines.append(
+        "Open it in Word"
+        + (", accept the tracked changes you want," if report.write_mode == "tracked_changes" else "")
+        + " and click Refresh in the Zotero tab: Zotero then applies the final formatting "
+        "(ordering within citations, disambiguation, the bibliography's exact rendering)."
+    )
     return "\n".join(lines)

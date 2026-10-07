@@ -187,3 +187,53 @@ def test_zip_contains_valid_word_parts(env, tmp_path):
         assert z.testzip() is None
         names = z.namelist()
     assert {"[Content_Types].xml", "_rels/.rels", "word/document.xml", "docProps/custom.xml"} <= set(names)
+
+
+# --- inspect and edit tools -----------------------------------------------------------
+
+
+def test_inspect_tool_lists_ids(env, tmp_path):
+    src = make_docx(tmp_path / "m.docx", para(run("Control [@SOEN2009] and (Smith, 2020).")),
+                    para(run("References")), para(run("Smith, J. (2020). A paper.")))
+    word_tool.insert_word_citations(docx_path=str(src), in_place=True, ctx=DummyContext())
+    out = word_tool.inspect_word_citations(docx_path=str(src), ctx=DummyContext())
+    assert "**C1** · D1 · `(Soenens et al., 2009)` → SOEN2009" in out
+    assert "**P1** · D1 · `(Smith, 2020)`" in out
+    assert "**R1** · heading D2" in out and "D3: Smith, J. (2020). A paper." in out
+    assert word_tool.inspect_word_citations(
+        docx_path=str(tmp_path / "nope.docx"), ctx=DummyContext()
+    ).startswith("Error: No such file")
+
+
+def test_edit_tool_asks_for_the_write_mode_first(env, tmp_path):
+    src = make_docx(tmp_path / "m.docx", para(run("Control [@SOEN2009].")))
+    before = src.read_bytes()
+    out = word_tool.edit_word_citations(docx_path=str(src), edits=[], ctx=DummyContext())
+    assert "ask the user" in out and "tracked_changes" in out and "new_file" in out
+    assert src.read_bytes() == before and not (tmp_path / "m (Zotero).docx").exists()
+
+
+def test_edit_tool_tracked_changes_end_to_end(env, tmp_path):
+    src = make_docx(tmp_path / "m.docx", para(run("Control (Soenens, 2009) matters.")),
+                    para(run("References")), para(run("Soenens, B. (2009). Psychological control.")))
+    out = word_tool.edit_word_citations(
+        docx_path=str(src), write_mode="tracked_changes",
+        edits=[
+            {"op": "replace_text", "paragraph": "D1", "find": "(Soenens, 2009)", "with": "[@soenens2009how]"},
+            {"op": "comment", "paragraph": "D1", "find": "matters", "text": "Supported: p. 12."},
+            {"op": "replace_reference_list", "reference_list": "R1"},
+        ],
+        ctx=DummyContext(),
+    )
+    assert "Applied 3 of 3 edit(s); 1 marker(s) converted" in out
+    assert "Tracked changes in the original" in out and "Backup of the original" in out
+    assert "1 comment(s) added." in out and "accept the tracked changes" in out
+    xml = read(src)
+    assert "ADDIN ZOTERO_ITEM" in xml and "ADDIN ZOTERO_BIBL" in xml and "<w:del " in xml
+    assert (tmp_path / "Zotero backups").is_dir()
+
+
+def test_edit_tool_dry_run_needs_no_write_mode(env, tmp_path):
+    src = make_docx(tmp_path / "m.docx", para(run("Control [@SOEN2009].")))
+    out = word_tool.edit_word_citations(docx_path=str(src), dry_run=True, ctx=DummyContext())
+    assert "Dry run: nothing was written." in out and "1 marker(s) converted" in out
