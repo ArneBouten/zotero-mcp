@@ -67,8 +67,10 @@ class BrowserSession:
         profile_dir().mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
         channel = self.settings.browser_channel or "chrome"
+        # Keep Chrome's sandbox on: Playwright's default --no-sandbox is a
+        # security downgrade this window does not need.
         kwargs = dict(user_data_dir=str(profile_dir()), headless=False, accept_downloads=True,
-                      viewport=None, args=["--start-maximized"])
+                      viewport=None, args=["--start-maximized"], ignore_default_args=["--no-sandbox"])
         try:
             if channel == "chromium":
                 self.ctx = self._pw.chromium.launch_persistent_context(**kwargs)
@@ -331,9 +333,45 @@ def src_browser(item: ff.ItemInfo, http: ff.Http, settings: ff.Settings, budget:
                                fetcher=_fetcher(publisher))
 
 
+def _chrome_exe() -> str | None:
+    import os
+    import shutil
+
+    for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"), os.environ.get("LOCALAPPDATA")):
+        if base:
+            path = Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"
+            if path.exists():
+                return str(path)
+    for name in ("google-chrome", "google-chrome-stable", "chrome"):
+        found = shutil.which(name)
+        if found:
+            return found
+    mac = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    return str(mac) if mac.exists() else None
+
+
 def login_session(settings: ff.Settings | None = None, log: Callable[[str], None] = print) -> None:
-    """Open the fetcher's browser so the user can log in once."""
+    """Open the fetcher's browser profile so the user can log in once.
+
+    Chrome is started as an ordinary program here, not under automation:
+    Google refuses "Sign in with Google" in an automated browser, and the
+    logins made now are what the automated runs use later.
+    """
+    import subprocess
+
     settings = settings or ff.Settings.load()
+    pages = ["https://www.researchgate.net/login", "https://www.academia.edu/login"]
+    if settings.proxy_prefix:
+        pages.append(settings.proxy_prefix + quote("https://www.sciencedirect.com/", safe=""))
+    exe = _chrome_exe() if settings.browser_channel != "chromium" else None
+    if exe:
+        profile_dir().mkdir(parents=True, exist_ok=True)
+        log("Opening Chrome with the fetcher's own profile. Log in to ResearchGate and Academia.edu,")
+        log("and to publisher sites through UGent ('Access through your institution').")
+        log("Close that Chrome window when you are done; the logins are kept in " + str(profile_dir()) + ".")
+        proc = subprocess.Popen([exe, f"--user-data-dir={profile_dir()}", "--new-window", *pages])
+        proc.wait()
+        return
     b = BrowserSession(settings, log=log).start()
     pages = ["https://www.researchgate.net/login", "https://www.academia.edu/login"]
     if settings.proxy_prefix:
