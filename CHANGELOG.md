@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.29] - 2026-10-07
+
+### Added
+
+- **Passage labels: Gemini checks the bookmarks** (with `--gemini`): which bookmarks are headings, their level, and the part of the paper each opens, also when the heading does not name it ("Research design" is Methods, "Case studies" Results). Text and page stay the bookmark's own; without an answer the bookmarks are used as before. A short prompt: a few hundred tokens per paper.
+- **Sections by kind of paper**, in both Gemini prompts: APA papers without an Introduction heading, papers with several studies ("Study 2" has its own Method and Results; a General Discussion is Discussion), systematic and scoping reviews (search, eligibility, screening, data extraction and risk of bias are Methods; study characteristics and the synthesis are Results), qualitative studies (Findings, Themes), theoretical papers and books. The rules know the review terms too.
+
+### Changed
+
+- Gemini answers for passage labels are cached per file and exact prompt, so the bookmark check and the candidate list of one file never share an answer.
+
 ## [0.13.2+arne.28] - 2026-10-07
 
 ### Fixed
