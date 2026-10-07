@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.25] - 2026-10-07
+
+### Changed
+
+- **Passage labels: introductions with or without a heading.** In papers with a Method heading, text before Method that no heading names is labelled Introduction. APA papers without an "Introduction" heading start it after the abstract; papers that do have one start it there, so keywords or highlights above it keep their label. Topical headings before Method ("Risky play and development") count as introduction. Gemini's prompt describes both styles.
+- **Combined headings carry both sections**, as in the JATS standard: "Results and Discussion" is `section` Results and `section_2` Discussion. A search filtered on Discussion finds it, and the Location line shows "Results & Discussion".
+- Section names in Portuguese and Italian for the rules fallback.
+- Gemini's heading answers are cached per prompt wording, so a changed prompt is asked again.
+
 ## [0.13.2+arne.24] - 2026-10-07
 
 ### Fixed
