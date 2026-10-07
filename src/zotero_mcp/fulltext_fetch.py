@@ -44,7 +44,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 
-STEPS = ("open-access", "publisher", "scholar", "web")
+STEPS = ("open-access", "publisher", "scholar", "web", "browser")
+#: Steps a run uses unless told otherwise. The browser step opens a visible
+#: Chrome window, so it runs only when asked for (``--browser``).
+DEFAULT_STEPS = ("open-access", "publisher", "scholar", "web")
 
 #: Item types worth fetching a file for.
 FETCHABLE_TYPES = {
@@ -131,6 +134,11 @@ class Settings:
     retry_days: int = 30
     max_candidates: int = 12
     unblocker_hosts: tuple[str, ...] = ("researchgate.net", "academia.edu")
+    #: Browser step: optional library proxy prefix (e.g. an EZproxy login
+    #: URL ending in ``?url=``), Chrome channel and the pause between papers.
+    proxy_prefix: str = ""
+    browser_channel: str = "chrome"
+    browser_delay: tuple[float, float] = (10.0, 20.0)
 
     @classmethod
     def load(cls, config_path: Path | None = None) -> Settings:
@@ -165,6 +173,13 @@ class Settings:
             s.host_delay = float(section["host_delay"])
         if isinstance(section.get("unblocker_hosts"), list):
             s.unblocker_hosts = tuple(str(h) for h in section["unblocker_hosts"])
+        if isinstance(section.get("proxy_prefix"), str):
+            s.proxy_prefix = section["proxy_prefix"].strip()
+        if isinstance(section.get("browser_channel"), str):
+            s.browser_channel = section["browser_channel"].strip()
+        delay = section.get("browser_delay")
+        if isinstance(delay, list) and len(delay) == 2:
+            s.browser_delay = (float(delay[0]), float(delay[1]))
         return s
 
     def has(self, name: str) -> bool:
@@ -399,6 +414,11 @@ class Http:
         self.session = session or requests.Session()
         self.sleep = sleep
         self._last_hit: dict[str, float] = {}
+        #: item key -> candidates that a plain request could not get
+        self.blocked: dict[str, list] = {}
+        #: the browser session, started by the browser step when first needed
+        self.browser = None
+        self.log: Callable[[str], None] = lambda m: None
 
     def _pace(self, url: str) -> None:
         host = urlparse(url).hostname or ""
@@ -511,6 +531,9 @@ class Candidate:
     by_identifier: bool = False     # found by DOI/ISBN, not by a title search
     unblock: bool = False           # fetch through the unblocker
     referer: str | None = None
+    #: Gets the file itself instead of a plain download (the browser step).
+    #: Returns a Fetched, or None with the reason in ``fetcher.reason``.
+    fetcher: Callable[[], Fetched | None] | None = field(default=None, repr=False, compare=False)
 
 
 _UNPAYWALL_VERSIONS = {
@@ -708,6 +731,74 @@ def src_oapen(item: ItemInfo, http: Http, settings: Settings, budget: Budget) ->
                                 "published", by_identifier=bool(item.isbn))
 
 
+def src_osf(item: ItemInfo, http: Http, settings: Settings, budget: Budget) -> Iterator[Candidate]:
+    """Preprints on OSF: PsyArXiv, SocArXiv, EdArXiv, MetaArXiv and the rest."""
+    if not item.title or item.item_type in ("book", "bookSection"):
+        return
+    main = re.split(r"[:?]\s", item.title, maxsplit=1)[0][:150]
+    status, data = http.api_json(
+        "https://api.osf.io/v2/preprints/",
+        params={"filter[title]": main, "page[size]": "10"},
+    )
+    if status != 200 or not isinstance(data, dict):
+        return
+    for hit in data.get("data") or []:
+        attrs = hit.get("attributes") or {}
+        if title_similarity(item.title, attrs.get("title") or "") < 0.85:
+            continue
+        rel = (hit.get("relationships") or {})
+        file_id = ((rel.get("primary_file") or {}).get("data") or {}).get("id")
+        if not file_id:
+            href = (((rel.get("primary_file") or {}).get("links") or {}).get("related") or {}).get("href") or ""
+            m = re.search(r"/files/([^/]+)/?$", href)
+            file_id = m.group(1) if m else None
+        provider = (((rel.get("provider") or {}).get("data")) or {}).get("id") or "OSF"
+        if file_id:
+            yield Candidate(f"https://osf.io/download/{file_id}/", f"OSF ({provider})", "preprint")
+
+
+def _query_title(item: ItemInfo) -> str:
+    """The main title, without quotes or Solr/Lucene operators."""
+    main = re.split(r"[:?]\s", item.title, maxsplit=1)[0]
+    return re.sub(r'[\\"():\[\]{}^~*?!+\-/]', " ", main)[:150].strip()
+
+
+def src_zenodo(item: ItemInfo, http: Http, settings: Settings, budget: Budget) -> Iterator[Candidate]:
+    if not item.title:
+        return
+    q = f'doi:"{item.doi}"' if item.doi else f'title:("{_query_title(item)}")'
+    status, data = http.api_json("https://zenodo.org/api/records", params={"q": q, "size": "5"})
+    if status != 200 or not isinstance(data, dict):
+        return
+    for hit in (data.get("hits") or {}).get("hits") or []:
+        meta = hit.get("metadata") or {}
+        if title_similarity(item.title, meta.get("title") or "") < 0.85:
+            continue
+        for f in hit.get("files") or []:
+            name = (f.get("key") or "").lower()
+            link = (f.get("links") or {}).get("self")
+            if name.endswith(".pdf") and link:
+                yield Candidate(link, "Zenodo", None, by_identifier=bool(item.doi))
+
+
+def src_hal(item: ItemInfo, http: Http, settings: Settings, budget: Budget) -> Iterator[Candidate]:
+    if not item.title:
+        return
+    q = f'doiId_s:"{item.doi}"' if item.doi else f'title_t:"{_query_title(item)}"'
+    status, data = http.api_json(
+        "https://api.archives-ouvertes.fr/search/",
+        params={"q": q, "fl": "title_s,fileMain_s", "rows": "5", "wt": "json"},
+    )
+    if status != 200 or not isinstance(data, dict):
+        return
+    for doc in (data.get("response") or {}).get("docs") or []:
+        titles = doc.get("title_s") or [""]
+        if not item.doi and max(title_similarity(item.title, t) for t in titles) < 0.85:
+            continue
+        if doc.get("fileMain_s"):
+            yield Candidate(doc["fileMain_s"], "HAL", None, by_identifier=bool(item.doi))
+
+
 #: PDF address patterns by publisher host, for when the landing page has no
 #: citation_pdf_url (or blocks plain requests but serves the file).
 _PUBLISHER_PATTERNS = {
@@ -871,6 +962,7 @@ SOURCE_NAMES = {
     "src_europepmc": "Europe PMC", "src_arxiv": "arXiv", "src_core": "CORE", "src_oapen": "OAPEN",
     "src_publisher": "publisher page (via DOI, or the item's URL)",
     "src_scholar": "Google Scholar (via SerpApi)", "src_web": "web search (via Tavily)",
+    "src_osf": "OSF preprints (PsyArXiv and others)", "src_zenodo": "Zenodo", "src_hal": "HAL", "src_browser": "your browser (ResearchGate, Academia.edu, publisher logins)",
 }
 SOURCE_KEYS = {"src_scholar": "serpapi", "src_web": "tavily", "src_core": "core"}
 _BUDGETS = {"serpapi": "serpapi_monthly", "tavily": "tavily_monthly"}
@@ -887,7 +979,7 @@ def source_status(source, settings: Settings, budget: Budget) -> str | None:
     return None
 
 
-def describe_setup(settings: Settings, budget: Budget, steps: Iterable[str]) -> list[str]:
+def describe_setup(settings: Settings, budget: Budget, steps: Iterable[str] = DEFAULT_STEPS) -> list[str]:
     """One line per step: its services and whether each can run."""
     lines = []
     for step in steps:
@@ -915,10 +1007,12 @@ def describe_setup(settings: Settings, budget: Budget, steps: Iterable[str]) -> 
 
 
 SOURCES: dict[str, list[Callable[..., Iterator[Candidate]]]] = {
-    "open-access": [src_unpaywall, src_openalex, src_semantic_scholar, src_europepmc, src_arxiv, src_core, src_oapen],
+    "open-access": [src_unpaywall, src_openalex, src_semantic_scholar, src_europepmc, src_arxiv, src_osf,
+                    src_core, src_zenodo, src_hal, src_oapen],
     "publisher": [src_publisher],
     "scholar": [src_scholar],
     "web": [src_web],
+    "browser": [],  # filled in below, from fulltext_browser
 }
 
 
@@ -1128,12 +1222,23 @@ def _redact(url: str) -> str:
     return re.sub(r"(api_key|apikey)=[^&]+", r"\1=…", url)
 
 
+def _remember_blocked(http, item: ItemInfo, cand: Candidate) -> None:
+    blocked = getattr(http, "blocked", None)
+    if isinstance(blocked, dict):
+        blocked.setdefault(item.key, []).append(cand)
+
+
+def _try_key(cand: Candidate) -> str:
+    """A link tried plainly may still be worth one try in the browser."""
+    return ("browser:" if cand.fetcher is not None else "") + cand.url
+
+
 def find_pdf_for(
     item: ItemInfo,
     http: Http,
     settings: Settings,
     budget: Budget,
-    steps: Iterable[str] = STEPS,
+    steps: Iterable[str] = DEFAULT_STEPS,
     log: Callable[[str], None] = lambda m: None,
     workdir: str | None = None,
 ) -> tuple[str | None, Candidate | None, Check | None, list[Attempt]]:
@@ -1141,8 +1246,8 @@ def find_pdf_for(
     attempts: list[Attempt] = []
     tried: set[str] = set()
     workdir = workdir or tempfile.mkdtemp(prefix="zmcp-fulltext-")
-    n = 0
     for step in steps:
+        n = 0  # the cap is per step, so a long open-access list never starves Scholar
         for source in SOURCES.get(step, []):
             name = SOURCE_NAMES.get(source.__name__, source.__name__.removeprefix("src_"))
             why = source_status(source, settings, budget)
@@ -1150,7 +1255,7 @@ def find_pdf_for(
                 log(f"  [{step}] {name}: {why}")
                 continue
             try:
-                candidates = [c for c in source(item, http, settings, budget) if c.url not in tried]
+                candidates = [c for c in source(item, http, settings, budget) if _try_key(c) not in tried]
             except Exception as e:
                 attempts.append(Attempt(name, "", f"source failed ({type(e).__name__})"))
                 log(f"  [{step}] {name}: failed ({type(e).__name__})")
@@ -1160,12 +1265,12 @@ def find_pdf_for(
                 continue
             log(f"  [{step}] {name}: {len(candidates)} link(s)")
             for cand in candidates:
-                if cand.url in tried:
+                if _try_key(cand) in tried:
                     continue
-                if n >= settings.max_candidates:
-                    log(f"  stopped after {n} links (max_candidates)")
-                    return None, None, None, attempts
-                tried.add(cand.url)
+                if n >= settings.max_candidates and cand.fetcher is None:
+                    log(f"  [{step}] stopped after {n} links (max_candidates)")
+                    break
+                tried.add(_try_key(cand))
                 n += 1
                 via = " via ZenRows" if cand.unblock and settings.has("zenrows") else ""
                 log(f"      {_host_of(cand.url)}{via} ({cand.source}): {_redact(cand.url)[:100]}")
@@ -1203,14 +1308,24 @@ def _try_candidate(item, cand, http, settings, budget, workdir) -> tuple[str | N
     if fig:
         cand = Candidate(fig, cand.source + ", file via the figshare API", cand.version,
                          cand.by_identifier, False, cand.url)
-    got = http.fetch_unblocked(cand.url, budget) if cand.unblock else None
-    if got is None:
-        got = http.fetch(cand.url, referer=cand.referer)
+    if cand.fetcher is not None:
+        got = cand.fetcher()
+        if got is None:
+            return None, None, getattr(cand.fetcher, "reason", "") or "the browser got no PDF"
+    else:
+        got = http.fetch_unblocked(cand.url, budget) if cand.unblock else None
+        if got is None:
+            got = http.fetch(cand.url, referer=cand.referer)
     if got.error:
         return None, None, got.error
+    if not got.is_pdf and cand.fetcher is None and got.status in (202, 401, 403, 429):
+        # Worth another try in the browser step, with the user's logins.
+        _remember_blocked(http, item, cand)
     low = got.body[:20000].decode("utf-8", errors="ignore").lower()
     if not got.is_pdf:
         if any(m in low for m in _CAPTCHA_MARKERS):
+            if cand.fetcher is None:
+                _remember_blocked(http, item, cand)
             return None, None, "captcha or bot check (not solved)"
         if got.status in (401, 403):
             if not cand.unblock and _needs_unblock(cand.url, settings) and settings.has("zenrows"):
@@ -1401,7 +1516,7 @@ def run(
     limit: int | None = None,
     dry_run: bool = False,
     save_dir: str | None = None,
-    steps: Iterable[str] = STEPS,
+    steps: Iterable[str] = DEFAULT_STEPS,
     retry: bool = False,
     log: Callable[[str], None] = print,
     settings: Settings | None = None,
@@ -1413,6 +1528,7 @@ def run(
     settings = settings or Settings.load()
     budget = Budget()
     http = http or Http(settings)
+    http.log = log
     steps = [s for s in steps if s in STEPS]
     started = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     items, results = select_items(
@@ -1473,6 +1589,12 @@ def run(
                 _save_state(state)
                 _append_log(res)
             results.append(res)
+    if getattr(http, "browser", None) is not None:
+        try:
+            http.browser.close()
+        except Exception:
+            pass
+        http.browser = None
     report = RunReport(results, dry_run, started)
     try:
         runs = state_dir() / "runs"
@@ -1483,6 +1605,16 @@ def run(
     except OSError:
         pass
     return report
+
+
+def src_browser(item: ItemInfo, http: Http, settings: Settings, budget: Budget) -> Iterator[Candidate]:
+    """The browser step; lives in ``fulltext_browser``, imported when used."""
+    from zotero_mcp.fulltext_browser import src_browser as _src
+
+    yield from _src(item, http, settings, budget)
+
+
+SOURCES["browser"] = [src_browser]
 
 
 def scholar_search_url(item: ItemInfo) -> str:

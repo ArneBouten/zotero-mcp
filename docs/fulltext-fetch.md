@@ -6,14 +6,47 @@ by hand, cheapest first, and stops at the first PDF that passes its checks.
 
 | Step | What it does | Needs |
 |---|---|---|
-| `open-access` | Unpaywall, OpenAlex, Semantic Scholar, Europe PMC / PubMed Central, arXiv, CORE, OAPEN (books) | Nothing; keys raise the limits |
+| `open-access` | Unpaywall, OpenAlex, Semantic Scholar, Europe PMC / PubMed Central, arXiv, OSF preprints (PsyArXiv and others), CORE, Zenodo, HAL, OAPEN (books) | Nothing; keys raise the limits |
 | `publisher` | The DOI's landing page and its `citation_pdf_url`, plus the PDF addresses of Wiley, Taylor & Francis, SAGE and Springer. Items without a DOI: their URL field | A network the library recognises (eduroam, campus) for subscribed papers |
 | `scholar` | Google Scholar through SerpApi: the result's [PDF] link, then the other versions in its cluster | `SERPAPI_API_KEY` (250 free searches a month) |
 | `web` | A web search for the exact title through Tavily; ResearchGate pages through the ZenRows unblocker | `TAVILY_API_KEY` (1,000 free searches a month); `ZENROWS_API_KEY` optional |
+| `browser` | Your own Chrome window with your logins: links that blocked a plain download earlier in the run (ResearchGate, Academia.edu, SSRN, bot-protected publishers), ResearchGate searched by title, and the publisher's page | Playwright and Google Chrome; only with `--browser` |
 
 Only copies you can open yourself are fetched: open-access copies, public
 downloads, and subscriptions through your own network. Captchas are never
 solved; a page that shows one is logged and skipped. No shadow libraries.
+
+## The browser step
+
+Some copies only come through a browser: ResearchGate's and Academia.edu's
+"Download" buttons, and publisher pages behind bot protection or an
+institutional login. With `--browser`, the fetcher opens its own Chrome
+window (its own profile in `~/.config/zotero-mcp/fetch-browser`, separate
+from your everyday Chrome) for the papers the other steps could not find.
+
+Once, beforehand:
+
+```
+pip install playwright
+zotero-mcp fetch-fulltext --browser-login
+```
+
+The second command opens the window with ResearchGate and Academia.edu login
+pages; log in there, and on any publisher site you use through your
+university ("Access through your institution"). The logins are kept for
+later runs.
+
+During a run the window stays visible. It waits 10–20 seconds between
+papers. When a captcha or a login page appears, it stops and waits up to five
+minutes for you to deal with it in the window; it never solves captchas. Do
+not leave the browser step running unattended. Off campus, a library proxy
+prefix can be set as `fulltext_fetch.proxy_prefix` (the part of a proxied
+link before the encoded address, ending in `?url=`).
+
+```
+zotero-mcp fetch-fulltext --browser                 # all steps, browser last
+zotero-mcp fetch-fulltext --retry --steps browser   # only the browser, for what is still missing
+```
 
 ## What it checks before attaching
 
@@ -79,4 +112,4 @@ Use is counted per month in `~/.config/zotero-mcp/fulltext/budget.json` and
 stops at the free allowance. Change the limits in a `fulltext_fetch` section
 of `config.json`: `serpapi_monthly` (250), `tavily_monthly` (1000),
 `zenrows_monthly_credits` (5000), `openalex_content_daily` (100),
-`host_delay` (6 seconds), `retry_days` (30), `max_candidates` (12 per item).
+`host_delay` (6 seconds), `retry_days` (30), `max_candidates` (12 links per step and paper).

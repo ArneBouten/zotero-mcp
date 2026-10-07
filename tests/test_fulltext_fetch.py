@@ -313,3 +313,61 @@ def test_keys_file_wins_over_config_and_loses_to_the_environment(home, monkeypat
     assert s.email == "me@ugent.be"
     monkeypatch.setenv("SERPAPI_API_KEY", "env")
     assert ff.Settings.load().keys["serpapi"] == "env"
+
+
+# --- new sources and the browser step ---------------------------------------------
+
+
+def test_blocked_links_go_to_the_browser_step(tmp_path, monkeypatch):
+    """A link that refused a plain download is retried once through the browser."""
+    from zotero_mcp import fulltext_browser as fb
+
+    good = good_pdf(tmp_path)
+    blocked_page = b"<html><title>Just a moment...</title>cf-chl</html>"
+    http = ff.Http(ff.Settings(host_delay=0))
+    http.fetch = lambda url, max_bytes=0, referer=None: ff.Fetched(403, "text/html", blocked_page, url)
+    http.fetch_unblocked = lambda url, budget: None
+
+    class FakeSession:
+        opened = []
+
+        def start(self):
+            return self
+
+        def get_pdf(self, url, referer=None):
+            self.opened.append(url)
+            return ff.Fetched(200, "application/pdf", good, url)
+
+        def close(self):
+            pass
+
+    http.browser = FakeSession()
+
+    def plain(item, http_, settings, budget):
+        yield ff.Candidate("https://www.researchgate.net/publication/1_X", "web search")
+
+    monkeypatch.setattr(ff, "SOURCES", {"web": [plain], "browser": [fb.src_browser]})
+    path, cand, check, attempts = ff.find_pdf_for(
+        ff.ItemInfo.from_zotero(ITEM), http, ff.Settings(host_delay=0), ff.Budget(tmp_path / "b.json"),
+        steps=["web", "browser"], workdir=str(tmp_path),
+    )
+    assert attempts[0].outcome == "captcha or bot check (not solved)"
+    assert cand.source == "web search, in your browser" and check.ok
+    assert FakeSession.opened == ["https://www.researchgate.net/publication/1_X"]
+
+
+def test_browser_failure_is_reported_not_raised(tmp_path, monkeypatch):
+    from zotero_mcp import fulltext_browser as fb
+
+    def broken():
+        raise fb.BrowserUnavailable("the browser step needs Playwright")
+
+    cand = ff.Candidate("https://x.org/p", "publisher, in your browser", fetcher=fb._fetcher(broken))
+    path, check, outcome = ff._try_candidate(
+        ff.ItemInfo.from_zotero(ITEM), cand, None, ff.Settings(), ff.Budget(tmp_path / "b.json"), str(tmp_path)
+    )
+    assert path is None and outcome == "browser: the browser step needs Playwright"
+
+
+def test_browser_step_is_not_in_the_default_run():
+    assert "browser" in ff.STEPS and "browser" not in ff.DEFAULT_STEPS

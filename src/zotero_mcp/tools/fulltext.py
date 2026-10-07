@@ -37,7 +37,9 @@ def _as_list(value) -> list[str] | None:
         f"limit: items per call (default 5, max {_MAX_TOOL_ITEMS}); larger "
         "runs: `zotero-mcp fetch-fulltext` in a terminal. "
         "dry_run: find and check, attach nothing. "
-        "steps: subset of open-access, publisher, scholar, web."
+        "steps: subset of open-access, publisher, scholar, web; 'browser' "
+        "(opens a visible Chrome window with the user's logins) only when the "
+        "user asks for it."
     ),
 )
 def fetch_fulltext(
@@ -56,7 +58,7 @@ def fetch_fulltext(
         except (TypeError, ValueError):
             n = 5
         n = max(1, min(n, _MAX_TOOL_ITEMS))
-        chosen = [s for s in (_as_list(steps) or list(_ff.STEPS)) if s in _ff.STEPS] or list(_ff.STEPS)
+        chosen = [s for s in (_as_list(steps) or list(_ff.DEFAULT_STEPS)) if s in _ff.STEPS] or list(_ff.DEFAULT_STEPS)
         report = _ff.run(
             keys=keys[:_MAX_TOOL_ITEMS] if keys else None,
             collection=collection_key,

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.14] - 2026-10-07
+
+### Added
+
+- **The fetcher's browser step.** `zotero-mcp fetch-fulltext --browser` drives its own Chrome window, with logins you set up once (`--browser-login`): it retries the links that blocked a plain download (ResearchGate, Academia.edu, SSRN, bot-protected publishers), searches ResearchGate by title and clicks "Download", and opens the publisher's page with your institutional login or library proxy. It works at a human pace and waits for you when a captcha or login page appears; it never solves captchas. Needs Playwright and Google Chrome.
+- **More open sources:** OSF preprints (PsyArXiv, SocArXiv, EdArXiv and others), Zenodo and HAL.
+
+### Changed
+
+- The cap on links tried (`max_candidates`) now counts per step, so many dead open-access links no longer keep a paper from reaching Scholar, the web search or the browser.
+
 ## [0.13.2+arne.13] - 2026-10-07
 
 ### Added

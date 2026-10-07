@@ -882,7 +882,13 @@ def main():
                               help="Find and check PDFs, attach nothing")
     fetch_parser.add_argument("--save-dir", help="Save the PDFs found to this folder instead of attaching them")
     fetch_parser.add_argument("--steps", default="open-access,publisher,scholar,web",
-                              help="Steps to use, in order (default: open-access,publisher,scholar,web)")
+                              help="Steps to use, in order (default: open-access,publisher,scholar,web; "
+                                   "also: browser)")
+    fetch_parser.add_argument("--browser", action="store_true",
+                              help="Add the browser step: your own Chrome window with your logins "
+                                   "(ResearchGate, Academia.edu, publishers)")
+    fetch_parser.add_argument("--browser-login", action="store_true",
+                              help="Open the fetcher's Chrome window to log in once, then exit")
     fetch_parser.add_argument("--retry", action="store_true",
                               help="Also retry items tagged fulltext/not-found recently")
     fetch_parser.add_argument("--open-missing", action="store_true",
@@ -1353,8 +1359,19 @@ def main():
         setup_zotero_environment()
         from zotero_mcp import fulltext_fetch
 
+        if args.browser_login:
+            from zotero_mcp import fulltext_browser
+
+            try:
+                fulltext_browser.login_session()
+            except Exception as e:
+                print(f"Error: {e}")
+                sys.exit(1)
+            return
         keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
         steps = [x.strip() for x in args.steps.split(",") if x.strip()]
+        if args.browser and "browser" not in steps:
+            steps.append("browser")
         unknown = [x for x in steps if x not in fulltext_fetch.STEPS]
         if unknown:
             print(f"Unknown step(s): {', '.join(unknown)}. Choose from {', '.join(fulltext_fetch.STEPS)}.")
