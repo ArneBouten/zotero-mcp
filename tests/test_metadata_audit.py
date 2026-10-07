@@ -299,3 +299,18 @@ def test_series_notes_and_isbn_hyphens_are_ignored():
     assert ma.same("ISBN", "978-1-85168-480-9", "9781851684809")
     assert ma.same("ISBN", "1851684808 9781851684809", "1-85168-480-8")
     assert not ma.same("ISBN", "978-1-85168-480-9", "9780415000000")
+
+
+def test_title_pages_and_other_works_are_not_abstracts():
+    title = "Development of an electronic outdoor play device to maximise energy expenditure in children"
+    stub = ("A Doctoral Thesis. Submitted in partial fulfilment of the requirements for the award of Doctor "
+            "of Philosophy at Loughborough University. Development of an electronic outdoor play device to "
+            "maximise energy expenditure in children, with a study of how children play outdoors and move.")
+    assert not ma._plausible_abstract(stub, title)
+    other = ("The present paper argues that health promotion efforts, particularly those directed at resistant "
+             "and high risk workers, should be built on a careful analysis of the workplace and the many ways "
+             "in which work organisation shapes what people can do about their health.")
+    assert not ma._plausible_abstract(other, "Affordances of children's environments: a functional approach")
+    good = ("This thesis describes the development of an electronic outdoor play device designed to maximise "
+            "energy expenditure in children during break times, and tests it in four primary schools over a term, measuring heart rate and step counts against ordinary play.")
+    assert ma._plausible_abstract(good, title)

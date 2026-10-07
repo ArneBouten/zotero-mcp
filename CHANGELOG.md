@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.20] - 2026-10-07
+
+### Fixed
+
+- **Metadata audit: thesis title pages taken for abstracts.** OpenAlex's "abstract" for some theses is their title page ("A Doctoral Thesis. Submitted in partial fulfilment…"). Every OpenAlex abstract, also for items matched by title, is now checked: long enough, sharing words with the title, and not a title page or citation line. Line breaks inside OpenAlex abstracts are removed.
+
 ## [0.13.2+arne.19] - 2026-10-07
 
 ### Fixed

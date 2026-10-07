@@ -173,7 +173,7 @@ def _openalex_record(work: dict, by: str) -> Record:
     inv = work.get("abstract_inverted_index") or {}
     if inv:
         words = sorted(((pos, w) for w, positions in inv.items() for pos in positions))
-        abstract = " ".join(w for _pos, w in words)
+        abstract = re.sub(r"\s+", " ", " ".join(w for _pos, w in words)).strip()
     authors = []
     for au in work.get("authorships") or []:
         name = ((au.get("author") or {}).get("display_name") or "").strip()
@@ -518,7 +518,7 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
             continue
         old = _current(data, name)
         if name == "abstractNote":
-            if not old.strip():
+            if not old.strip() and (ref.source != "OpenAlex" or _plausible_abstract(new, info.title)):
                 audit.changes.append(Change(name, "", new, "fill", [ref.source]))
             continue
         if not old.strip():
@@ -561,6 +561,10 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
 def _plausible_abstract(text: str, title: str) -> bool:
     """OpenAlex's abstracts are sometimes another work's, or a citation stub."""
     if len(text or "") < 200 or re.match(r"^\(?\d{4}\)", text.strip()):
+        return False
+    # A thesis's title page rather than its abstract.
+    if re.search(r"submitted in (partial )?fulfil|^(a )?(doctoral |master'?s? )?(thesis|dissertation)\b",
+                 text.strip(), re.I):
         return False
     words = {w for w in ff._fold(title).split() if len(w) >= 5}
     found = sum(1 for w in words if w in ff._fold(text))
