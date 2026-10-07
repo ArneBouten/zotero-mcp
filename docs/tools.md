@@ -127,6 +127,8 @@ All add tools take a `collections` parameter accepting collection keys, names, o
 
 ### 🖋️ Word citations
 - `zotero_insert_word_citations`: Turn citation markers in a `.docx` (`[@KEY]`, `[@KEY, p. 12]`, `{{bibliography}}`) into live Zotero citations and a bibliography that the Zotero Word plugin can refresh and restyle — see [Word citations](word-citations.md)
+- `zotero_inspect_word_citations`: List what a `.docx` cites — live Zotero citations with the items behind them, bibliographies, typed reference lists, citations typed as plain text — each with an id for editing
+- `zotero_edit_word_citations`: Replace or delete citations, turn plain-text citations into live ones, add Word comments, and insert, rebuild or delete bibliographies; writes a new file, tracked changes or over the original (with a backup), and asks which first
 
 ### 🔗 Related items tools
 - `zotero_get_item_related`: Get all related items for a specific Zotero item

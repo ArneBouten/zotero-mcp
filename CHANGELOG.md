@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.8] - 2026-10-07
+
+### Added
+
+- **Check and fix the citations in an existing Word document.** `zotero_inspect_word_citations` lists a document's live Zotero citations (with the items behind them and the sentence around each), its bibliographies, typed reference lists, citations typed as plain text, and unconverted markers. `zotero_edit_word_citations` then replaces or deletes citations, turns plain-text citations into live ones, adds Word comments, and inserts, rebuilds or deletes bibliographies, including replacing a typed reference list. It writes to a new file, as tracked changes in the original, or over the original, and asks which first; the last two keep a backup. For shared documents it shows which library each cited item comes from, flags the same work cited as different items (two bibliography entries), reuses the item already cited when an edit cites the same work again, and merges such duplicates on request (`merge_duplicates`). See [Word citations](docs/word-citations.md#checking-and-fixing-an-existing-document).
+
+### Fixed
+
+- **Text after a citation marker could disappear.** When a marker ended exactly where its run of text ended (for example right before a change of formatting), `zotero_insert_word_citations` removed everything after it in the paragraph.
+
 ## [0.13.2+arne.7] - 2026-10-07
 
 ### Added
