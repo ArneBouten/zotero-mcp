@@ -37,7 +37,7 @@ In a test on 40 random articles from this library, 35 got their printed pages an
    - **Left out:** running headers, captions and lowercase list items.
    - **What Gemini gets:** the candidates, each with its page and style, plus the printed table of contents for books and the running headers.
    - **What it returns:** which candidates are headings, their level and the section each opens. It can only pick candidates, never invent a heading; the answer is put back in reading order and cached per file.
-3. **Rules**, without an API: candidates whose text is a section name. The names are known in English, Dutch, French, Spanish and German ("Inleiding", "Résultats", "Literatur"). Two kinds of false headings are dropped:
+3. **Rules**, without an API: candidates whose text is a section name. The names are known in English, Dutch, French, Spanish, Portuguese, Italian and German ("Inleiding", "Résultats", "Literatur"). Two kinds of false headings are dropped:
    - a structured abstract ("Background: … Methods: …");
    - author roles after the references ("Methodology: A.B.").
 

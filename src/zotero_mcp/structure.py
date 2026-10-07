@@ -53,27 +53,32 @@ SECTIONS = ("Abstract", "Introduction", "Methods", "Results", "Discussion", "Con
 # the whole heading after its numbering, or its first part before "and", ":"
 # or "&" ("Results and discussion" -> Results).
 _ALIASES: tuple[tuple[str, str], ...] = (
-    (r"abstract|summary|samenvatting|resume|resumen|zusammenfassung|synopsis|highlights", "Abstract"),
+    (r"abstract|summary|samenvatting|resume|resumen|resumo|riassunto|sommario|zusammenfassung|synopsis|"
+     r"highlights", "Abstract"),
     (r"introduction|background|theoretical (?:background|framework)|literature review|related work|"
      r"the present stud(?:y|ies)|present research|aims?|objectives?|hypothes[ie]s|rationale|"
-     r"inleiding|introductie|achtergrond|probleemstelling|introduccion|einleitung|hintergrund", "Introduction"),
+     r"inleiding|introductie|achtergrond|probleemstelling|introduccion|introducao|introduzione|einleitung|"
+     r"hintergrund", "Introduction"),
     (r"materials? and methods?|methods?|methodology|study design|design|participants?|subjects?|sample|"
      r"measures?|measurements?|instruments?|materials?|procedures?|data collection|data analys[ie]s|"
      r"statistical analys[ie]s|analys[ie]s|intervention|protocol|methode|methoden|methodologie|werkwijze|"
-     r"onderzoeksopzet|metodo|metodos|metodologia|methodik", "Methods"),
-    (r"results?|findings|outcomes|resultaten|bevindingen|resultats|resultados|ergebnisse", "Results"),
+     r"onderzoeksopzet|metodo|metodos|metodi|metodologia|methodik", "Methods"),
+    (r"results?|findings|outcomes|resultaten|bevindingen|resultats|resultados|risultati|ergebnisse", "Results"),
     (r"general discussion|discussion|limitations?|strengths and limitations|implications|"
-     r"practical implications|future (?:research|directions)|discussie|beschouwing|discusion|diskussion", "Discussion"),
-    (r"conclusions?|concluding remarks|conclusie|conclusies|conclusion generale|conclusiones|fazit|schlussfolgerung",
-     "Conclusion"),
+     r"practical implications|future (?:research|directions)|discussie|beschouwing|discusion|discussao|"
+     r"discussione|diskussion", "Discussion"),
+    (r"conclusions?|concluding remarks|conclusie|conclusies|conclusion generale|conclusiones|conclusao|"
+     r"conclusoes|considerac(?:ao|oes) finais|conclusioni|fazit|schlussfolgerung", "Conclusion"),
     (r"references?|reference list|bibliography|literature cited|works cited|cited literature|literatuur|"
      r"literatuurlijst|referenties|bronnen|bibliografie|bibliographie|references bibliographiques|referencias|"
-     r"bibliografia|literaturverzeichnis|literatur", "References"),
+     r"bibliografia|referencias bibliograficas|riferimenti bibliografici|literaturverzeichnis|literatur",
+     "References"),
     (r"appendi(?:x|ces)(?: [a-z0-9]+)?|supplementary(?: [\w ]+)?|supporting information|bijlagen?|annexes?|"
-     r"anexos?|anhang", "Appendix"),
+     r"anexos?|apendices?|appendice|allegati|anhang", "Appendix"),
     (r"acknowledge?ments?|funding|author contributions?|conflicts? of interest|competing interests?|"
      r"declarations?|ethics(?: statement| approval)?|data availability(?: statement)?|disclosure|"
-     r"dankwoord|woord vooraf|remerciements|agradecimientos|danksagung", "Back matter"),
+     r"dankwoord|woord vooraf|remerciements|agradecimientos|agradecimentos|ringraziamenti|danksagung",
+     "Back matter"),
 )
 _ALIAS_RE = [(re.compile(rf"(?:{pat})", re.I), label) for pat, label in _ALIASES]
 _NUMBERING_RE = re.compile(r"^\s*(?:(?:\d{1,2}(?:\.\d{1,2}){0,3}|[ivxlc]{1,6}|[a-h])[.)]?\s+|\d{1,2}(?:\.\d{1,2}){1,3}\s*)",

@@ -13,6 +13,8 @@ def test_section_names_in_several_languages_and_combinations():
         "Analyses and Results": "Results", "Results and discussion": "Results",
         "Discussion and conclusions": "Discussion", "Inleiding": "Introduction", "Résultats": "Results",
         "Literatur": "References", "Acknowledgements": "Back matter", "Kestrel surveys": None, "Study 2": None,
+        "Introdução": "Introduction", "Discussão": "Discussion", "Considerações finais": "Conclusion",
+        "Referências": "References", "Risultati": "Results", "Metodi": "Methods", "Conclusioni": "Conclusion",
     }
     for heading, label in cases.items():
         assert st.canonical_section(heading) == label, heading
