@@ -894,6 +894,20 @@ def main():
     fetch_parser.add_argument("--open-missing", action="store_true",
                               help="Open a Google Scholar search in the browser for each item still not found")
 
+    meta_parser = subparsers.add_parser(
+        "metadata-audit",
+        help="Check item metadata against Crossref, OpenAlex, PubMed and Open Library; fill and fix with --apply",
+    )
+    meta_parser.add_argument("--apply", action="store_true",
+                             help="Fill empty fields, correct fields two sources agree on, and add review notes "
+                                  "(default: report only)")
+    meta_parser.add_argument("--items", help="Comma-separated item keys (default: the whole library)")
+    meta_parser.add_argument("--collection", help="Only items in this collection (key)")
+    meta_parser.add_argument("--limit", type=int, help="At most this many items")
+    meta_parser.add_argument("--process-review", action="store_true",
+                             help="Only apply or discard proposals on items tagged metadata/accept or metadata/reject")
+    meta_parser.add_argument("--workers", type=int, default=4, help="Items checked at once (default 4)")
+
     layer_parser = subparsers.add_parser(
         "ocr-pdfs",
         help="OCR scanned PDFs in Zotero storage and write the text into the files (searchable PDFs)",
@@ -1396,6 +1410,23 @@ def main():
             for key in missing[:20]:
                 if key in found:
                     webbrowser.open(fulltext_fetch.scholar_search_url(fulltext_fetch.ItemInfo.from_zotero(found[key])))
+
+    elif args.command == "metadata-audit":
+        setup_zotero_environment()
+        from zotero_mcp import metadata_audit
+
+        keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
+        try:
+            report = metadata_audit.run(
+                keys=keys, collection=args.collection, limit=args.limit,
+                apply=args.apply or args.process_review, review_only=args.process_review,
+                workers=args.workers,
+            )
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        print()
+        print(report.markdown(limit=60))
 
     elif args.command == "ocr-pdfs":
         setup_zotero_environment()

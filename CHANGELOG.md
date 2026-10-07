@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.18] - 2026-10-07
+
+### Added
+
+- **Metadata audit.** `zotero-mcp metadata-audit` checks items against Crossref or DataCite (by DOI), Open Library (by ISBN) or OpenAlex (by title, first author and year), with PubMed and the item's own PDF as second sources. Without `--apply` it only reports. With `--apply` it fills empty fields (volume, issue, pages, DOI, ISSN/ISBN, publisher, abstract, first names given as initials) and corrects a filled field only when two independent sources agree on another value (volume, issue, pages, DOI, year, journal name, publisher); an abbreviated journal name is replaced and kept as the abbreviation. Every change is listed in a note on the item with the old value and its sources, and tagged `auto-enriched` or `auto-corrected`. Titles, author lists and values only one source gives become proposals: tag `metadata/review`, a note, and the saved search "Metadata to review". Tag an item `metadata/accept` or `metadata/reject` to decide; rejected values are not proposed again. Each run writes a report to `~/.config/zotero-mcp/metadata/runs/`. See [Checking and fixing metadata](docs/metadata-audit.md).
+- Tools `zotero_metadata_audit` (up to 15 items per call) and `zotero_metadata_review` (list, accept or reject proposals).
+
 ## [0.13.2+arne.17] - 2026-10-07
 
 ### Fixed
