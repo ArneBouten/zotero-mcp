@@ -790,6 +790,17 @@ _MAX_PASSAGE_POOL = 1000
 _DEFAULT_PASSAGES_PER_ITEM = 2
 
 
+def _with_second_section(filters: dict | None) -> dict | None:
+    """A filter on ``section`` also matches passages whose combined heading names
+    that section second ("Results and Discussion" for Discussion)."""
+    if not isinstance(filters, dict) or set(filters) != {"section"}:
+        return filters
+    cond = filters["section"]
+    if isinstance(cond, str) or (isinstance(cond, dict) and set(cond) <= {"$eq", "$in"}):
+        return {"$or": [{"section": cond}, {"section_2": cond}]}
+    return filters
+
+
 def _drop_reference_passages(results: dict) -> int:
     """Remove reference-list passages from a hit list, in place.
 
@@ -4703,7 +4714,7 @@ class ZoteroSemanticSearch:
                 per_item = 1
                 fetch_limit = limit * multiplier if reranker else limit
 
-            where = filters
+            where = _with_second_section(filters)
             if group_id is not None:
                 group_clause = {"group_id": int(group_id)}
                 where = {"$and": [filters, group_clause]} if filters else group_clause
@@ -4830,7 +4841,7 @@ class ZoteroSemanticSearch:
             # Passage provenance — present only on a chunk-indexed collection.
             if isinstance(meta, dict):
                 for mk in ("chunk_index", "n_chunks", "char_start", "char_end", "page", "section",
-                           "page_label", "heading", "chapter"):
+                           "section_2", "page_label", "heading", "chapter"):
                     if mk in meta:
                         enriched_result[mk] = meta[mk]
             if "char_start" not in enriched_result and passage_offset:

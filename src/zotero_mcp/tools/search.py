@@ -1578,7 +1578,7 @@ def semantic_search(
             if chapter := result.get("chapter"):
                 loc_bits.append(str(chapter))
             if section := result.get("section"):
-                loc_bits.append(str(section))
+                loc_bits.append(f"{section} & {result['section_2']}" if result.get("section_2") else str(section))
             if (heading := result.get("heading")) and heading != result.get("chapter"):
                 loc_bits.append(f"under \"{str(heading).split(' › ')[-1]}\"")
             # The printed page is what a citation needs; the PDF page is where

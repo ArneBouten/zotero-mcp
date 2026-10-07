@@ -288,3 +288,24 @@ def test_a_thread_bound_database_reader_is_used_from_one_thread_only(tmp_path):
     plain = ThreadBound()
     with ThreadPoolExecutor(max_workers=2) as pool, pytest.raises(sqlite3.ProgrammingError):
         list(pool.map(plain.lookup, range(4)))
+
+
+def test_combined_sections_and_apa_introductions():
+    assert st.second_section("Results and Discussion") == "Discussion"
+    assert st.second_section("Methods") is None
+    intro = "Children who play outside take risks, and theory says why. " * 30
+    chunks = [_chunk(0, 1, 0, "Title. Abstract We asked why children play."),
+              _chunk(1, 1, 60, "Abstract We asked why children take risks in play. " * 4),
+              _chunk(2, 2, 3000, intro), _chunk(3, 3, 5000, "Method Participants Forty children. " * 10),
+              _chunk(4, 4, 6000, "Results and Discussion The children played more. " * 10)]
+    structure = st.Structure(pages=4, headings=[st.Heading(1, "Abstract", 1, "Abstract"),
+                                                st.Heading(3, "Method", 1, "Methods"),
+                                                st.Heading(4, "Results and Discussion", 1, "Results")],
+                             headings_from="gemini")
+    metas, _ = st.label_passages(chunks, structure, "journalArticle")
+    assert [m.get("section") for m in metas] == ["Abstract", "Abstract", "Introduction", "Methods", "Results"]
+    assert metas[4]["section_2"] == "Discussion"
+    from zotero_mcp.semantic_search import _with_second_section
+    assert _with_second_section({"section": "Discussion"}) == {
+        "$or": [{"section": "Discussion"}, {"section_2": "Discussion"}]}
+    assert _with_second_section({"item_type": "book"}) == {"item_type": "book"}

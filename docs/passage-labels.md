@@ -41,6 +41,10 @@ In a test on 40 random articles from this library, 35 got their printed pages an
    - a structured abstract ("Background: … Methods: …");
    - author roles after the references ("Methodology: A.B.").
 
+**APA papers** have no "Introduction" heading. When a paper has a Method heading and no Introduction, the text between the abstract and Method is labelled Introduction.
+
+**Combined headings** such as "Results and Discussion" get both: `section` Results and `section_2` Discussion, as the JATS standard publishers use allows. A search filtered on Discussion finds them too, and the Location line shows "Results & Discussion".
+
 A section heading's sub-headings inherit its section ("Participants" under Method is Methods). Sub-headings of an Abstract, Appendix or References heading do not change the section.
 
 Headings are then located in the indexed text near their page. When most of an item's headings cannot be found there (another attachment than the one indexed), its headings are not used.

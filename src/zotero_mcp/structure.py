@@ -119,6 +119,19 @@ def canonical_section(heading: str) -> str | None:
     return found[0] if found else None
 
 
+def second_section(heading: str) -> str | None:
+    """The other section a combined heading names ("Results and Discussion" -> Discussion), as in
+    JATS, where a section may carry two types."""
+    first = canonical_section(heading)
+    words = fold(_NUMBERING_RE.sub("", heading or ""))
+    for part in re.split(r"\s+(?:and|en|et|y|e|und)\s+|\s*[:&]\s*", words)[:3]:
+        for pattern, label in _ALIAS_RE:
+            if pattern.fullmatch(part.strip()) and label != first and label in (
+                    "Introduction", "Methods", "Results", "Discussion", "Conclusion"):
+                return label
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Reading the PDF (child process)
 # ---------------------------------------------------------------------------
@@ -633,6 +646,8 @@ abstract (such as "Background:" or "Methods:" within the abstract itself).
 For each heading give its level ({levels}) and the section it opens, one of:
 Abstract, Introduction, Methods, Results, Discussion, Conclusion, References, Appendix, Back matter, Other.
 Sub-sections inherit the section of their parent ("Participants" under Methods is Methods).
+In APA-style papers the introduction has no "Introduction" heading (the paper's title may be repeated above
+it); return that repeated title, if it is a candidate, with section Introduction.
 {contents_rule}Answer only with the JSON."""
 
 
@@ -819,11 +834,19 @@ def label_passages(chunks: list[dict], st: Structure | None, item_type: str = ""
             report["mismatch"] = True
         marks.sort(key=lambda m: m[0])
 
+    # APA papers have no "Introduction" heading: the text between the abstract
+    # and the first Method heading is the introduction.
+    intro_end = None
+    if marks and not (st and st.book_like) and not any(h.section == "Introduction" for _p, h in marks):
+        intro_end = next((pos for pos, h in marks if h.section == "Methods"), None)
+    # An abstract is at most about 300 words: what follows it, before Method, is the introduction.
+    abstract_end = next((pos + 2500 for pos, h in marks if h.section == "Abstract"), 0)
+
     n = len(chunks)
     out = []
     for idx, ch in enumerate(chunks):
         meta = dict(ch["meta"])
-        for key in ("heading", "chapter", "page_label"):
+        for key in ("heading", "chapter", "page_label", "section_2"):
             meta.pop(key, None)
         start = int(meta.get("char_start", 0))
         end = int(meta.get("char_end", start))
@@ -840,15 +863,22 @@ def label_passages(chunks: list[dict], st: Structure | None, item_type: str = ""
             # ("Methods" in a structured abstract) do not change the section.
             enclosing = next((h.section for h in chain if h.section in ("Abstract", "Appendix", "References",
                                                                         "Back matter")), None)
-            section = enclosing or next((h.section for h in reversed(chain) if h.section), None)
+            owner = None if enclosing else next((h for h in reversed(chain) if h.section), None)
+            section = enclosing or (owner.section if owner else None)
             if section:
                 meta["section"] = section
             else:
                 meta.pop("section", None)
+            meta.pop("section_2", None)
+            if owner and (other := second_section(owner.text)):
+                meta["section_2"] = other
             if chain:
                 meta["heading"] = " › ".join(h.text for h in chain)[:200]
                 if st and st.book_like and chain[0].level == 1:
                     meta["chapter"] = chain[0].text[:150]
+        if intro_end is not None and idx and abstract_end <= probe < intro_end \
+                and meta.get("section") in (None, "Abstract"):
+            meta["section"] = "Introduction"
         page = meta.get("page")
         if st and st.labels and page is not None and 1 <= int(page) <= len(st.labels) and st.labels[int(page) - 1]:
             meta["page_label"] = st.labels[int(page) - 1]
