@@ -526,7 +526,7 @@ class Http:
             resp = self.session.get(
                 "https://api.zenrows.com/v1/",
                 params={"apikey": s.keys["zenrows"], "url": url, "js_render": "true", "premium_proxy": "true"},
-                timeout=120,
+                timeout=60,
             )
         except Exception as e:
             return Fetched(0, "", b"", url, f"unblocker failed ({type(e).__name__})")
@@ -1669,7 +1669,73 @@ def scholar_search_url(item: ItemInfo) -> str:
     return "https://scholar.google.com/scholar?q=" + quote(f'"{item.title}" {item.first_author}'.strip())
 
 
-if __name__ == "__main__":  # pragma: no cover - the probe child
+# ---------------------------------------------------------------------------
+# Background runs (for the MCP tool, whose calls must answer within a minute)
+# ---------------------------------------------------------------------------
+
+
+def _run_paths(run_id: str) -> dict[str, Path]:
+    base = state_dir() / "runs" / f"bg-{run_id}"
+    return {"log": base.with_suffix(".log"), "report": base.with_suffix(".md"), "done": base.with_suffix(".done")}
+
+
+def start_background_run(options: dict) -> str:
+    """Start a fetch in its own process; returns the run id."""
+    run_id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + f"{os.getpid() % 1000:03d}"
+    paths = _run_paths(run_id)
+    paths["log"].parent.mkdir(parents=True, exist_ok=True)
+    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+                    "close_fds": True}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([sys.executable, "-m", "zotero_mcp.fulltext_fetch", "bg-run", run_id, json.dumps(options)],
+                     **kwargs)
+    return run_id
+
+
+def background_status(run_id: str, tail: int = 25) -> tuple[bool, str]:
+    """(finished, text): the report when finished, else the latest log lines."""
+    paths = _run_paths(run_id)
+    if paths["done"].exists():
+        try:
+            return True, paths["report"].read_text(encoding="utf-8")
+        except OSError:
+            return True, paths["done"].read_text(encoding="utf-8")
+    try:
+        lines = paths["log"].read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False, "starting ..."
+    return False, "\n".join(lines[-tail:])
+
+
+def _bg_main(run_id: str, raw: str) -> int:
+    opts = json.loads(raw)
+    paths = _run_paths(run_id)
+    with open(paths["log"], "a", encoding="utf-8", buffering=1) as log_file:
+        def log(msg: str) -> None:
+            log_file.write(msg + "\n")
+
+        try:
+            from zotero_mcp.cli import setup_zotero_environment
+
+            setup_zotero_environment()
+            report = run(keys=opts.get("keys"), collection=opts.get("collection"), limit=opts.get("limit"),
+                         dry_run=bool(opts.get("dry_run")), steps=opts.get("steps") or DEFAULT_STEPS, log=log)
+            paths["report"].write_text(report.markdown(limit=40), encoding="utf-8")
+            paths["done"].write_text("ok", encoding="utf-8")
+            return 0
+        except Exception as e:
+            log(f"Error: {type(e).__name__}: {e}")
+            paths["report"].write_text(f"Error fetching full texts: {e}", encoding="utf-8")
+            paths["done"].write_text("error", encoding="utf-8")
+            return 1
+
+
+if __name__ == "__main__":  # pragma: no cover - child processes
+    if len(sys.argv) >= 4 and sys.argv[1] == "bg-run":
+        sys.exit(_bg_main(sys.argv[2], sys.argv[3]))
     if len(sys.argv) >= 3 and sys.argv[1] == "probe":
         try:
             sys.exit(_probe_main(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 4))

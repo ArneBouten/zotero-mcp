@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.13.2+arne.17] - 2026-10-07
 
+### Fixed
+
+- **`zotero_fetch_fulltext` timed out in Cowork.** Tool calls that reach the PC through Cowork must answer within a minute, and one paper can take longer. The fetch now runs in its own process: the call returns the report if it finishes within about 40 seconds, otherwise a run id, and the new `zotero_fetch_fulltext_status` tool gives the progress or the result. The ZenRows unblocker now gives up after 60 seconds instead of 120.
+
 ### Changed
 
 - **`ocr-pdfs` reports every file.** A line per PDF as soon as it is checked (pages, OCR'd pages and time, running minutes), in the order they finish rather than list order, so a long scan no longer hides the progress of the others; "OCR: <file>, N pages" shows while a scan is worked on. What it has checked is saved every 25 files, so a run stopped with Ctrl+C does not start over.

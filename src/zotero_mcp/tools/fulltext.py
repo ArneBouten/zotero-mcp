@@ -20,22 +20,29 @@ def _as_list(value) -> list[str] | None:
     return keys or None
 
 
+#: Tool calls that reach the PC through Cowork must answer within about a
+#: minute. The fetch runs in its own process; the call waits this long for it.
+_WAIT_SECONDS = 40
+
+
 @mcp.tool(
     name="zotero_fetch_fulltext",
     description=(
         "Find and attach a PDF for items that have none, the way you would by "
         "hand: open-access copies (Unpaywall, OpenAlex, Semantic Scholar, "
-        "Europe PMC, arXiv, OAPEN), the publisher's page (subscriptions work "
-        "on the university network), Google Scholar's PDF links and versions "
-        "(SerpApi key), and a web search (Tavily key). Each PDF is checked "
-        "(title and first author on its first pages, not a preview) before "
-        "it is attached; its version is in the attachment title. Items not "
-        "found are tagged fulltext/not-found with the reason in the report. "
-        "Never solves captchas, never uses shadow libraries. "
+        "Europe PMC, arXiv, OSF, Zenodo, HAL, OAPEN), the publisher's page "
+        "(subscriptions work on the university network), Google Scholar's PDF "
+        "links and versions, and a web search. Each PDF is checked (title and "
+        "first author on its first pages, not a preview) before it is "
+        "attached; its version is in the attachment title. Items not found "
+        "are tagged fulltext/not-found. Never solves captchas, never uses "
+        "shadow libraries. The fetch runs in the background: the call returns "
+        "the report if it finishes within ~40 s, otherwise a run_id — then "
+        "call zotero_fetch_fulltext_status(run_id) a minute later (one paper "
+        "takes 10 s to 2 min). "
         "item_keys: items to fetch (list or comma-separated); omit to take "
-        "items without a PDF from collection_key or the whole library. "
-        f"limit: items per call (default 5, max {_MAX_TOOL_ITEMS}); larger "
-        "runs: `zotero-mcp fetch-fulltext` in a terminal. "
+        f"items without a PDF from collection_key or the whole library. "
+        f"limit: items per run (default 5, max {_MAX_TOOL_ITEMS}). "
         "dry_run: find and check, attach nothing. "
         "steps: subset of open-access, publisher, scholar, web; 'browser' "
         "(opens a visible Chrome window with the user's logins) only when the "
@@ -51,6 +58,8 @@ def fetch_fulltext(
     *,
     ctx: Context,
 ) -> str:
+    import time
+
     try:
         keys = _as_list(item_keys)
         try:
@@ -59,15 +68,39 @@ def fetch_fulltext(
             n = 5
         n = max(1, min(n, _MAX_TOOL_ITEMS))
         chosen = [s for s in (_as_list(steps) or list(_ff.DEFAULT_STEPS)) if s in _ff.STEPS] or list(_ff.DEFAULT_STEPS)
-        report = _ff.run(
-            keys=keys[:_MAX_TOOL_ITEMS] if keys else None,
-            collection=collection_key,
-            limit=None if keys else n,
-            dry_run=bool(dry_run),
-            steps=chosen,
-            log=ctx.info,
+        run_id = _ff.start_background_run({
+            "keys": keys[:_MAX_TOOL_ITEMS] if keys else None,
+            "collection": collection_key,
+            "limit": None if keys else n,
+            "dry_run": bool(dry_run),
+            "steps": chosen,
+        })
+        deadline = time.monotonic() + _WAIT_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            finished, text = _ff.background_status(run_id)
+            if finished:
+                return text
+        _finished, text = _ff.background_status(run_id, tail=8)
+        return (
+            f"Still running in the background (run_id {run_id}). Call "
+            f"zotero_fetch_fulltext_status(run_id='{run_id}') in a minute for the result.\n\n"
+            f"Latest progress:\n{text}"
         )
-        return report.markdown(limit=40)
     except Exception as e:
         ctx.error(f"Full-text fetch failed: {e}")
         return f"Error fetching full texts: {e}"
+
+
+@mcp.tool(
+    name="zotero_fetch_fulltext_status",
+    description=(
+        "Progress or result of a zotero_fetch_fulltext run that was still "
+        "running: the report when it has finished, else its latest log lines."
+    ),
+)
+def fetch_fulltext_status(run_id: str, *, ctx: Context) -> str:
+    finished, text = _ff.background_status(str(run_id).strip())
+    if finished:
+        return text
+    return f"Still running (run_id {run_id}). Latest progress:\n{text}"

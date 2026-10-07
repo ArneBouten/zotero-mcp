@@ -381,3 +381,21 @@ def test_browser_failure_is_reported_not_raised(tmp_path, monkeypatch):
 
 def test_browser_step_is_not_in_the_default_run():
     assert "browser" in ff.STEPS and "browser" not in ff.DEFAULT_STEPS
+
+
+def test_background_run_reports_through_status(home, monkeypatch):
+    """The tool's fetch runs in its own process and reports through files."""
+    import time
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("ZOTERO_NO_CLAUDE", "1")
+    monkeypatch.setenv("ZOTERO_LOCAL", "true")
+    monkeypatch.setenv("ZOTERO_DB_PATH", str(home / "missing.sqlite"))
+    run_id = ff.start_background_run({"keys": ["ABCD1234"], "steps": ["open-access"]})
+    deadline = time.monotonic() + 90
+    finished, text = False, ""
+    while time.monotonic() < deadline and not finished:
+        time.sleep(1)
+        finished, text = ff.background_status(run_id)
+    assert finished, text
+    assert text  # a report, or the error it ran into: never silence
