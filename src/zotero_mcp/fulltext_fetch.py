@@ -447,8 +447,17 @@ class Http:
                     resp = self.session.get(url, params=params, headers=h, timeout=timeout)
             except Exception:
                 return 0, None
-            if resp.status_code == 429 and attempt < 2:
-                self.sleep(min(30.0, float(resp.headers.get("Retry-After") or 5 * (attempt + 1))))
+            if resp.status_code == 429 and attempt < 1:
+                # One short wait. A service that has used up its daily
+                # allowance (OpenAlex without a key) keeps refusing, and
+                # waiting longer only holds up the paper.
+                try:
+                    wait = float(resp.headers.get("Retry-After") or 3)
+                except ValueError:
+                    wait = 3.0
+                if wait > 5:
+                    return 429, None
+                self.sleep(wait)
                 continue
             try:
                 return resp.status_code, resp.json()
@@ -1239,6 +1248,29 @@ def _try_key(cand: Candidate) -> str:
     return ("browser:" if cand.fetcher is not None else "") + cand.url
 
 
+def _ask_sources(runnable, item, http, settings, budget, parallel: bool = True) -> dict:
+    """Each source's links (or the exception it raised), keyed by name.
+
+    The sources of one step are independent lookups at different services,
+    so they are asked at the same time: a paper no service has takes as long
+    as the slowest answer, not the sum of ten. Downloads stay one at a time,
+    in the sources' order.
+    """
+    def ask(source):
+        try:
+            return list(source(item, http, settings, budget))
+        except Exception as e:  # reported per source by the caller
+            return e
+
+    if not parallel or len(runnable) < 2:
+        return {name: ask(source) for source, name in runnable}
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(10, len(runnable))) as pool:
+        futures = {name: pool.submit(ask, source) for source, name in runnable}
+        return {name: f.result() for name, f in futures.items()}
+
+
 def find_pdf_for(
     item: ItemInfo,
     http: Http,
@@ -1254,18 +1286,22 @@ def find_pdf_for(
     workdir = workdir or tempfile.mkdtemp(prefix="zmcp-fulltext-")
     for step in steps:
         n = 0  # the cap is per step, so a long open-access list never starves Scholar
+        runnable = []
         for source in SOURCES.get(step, []):
             name = SOURCE_NAMES.get(source.__name__, source.__name__.removeprefix("src_"))
             why = source_status(source, settings, budget)
             if why:
                 log(f"  [{step}] {name}: {why}")
+            else:
+                runnable.append((source, name))
+        found = _ask_sources(runnable, item, http, settings, budget, parallel=(step != "browser"))
+        for source, name in runnable:
+            result = found[name]
+            if isinstance(result, Exception):
+                attempts.append(Attempt(name, "", f"source failed ({type(result).__name__})"))
+                log(f"  [{step}] {name}: failed ({type(result).__name__})")
                 continue
-            try:
-                candidates = [c for c in source(item, http, settings, budget) if _try_key(c) not in tried]
-            except Exception as e:
-                attempts.append(Attempt(name, "", f"source failed ({type(e).__name__})"))
-                log(f"  [{step}] {name}: failed ({type(e).__name__})")
-                continue
+            candidates = [c for c in result if _try_key(c) not in tried]
             if not candidates:
                 log(f"  [{step}] {name}: no copy")
                 continue

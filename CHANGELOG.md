@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.16] - 2026-10-07
+
+### Changed
+
+- **Faster lookups.** The services of one step (Unpaywall, OpenAlex, Semantic Scholar, OSF, Zenodo and the rest) are now asked at the same time instead of one after another; downloads stay one at a time and paced. A service that answers "too many requests" gets one short retry instead of up to a minute of waiting. A paper that no open source has now takes a few seconds in that step instead of up to a minute.
+- `zotero_fetch_fulltext` handles at most 10 papers per call, to stay within the client's time limit; use the command line for larger batches.
+
 ## [0.13.2+arne.15] - 2026-10-07
 
 ### Fixed

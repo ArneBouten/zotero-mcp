@@ -8,7 +8,7 @@ from zotero_mcp._context import Context
 
 #: Each item can take up to a minute (several sources, polite pauses between
 #: requests to one site), so a tool call handles a few; the CLI does bulk runs.
-_MAX_TOOL_ITEMS = 15
+_MAX_TOOL_ITEMS = 10
 
 
 def _as_list(value) -> list[str] | None:

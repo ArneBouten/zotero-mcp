@@ -12,6 +12,10 @@ by hand, cheapest first, and stops at the first PDF that passes its checks.
 | `web` | A web search for the exact title through Tavily; ResearchGate pages through the ZenRows unblocker | `TAVILY_API_KEY` (1,000 free searches a month); `ZENROWS_API_KEY` optional |
 | `browser` | Your own Chrome window with your logins: links that blocked a plain download earlier in the run (ResearchGate, Academia.edu, SSRN, bot-protected publishers), ResearchGate searched by title, and the publisher's page | Playwright and Google Chrome; only with `--browser` |
 
+Within a step, the services are asked at the same time; the links they
+return are then downloaded one at a time, in the order of the table, with
+at least 6 seconds between two requests to the same site.
+
 Only copies you can open yourself are fetched: open-access copies, public
 downloads, and subscriptions through your own network. Captchas are never
 solved; a page that shows one is logged and skipped. No shadow libraries.
