@@ -79,7 +79,9 @@ def test_bookmarks_used_when_they_name_sections():
     toc = [[1, "Title of the paper", 1], [2, "Abstract", 1], [2, "Background", 1], [2, "Methods", 2],
            [3, "Participants", 2], [2, "Results", 4], [2, "References", 7]]
     hs = st.headings_from_toc(toc, 8, book_like=False)
-    assert [(h.level, h.section) for h in hs][:4] == [(1, None), (2, "Abstract"), (2, "Introduction"), (2, "Methods")]
+    # The title bookmark holding everything is dropped; its children become the top level.
+    assert [(h.level, h.section) for h in hs][:4] == [(1, "Abstract"), (1, "Introduction"), (1, "Methods"),
+                                                      (2, "Methods")]
     assert st.headings_from_toc([[1, "Page 1", 1], [1, "Page 2", 2], [1, "Page 3", 3]], 3, book_like=False) == []
 
 
@@ -294,7 +296,7 @@ def test_combined_sections_and_apa_introductions():
     assert st.second_section("Results and Discussion") == "Discussion"
     assert st.second_section("Methods") is None
     intro = "Children who play outside take risks, and theory says why. " * 30
-    chunks = [_chunk(0, 1, 0, "Title. Abstract We asked why children play."),
+    chunks = [_chunk(0, 1, 0, "Title.\nAbstract We asked why children play."),
               _chunk(1, 1, 60, "Abstract We asked why children take risks in play. " * 4),
               _chunk(2, 2, 3000, intro), _chunk(3, 3, 5000, "Method Participants Forty children. " * 10),
               _chunk(4, 4, 6000, "Results and Discussion The children played more. " * 10)]
@@ -320,7 +322,7 @@ def test_introductions_with_and_without_a_heading():
         return [m.get("section") for m in st.label_passages(chunks, structure, "journalArticle")[0]]
 
     # APA with topical headings inside the introduction, and no Introduction heading.
-    chunks = [_chunk(0, 1, 0, "Title. Abstract We asked why children play."),
+    chunks = [_chunk(0, 1, 0, "Title.\nAbstract We asked why children play."),
               _chunk(1, 1, 60, "Abstract We asked why children take risks in play. " * 4),
               _chunk(2, 2, 3000, body), _chunk(3, 3, 5000, "Risky play and development " + body),
               _chunk(4, 4, 7000, "The Present Study " + body), _chunk(5, 5, 9000, method)]
@@ -332,7 +334,7 @@ def test_introductions_with_and_without_a_heading():
 
     # A paper that does have "1. Introduction": keywords before it stay unlabelled,
     # a topical section after it, before Method, is introduction too.
-    chunks = [_chunk(0, 1, 0, "Title. Abstract We asked why children play."),
+    chunks = [_chunk(0, 1, 0, "Title.\nAbstract We asked why children play."),
               _chunk(1, 1, 60, "Abstract We asked why children take risks in play. " * 4),
               _chunk(2, 1, 400, "Keywords: risky play; outdoor play; children"),
               _chunk(3, 2, 3000, "1. Introduction " + body),
@@ -346,7 +348,7 @@ def test_introductions_with_and_without_a_heading():
 
 def test_level_two_introduction_headings_are_not_parts_of_the_abstract():
     body = "Children who play outside take risks, and theory says why. " * 30
-    chunks = [_chunk(0, 1, 0, "Title. Abstract We asked why."),
+    chunks = [_chunk(0, 1, 0, "Title.\nAbstract We asked why."),
               _chunk(1, 1, 60, "Abstract We asked why children take risks. " * 4),
               _chunk(2, 2, 3000, body), _chunk(3, 3, 5000, "Risky Play and Development " + body),
               _chunk(4, 4, 7000, "The Present Study " + body),
@@ -384,3 +386,50 @@ def test_gemini_asker_sends_no_temperature_and_low_thinking(monkeypatch):
     old = gemini_util.json_asker("gemini-2.5-flash", {"type": "object"})
     assert old("x") == '{"ok": true}' and old("y") == '{"ok": true}'
     assert [c.thinking_config is None for c in sent] == [False, True, True]
+
+
+def test_bookmarks_cleaned_and_incomplete_ones_refused():
+    toc = [[1, "\ufeffAbstract", 1], [1, "Introduction", 2], [1, "Method", 4], [1, "Results", 8],
+           [1, "References", 12], [1, "Table 1:", 14], [1, "Figures", 15]]
+    hs = st.headings_from_toc(toc, 16, book_like=False)
+    assert [h.text for h in hs] == ["Abstract", "Introduction", "Method", "Results", "References"]
+    # They stop at the method of a 25-page paper: not used.
+    half = [[1, "Title", 1], [2, "Abstract", 1], [2, "The present study", 4], [2, "Method", 4],
+            [3, "Participants", 4], [3, "Measurements", 6]]
+    assert st.headings_from_toc(half, 25, book_like=False) == []
+
+
+def test_section_names_for_abstract_lines_appendices_and_studies():
+    assert st.canonical_section("Abstract: Teachers' professional development is crucial for practice") == "Abstract"
+    assert st.canonical_section("ABSTRACT—Despite a long tradition of effectiveness in") == "Abstract"
+    assert st.canonical_section("Appendix 2: Factor analyses on the questionnaires") == "Appendix"
+    assert st.is_study_heading("STUDY 1") and st.is_study_heading("Experiment 3 and 4")
+    assert not st.is_study_heading("Study 1: Method") and not st.is_study_heading("Study design")
+
+
+def test_headings_are_found_in_order_and_on_their_page():
+    body1 = "Abstract\nBackground: children play. Methods: forty children. Results: they played more."
+    chunks = [_chunk(0, 1, 0, body1),
+              _chunk(1, 2, 1000, "Introduction\nChildren play outside. " * 20),
+              _chunk(2, 3, 2000, "Methods\nForty children took part in Phase 1. " * 10),
+              _chunk(3, 3, 2500, "Phase 1\nChildren were observed. " * 10),
+              _chunk(4, 4, 3000, "Results\nIn Phase 1 the children played more. " * 10),
+              _chunk(5, 4, 3500, "Phase 1\nMore play than expected. " * 10)]
+    heads = [st.Heading(1, "Abstract", 1, "Abstract"), st.Heading(2, "Introduction", 1, "Introduction"),
+             st.Heading(3, "Methods", 1, "Methods"), st.Heading(3, "Phase 1", 2, None),
+             st.Heading(4, "Results", 1, "Results"), st.Heading(4, "Phase 1", 2, None)]
+    metas, rep = st.label_passages(chunks, st.Structure(pages=4, headings=heads, headings_from="bookmarks"),
+                                   "journalArticle")
+    assert [m.get("section") for m in metas] == ["Abstract", "Introduction", "Methods", "Methods", "Results",
+                                                 "Results"]
+    assert metas[5]["heading"] == "Results › Phase 1" and metas[3]["heading"] == "Methods › Phase 1"
+
+
+def test_pdf_labels_that_are_not_page_numbers_are_not_used():
+    bad = st._implausible_labels
+    assert bad(["image 1", "image 2", "image 3"], False)
+    assert bad(["1", "0", "1", "2", "3"], False)
+    assert bad(["i", "ii", "iii", "iv", "v", "vi"], False)
+    assert not bad(["", "555", "556", "557"], False)
+    assert not bad(["i", "ii", "1", "2", "3"], False)
+    assert not bad(["Cover", "i", "ii", "1", "2", "3", "4", "5", "1", "2"], True)

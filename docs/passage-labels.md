@@ -17,7 +17,7 @@ Labels are metadata beside the passage: they never change what is embedded, so a
 
 From the most reliable source the PDF offers:
 
-1. **The PDF's own page labels.** Not used when they only count the PDF's pages (1, 2, 3…) while the item's Pages field says 275–288.
+1. **The PDF's own page labels.** Not used when they only count the PDF's pages (1, 2, 3…) while the item's Pages field says 275–288. Nor when they cannot be printed numbers: "image 1", a page 0, numbers running backwards, or roman numerals throughout an article.
 2. **The numbers printed in the header or footer**, by majority vote. A stretch of pages counts only when most of its numbered pages agree, so the following don't move it:
    - a cover sheet;
    - a chapter opener without a number;
@@ -31,7 +31,7 @@ In a test on 40 random articles from this library, 35 got their printed pages an
 
 ## Headings and sections
 
-1. **Bookmarks** (the PDF's outline), when they name the document's own sections. A third of the articles here have them, and they are exact.
+1. **Bookmarks** (the PDF's outline), when they name the document's own sections. A third of the articles here have them, and they are exact. A top bookmark that only holds the title is dropped, as are bookmarks for tables and figures. Bookmarks that stop halfway (only up to the method, say) are not used.
 2. **Gemini judging candidate lines** (optional, `--gemini`).
    - **Candidates:** short lines set apart from the body text by size, weight, typeface, colour, capitals, numbering or space, including run-in headings ("**Participants.** Children…").
    - **Left out:** running headers, captions and lowercase list items.
@@ -53,7 +53,7 @@ In a test on 40 random articles from this library, 35 got their printed pages an
 
 A section heading's sub-headings inherit its section ("Participants" under Method is Methods). Sub-headings of an Abstract, Appendix or References heading do not change the section.
 
-Headings are then located in the indexed text near their page. When most of an item's headings cannot be found there (another attachment than the one indexed), its headings are not used.
+Headings are then located in the indexed text on their page, in reading order: each one after the previous, preferring the line where it stands alone over the same words in a sentence. A "Methods:" in a structured abstract or a second "Phase 1" under Results cannot pull a heading to the wrong place. A heading that names a study ("Study 1", "Experiment 2") has no section of its own; its Method, Results and Discussion do. When most of an item's headings cannot be found in the indexed text (another attachment than the one indexed), its headings are not used.
 
 ## Reference lists
 

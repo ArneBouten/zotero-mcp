@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 #: Bumped when the output changes, so stored labels from an older version are
 #: recomputed.
-STRUCTURE_VERSION = 1
+STRUCTURE_VERSION = 2
 
 SECTIONS = ("Abstract", "Introduction", "Methods", "Results", "Discussion", "Conclusion",
             "References", "Appendix", "Back matter")
@@ -100,10 +100,27 @@ def fold(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
+_ABSTRACT_LEAD_RE = re.compile(r"^\s*(?:abstract|summary|resumen|resumo|r[ée]sum[ée]|samenvatting|zusammenfassung|"
+                               r"riassunto)\s*[:—–.-]\s*\S", re.I)
+_APPENDIX_RE = re.compile(r"^(?:appendix|appendices|bijlage|bijlagen|annexe?s?|anexos?|anhang|allegato|apendice)\b")
+#: "Study 2", "Experiment 1 and 2", "Phase 1": a part holding its own Method and Results.
+_STUDY_RE = re.compile(r"^(?:study|studies|experiment|experiments|exp|phase|stage|studie|experimento|estudio|"
+                       r"estudo|etude|studio)\s+(?:\d+|[ivx]+|one|two|three|four|five|[a-d])\b")
+
+
+def is_study_heading(heading: str) -> bool:
+    words = fold(_NUMBERING_RE.sub("", heading or ""))
+    return bool(_STUDY_RE.match(words)) and not re.search(r"\b(?:method|methods|results?|discussion)\b", words)
+
+
 def canonical_section(heading: str) -> str | None:
     """The section a heading opens, or None ("Kestrel surveys", "Study 2")."""
+    if _ABSTRACT_LEAD_RE.match(heading or ""):
+        return "Abstract"           # "Abstract: Teachers' professional development is ..."
     text = _NUMBERING_RE.sub("", heading or "").strip().rstrip(".:")
     words = fold(text)
+    if _APPENDIX_RE.match(words):
+        return "Appendix"           # "Appendix 2: Factor analyses ..."
     if not words or len(words) > 60:
         return None
     for pattern, label in _ALIAS_RE:
@@ -502,6 +519,24 @@ def _trivial_labels(labels: list[str], field_range: tuple[int, int] | None) -> b
     return max(numeric, default=0) < first or (first > 1 and numeric and numeric[0] <= 2)
 
 
+def _implausible_labels(labels: list[str], book_like: bool) -> bool:
+    """PDF labels that are not printed page numbers: "image 1", a page "0",
+    numbers running backwards, or only roman numerals in an article."""
+    given = [x.strip() for x in labels if x and x.strip()]
+    if not given:
+        return True
+    arabic = [int(re.sub(r"^[A-Za-z]{1,2}", "", x)) for x in given if re.fullmatch(r"[A-Za-z]{0,2}\d+", x)]
+    roman = [x for x in given if roman_value(x.lower()) is not None and not re.search(r"\d", x)]
+    if len(arabic) + len(roman) < 0.7 * len(given):
+        return True                         # "image 1", "Cover", "A-1" ...
+    if 0 in arabic:
+        return True
+    drops = sum(1 for a, b in zip(arabic, arabic[1:]) if b <= a)
+    if drops > (2 if book_like else 0):
+        return True                         # 1, 0, 1, 2 ... or restarting numbers
+    return not book_like and not arabic and len(given) > 4
+
+
 def page_labels(scan: dict, pages_field: str = "", item_type: str = "") -> tuple[list[str] | None, str]:
     """Printed page label for every PDF page, and how it was found."""
     n = scan.get("pages") or 0
@@ -509,7 +544,9 @@ def page_labels(scan: dict, pages_field: str = "", item_type: str = "") -> tuple
         return None, "none"
     field_range = _pages_field_range(pages_field)
     pdf_labels = [str(x) for x in (scan.get("labels") or [])]
-    if pdf_labels and any(pdf_labels) and not _trivial_labels(pdf_labels, field_range):
+    book_like = item_type in BOOK_TYPES or n > 80
+    if pdf_labels and any(pdf_labels) and not _trivial_labels(pdf_labels, field_range) \
+            and not _implausible_labels(pdf_labels, book_like):
         return pdf_labels, "pdf-labels"
     numbers = scan.get("margins") or []
     numbers = numbers + [[] for _ in range(n - len(numbers))]
@@ -578,10 +615,27 @@ class Structure:
 BOOK_TYPES = {"book", "thesis", "report", "manuscript", "bookSection"}
 
 
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff\u00ad]")
+#: Bookmarks for the figures and tables, not sections ("Table 1:", "Figures").
+_FLOAT_MARK_RE = re.compile(r"^(?:tables?|figures?|figs?\.?|tabel(?:len)?|figuren?)(?:\s*[\dIVX]+\b.*)?\s*[.:]?$", re.I)
+
+
 def headings_from_toc(toc: list, pages: int, book_like: bool) -> list[Heading]:
     """Bookmarks, when they describe the document's own sections."""
-    entries = [(lvl, title.strip(), page) for lvl, title, page in toc if title and title.strip() and page >= 1]
+    entries = [(lvl, _INVISIBLE_RE.sub("", title).strip(), page) for lvl, title, page in toc if title and page >= 1]
+    entries = [(lvl, t, page) for lvl, t, page in entries if t and not _FLOAT_MARK_RE.match(t)]
+    # A single top bookmark holding all others is the document's title: its
+    # children are the sections ("Title > 1 Introduction, 2 Methods ...").
+    if len(entries) > 3 and entries[0][0] < min(lvl for lvl, _t, _p in entries[1:]) \
+            and canonical_section(entries[0][1]) is None:
+        entries = entries[1:]
     if len(entries) < 3:
+        return []
+    # Bookmarks that stop halfway (only the introduction and method) leave the rest
+    # unlabelled: better to ask Gemini or the rules.
+    last_page = max(page for _l, _t, page in entries)
+    if pages and last_page < 0.5 * pages and not any(canonical_section(t) in ("References", "Back matter")
+                                                       for _l, t, _p in entries):
         return []
     named = {canonical_section(t) for _l, t, _p in entries} - {None}
     if not book_like and len(named) < 2:
@@ -647,8 +701,11 @@ alone = on its own line, gap = space above, centered, run-in = bold/italic openi
 
 Return the candidates that are real headings of this document's own structure: {what}.
 Leave out: the document title, author names and affiliations, running headers, figure and table captions,
-table cells, list items, equations, page furniture of the journal, and the labels inside a structured
-abstract (such as "Background:" or "Methods:" within the abstract itself).
+table cells, list items, equations, page furniture of the journal, the labels inside a structured
+abstract (such as "Background:" or "Methods:" within the abstract itself), and boxed summaries beside the text
+("Practice points", "Key points", "Highlights", "What this paper adds").
+A heading that names a study or experiment ("Study 1", "Experiment 2") has section Other; its own Method,
+Results and Discussion headings are sub-sections with those sections.
 For each heading give its level ({levels}) and the section it opens, one of:
 Abstract, Introduction, Methods, Results, Discussion, Conclusion, References, Appendix, Back matter, Other.
 Sub-sections inherit the section of their parent ("Participants" under Methods is Methods).
@@ -712,6 +769,8 @@ def gemini_headings(scan: dict, labels: list[str] | None, book_like: bool, title
         except (TypeError, ValueError):
             level = 1
         section = h.get("section") if h.get("section") in SECTIONS else None
+        if is_study_heading(c["text"]):
+            section = None      # "Study 1": its own Method and Results headings say which part is which
         picked.append((idx, Heading(page=c["p"] + 1, text=c["text"], level=level, section=section, y=c["y"])))
     picked.sort(key=lambda x: x[0])  # reading order, whatever order the answer used
     headings = [h for _i, h in picked]
@@ -796,20 +855,50 @@ def looks_like_references(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _locate(heading: Heading, chunks: list[dict]) -> int | None:
-    """Character offset of a heading in the indexed text, searching its page."""
+def _page_floor(chunks: list[dict]) -> dict[int, int]:
+    """For each page, an offset its text cannot start before: the start of the
+    last passage that begins on the page before (passages overlap pages)."""
+    last_start: dict[int, int] = {}
+    for ch in chunks:
+        page = ch["meta"].get("page")
+        if page is not None:
+            last_start[int(page)] = int(ch["meta"].get("char_start", 0))
+    return {page + 1: start for page, start in last_start.items()}
+
+
+_HEADING_PREFIX_RE = re.compile(r"[\s#*_>|]*(?:(?:\d{1,2}(?:\.\d{1,2}){0,3}|[IVXivx]{1,5}|[A-Ha-h])[.)]?\s*)?[*_]*")
+
+
+def _locate(heading: Heading, chunks: list[dict], after: int = -1,
+            floors: dict[int, int] | None = None) -> int | None:
+    """Character offset of a heading in the indexed text: on its page (or the
+    passage running into it), after the previous heading, preferring an
+    occurrence that stands on its own line over the same words in a sentence."""
     words = re.findall(r"[^\W_]+", heading.text)
     if not words:
         return None
     pattern = re.compile(r"[\W_]*".join(re.escape(w) for w in words[:12]), re.I)
+    floor = (floors or {}).get(heading.page, -1)
+    best: tuple[int, int] | None = None     # (score, position)
     for ch in chunks:
         page = ch["meta"].get("page")
         if page is None or not (heading.page - 1 <= page <= heading.page):
             continue
-        m = pattern.search(ch["body"])
-        if m:
-            return int(ch["meta"].get("char_start", 0)) + m.start()
-    return None
+        body = ch["body"]
+        base = int(ch["meta"].get("char_start", 0))
+        for m in pattern.finditer(body):
+            pos = base + m.start()
+            if pos <= after:
+                continue
+            line_start = body.rfind("\n", 0, m.start()) + 1
+            line_end = body.find("\n", m.end())
+            rest = body[m.end(): line_end if line_end >= 0 else len(body)]
+            alone_before = bool(_HEADING_PREFIX_RE.fullmatch(body[line_start:m.start()]))
+            alone_after = not rest.strip(" *_") or bool(re.match(r"[*_]*\s*[.:]", rest))
+            score = 2 * alone_before + alone_after - (3 if pos < floor else 0)
+            if best is None or score > best[0] or (score == best[0] and pos < best[1]):
+                best = (score, pos)
+    return best[1] if best else None
 
 
 def label_passages(chunks: list[dict], st: Structure | None, item_type: str = "") -> tuple[list[dict], dict]:
@@ -826,15 +915,22 @@ def label_passages(chunks: list[dict], st: Structure | None, item_type: str = ""
             page = ch["meta"].get("page")
             if page is not None and page not in page_start:
                 page_start[page] = int(ch["meta"].get("char_start", 0))
+        floors = _page_floor(chunks)
+        last = -1
+        # Headings come in reading order: each is looked for after the previous one,
+        # so a "Results" in the abstract or a sentence cannot pull it forward.
         for h in st.headings:
-            pos = _locate(h, chunks)
+            pos = _locate(h, chunks, last, floors)
             if pos is not None:
                 report["located"] += 1
             else:
                 later = [p for p in page_start if p >= h.page]
                 pos = page_start[min(later)] if later else None
+                if pos is not None and pos <= last:
+                    pos = None      # its page is already past: leave this heading out
             if pos is not None:
                 marks.append((pos, h))
+                last = pos
         # Headings mostly not found in the indexed text: another attachment
         # than the one indexed, or text too different to trust.
         if len(st.headings) >= 4 and report["located"] < 0.3 * len(st.headings):
