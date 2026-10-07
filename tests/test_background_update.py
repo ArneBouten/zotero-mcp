@@ -316,3 +316,31 @@ def test_text_layer_is_written_into_storage_files_only(tmp_path):
     assert ocr.apply_text_layer(pdf, words) == "unchanged"  # a page with text is left alone
     assert sorted(p.name for p in folder.iterdir()) == ["scan.pdf"]  # no temp file left
     assert ocr.text_layer_status(pdf)["needs_ocr"] is False
+
+
+def test_ocr_pdfs_reports_every_file_and_remembers_them(tmp_path, monkeypatch):
+    pymupdf = pytest.importorskip("pymupdf")
+    from pathlib import Path
+
+    from zotero_mcp import ocr
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pdfs = []
+    for n, text in enumerate(["Some text on the page " * 20, ""]):
+        folder = tmp_path / "storage" / f"KEY0000{n}"
+        folder.mkdir(parents=True)
+        doc = pymupdf.open()
+        page = doc.new_page()
+        if text:
+            page.insert_text((72, 72), text[:80])
+            page.insert_text((72, 90), text[80:160])
+        doc.save(str(folder / "f.pdf"))
+        doc.close()
+        pdfs.append((f"KEY0000{n}", f"PAR0000{n}", folder / "f.pdf"))
+    monkeypatch.setattr(ocr, "library_pdfs", lambda reader: pdfs)
+    settings = ocr.OcrSettings(tessdata=str(tmp_path))
+    lines = []
+    counts = ocr.add_text_layers(settings, dry_run=True, log=lines.append, reader=object())
+    assert counts == {"has text": 1, "needs OCR": 1}
+    assert any("PAR00000]: has text, 1 pages" in line for line in lines)
+    assert any("PAR00001]: needs OCR" in line for line in lines)

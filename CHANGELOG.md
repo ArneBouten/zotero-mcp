@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.17] - 2026-10-07
+
+### Changed
+
+- **`ocr-pdfs` reports every file.** A line per PDF as soon as it is checked (pages, OCR'd pages and time, running minutes), in the order they finish rather than list order, so a long scan no longer hides the progress of the others; "OCR: <file>, N pages" shows while a scan is worked on. What it has checked is saved every 25 files, so a run stopped with Ctrl+C does not start over.
+
 ## [0.13.2+arne.16] - 2026-10-07
 
 ### Changed

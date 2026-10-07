@@ -390,9 +390,12 @@ def add_text_layers(
     def one(entry):
         key, parent, path = entry
         try:
+            # stdout carries the result; stderr is left on the console, so
+            # "OCR: <file>, N pages" shows while a long scan is worked on.
             proc = subprocess.run(
                 [sys.executable, "-I", "-m", "zotero_mcp.ocr", "check" if dry_run else "layer", str(path), raw],
-                capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
+                stdout=subprocess.PIPE, stderr=None, text=True, timeout=timeout,
+                encoding="utf-8", errors="replace",
             )
             result = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.stdout.strip() else {
                 "status": f"error (exit {proc.returncode})"}
@@ -402,30 +405,40 @@ def add_text_layers(
             result = {"status": f"error ({type(e).__name__})"}
         return entry, result
 
-    done = 0
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        for (key, parent, path), result in pool.map(one, todo):
-            done += 1
-            status = result.get("status", "error")
-            counts[status] = counts.get(status, 0) + 1
-            if status != "has text":
-                extra = ""
-                if result.get("ocr_pages"):
-                    extra = f", {result['ocr_pages']} pages OCR'd in {result.get('seconds', 0)}s"
-                log(f"[{done}/{len(todo)}] {path.name} [{parent or key}]: {status}{extra}")
-            elif done % 100 == 0:
-                log(f"[{done}/{len(todo)}] checked")
-            if not dry_run and (status in ("has text", "written", "no text recognised")):
-                try:
-                    state[key] = {"stamp": stamp(path), "status": status}
-                except OSError:
-                    pass
-    if not dry_run:
+    def save_state():
+        if dry_run:
+            return
         try:
             _state_path().parent.mkdir(parents=True, exist_ok=True)
             _state_path().write_text(json.dumps(state), encoding="utf-8")
         except OSError:
             pass
+
+    from concurrent.futures import as_completed
+
+    done = 0
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = [pool.submit(one, entry) for entry in todo]
+        for future in as_completed(futures):
+            (key, parent, path), result = future.result()
+            done += 1
+            status = result.get("status", "error")
+            counts[status] = counts.get(status, 0) + 1
+            pages = result.get("pages")
+            extra = f", {pages} pages" if pages else ""
+            if result.get("ocr_pages"):
+                extra += f", {result['ocr_pages']} OCR'd in {result.get('seconds', 0)}s"
+            elapsed = time.monotonic() - started
+            log(f"[{done}/{len(todo)}, {elapsed / 60:.0f} min] {path.name} [{parent or key}]: {status}{extra}")
+            if not dry_run and (status in ("has text", "written", "no text recognised")):
+                try:
+                    state[key] = {"stamp": stamp(path), "status": status}
+                except OSError:
+                    pass
+            if done % 25 == 0:
+                save_state()  # a stopped run keeps what it already checked
+    save_state()
     return counts
 
 
