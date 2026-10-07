@@ -334,9 +334,18 @@ def test_blocked_links_go_to_the_browser_step(tmp_path, monkeypatch):
         def start(self):
             return self
 
+        def researchgate_allowed(self):
+            return None
+
         def get_pdf(self, url, referer=None):
+            raise AssertionError("ResearchGate is never fetched without the page")
+
+        def goto(self, url):
             self.opened.append(url)
-            return ff.Fetched(200, "application/pdf", good, url)
+            return True
+
+        def pdf_from_page(self):
+            return ff.Fetched(200, "application/pdf", good, self.opened[-1])
 
         def close(self):
             pass
@@ -351,7 +360,8 @@ def test_blocked_links_go_to_the_browser_step(tmp_path, monkeypatch):
         ff.ItemInfo.from_zotero(ITEM), http, ff.Settings(host_delay=0), ff.Budget(tmp_path / "b.json"),
         steps=["web", "browser"], workdir=str(tmp_path),
     )
-    assert attempts[0].outcome == "captcha or bot check (not solved)"
+    # No plain request to ResearchGate: repeated ones get the network flagged.
+    assert attempts[0].outcome == "left for the browser step (site refuses plain downloads)"
     assert cand.source == "web search, in your browser" and check.ok
     assert FakeSession.opened == ["https://www.researchgate.net/publication/1_X"]
 

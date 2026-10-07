@@ -139,6 +139,10 @@ class Settings:
     proxy_prefix: str = ""
     browser_channel: str = "chrome"
     browser_delay: tuple[float, float] = (10.0, 20.0)
+    #: ResearchGate flags a network that opens many of its pages; the browser
+    #: step opens at most this many per run, slower than other sites.
+    researchgate_per_run: int = 20
+    researchgate_delay: tuple[float, float] = (25.0, 45.0)
 
     @classmethod
     def load(cls, config_path: Path | None = None) -> Settings:
@@ -173,6 +177,8 @@ class Settings:
             s.host_delay = float(section["host_delay"])
         if isinstance(section.get("unblocker_hosts"), list):
             s.unblocker_hosts = tuple(str(h) for h in section["unblocker_hosts"])
+        if isinstance(section.get("researchgate_per_run"), int):
+            s.researchgate_per_run = section["researchgate_per_run"]
         if isinstance(section.get("proxy_prefix"), str):
             s.proxy_prefix = section["proxy_prefix"].strip()
         if isinstance(section.get("browser_channel"), str):
@@ -1315,6 +1321,12 @@ def _try_candidate(item, cand, http, settings, budget, workdir) -> tuple[str | N
     else:
         got = http.fetch_unblocked(cand.url, budget) if cand.unblock else None
         if got is None:
+            if _needs_unblock(cand.url, settings):
+                # ResearchGate and Academia.edu refuse plain requests, and
+                # repeated ones get the whole network flagged. Leave them to
+                # the browser step (or the unblocker, when there is a key).
+                _remember_blocked(http, item, cand)
+                return None, None, "left for the browser step (site refuses plain downloads)"
             got = http.fetch(cand.url, referer=cand.referer)
     if got.error:
         return None, None, got.error

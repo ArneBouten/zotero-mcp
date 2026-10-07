@@ -52,6 +52,8 @@ class BrowserSession:
         self.ctx = None
         self.page = None
         self._last_nav = 0.0
+        self.researchgate_pages = 0
+        self.researchgate_flagged = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -99,8 +101,10 @@ class BrowserSession:
 
     # -- navigation --------------------------------------------------------
 
-    def _pace(self) -> None:
+    def _pace(self, url: str = "") -> None:
         low, high = self.settings.browser_delay
+        if "researchgate.net" in url:
+            low, high = self.settings.researchgate_delay
         wait = random.uniform(low, high) - (time.monotonic() - self._last_nav)
         if wait > 0:
             time.sleep(wait)
@@ -115,6 +119,10 @@ class BrowserSession:
             text = (self.page.inner_text("body", timeout=3000) or "")[:4000].lower()
         except Exception:
             return None
+        if "unusual activity from your network" in text or "access to this page is temporarily restricted" in text:
+            if "researchgate" in url:
+                self.researchgate_flagged = True
+            return "captcha"
         if any(m in title or m in text for m in _VISIBLE_CHALLENGE):
             return "captcha"
         if any(h in url for h in _LOGIN_HINTS) and len(text) < 3000:
@@ -137,8 +145,20 @@ class BrowserSession:
                 return True
         return False
 
+    def researchgate_allowed(self) -> str | None:
+        """Why ResearchGate is off for the rest of this run, or None."""
+        if self.researchgate_flagged:
+            return "ResearchGate has flagged this network; skipped for the rest of the run"
+        if self.researchgate_pages >= self.settings.researchgate_per_run:
+            return f"ResearchGate limit for one run reached ({self.settings.researchgate_per_run} pages)"
+        return None
+
     def goto(self, url: str) -> bool:
-        self._pace()
+        if "researchgate.net" in url:
+            if self.researchgate_allowed():
+                return False
+            self.researchgate_pages += 1
+        self._pace(url)
         try:
             self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
             try:
@@ -299,9 +319,12 @@ def src_browser(item: ff.ItemInfo, http: ff.Http, settings: ff.Settings, budget:
 
         def open_link(url=cand.url):
             b = _session(http, settings)
-            got = b.get_pdf(url)
-            if got and got.is_pdf:
-                return got
+            if "researchgate.net" in url and b.researchgate_allowed():
+                raise BrowserUnavailable(b.researchgate_allowed())
+            if "researchgate.net" not in url:
+                got = b.get_pdf(url)
+                if got and got.is_pdf:
+                    return got
             return b.pdf_from_page() if b.goto(url) else None
 
         yield ff.Candidate(cand.url, f"{cand.source}, in your browser", cand.version,
@@ -311,6 +334,8 @@ def src_browser(item: ff.ItemInfo, http: ff.Http, settings: ff.Settings, budget:
     if item.title and item.item_type not in ("book",):
         def researchgate():
             b = _session(http, settings)
+            if b.researchgate_allowed():
+                raise BrowserUnavailable(b.researchgate_allowed())
             page_url = b.researchgate_page(item)
             if not page_url or page_url in seen:
                 return None
