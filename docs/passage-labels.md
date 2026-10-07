@@ -31,7 +31,7 @@ In a test on 40 random articles from this library, 35 got their printed pages an
 
 ## Headings and sections
 
-1. **Bookmarks** (the PDF's outline), when they name the document's own sections. A third of the articles here have them, and they are exact. A top bookmark that only holds the title is dropped, as are bookmarks for tables and figures. Bookmarks that stop halfway (only up to the method, say) are not used.
+1. **Bookmarks** (the PDF's outline), when they name the document's own sections. A third of the articles here have them, and they are exact. A top bookmark that only holds the title is dropped, as are bookmarks for tables and figures. Bookmarks that stop halfway (only up to the method, say) are not used. With `--gemini`, Gemini checks the bookmarks: which are headings, their level, and the part of the paper each opens, also when the heading does not name it ("Research design" is Methods, "Case studies" Results). Text and page stay the bookmark's own.
 2. **Gemini judging candidate lines** (optional, `--gemini`).
    - **Candidates:** short lines set apart from the body text by size, weight, typeface, colour, capitals, numbering or space, including run-in headings ("**Participants.** Children…").
    - **Left out:** running headers, captions and lowercase list items.
@@ -83,4 +83,6 @@ Each run writes a report with examples to check to `~/.config/zotero-mcp/structu
 }
 ```
 
-**Cost with Gemini:** only items whose bookmarks do not name their sections are sent, about two thirds of articles and most books. An article is about 4,000 tokens, a book up to 20,000: about 0.5 cent per article and 2 cents per book with Gemini 3.8 Flash (2026 prices; Google doubles them in January 2027), once, because answers are cached. The model is fixed (`gemini-3.8-flash`) rather than the `gemini-flash-latest` alias, which Google moves to each new model.
+**Kinds of papers.** Gemini is told how sections work in APA papers (no Introduction heading), papers with several studies ("Study 2" has its own Method and Results; a General Discussion is Discussion), systematic and scoping reviews (search, eligibility, screening, data extraction and risk of bias are Methods; study characteristics and the synthesis are Results), qualitative studies (Findings and Themes are Results), theoretical papers (topical sections are Other) and books. The rules know the review terms too.
+
+**Cost with Gemini:** a bookmark check is a few hundred tokens (a third of articles). The other items send their candidate lines: an article is about 4,000 tokens, a book up to 20,000: about 0.5 cent per article and 2 cents per book with Gemini 3.8 Flash (2026 prices; Google doubles them in January 2027), once, because answers are cached. The model is fixed (`gemini-3.8-flash`) rather than the `gemini-flash-latest` alias, which Google moves to each new model.

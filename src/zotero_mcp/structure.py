@@ -62,8 +62,14 @@ _ALIASES: tuple[tuple[str, str], ...] = (
     (r"materials? and methods?|methods?|methodology|study design|design|participants?|subjects?|sample|"
      r"measures?|measurements?|instruments?|materials?|procedures?|data collection|data analys[ie]s|"
      r"statistical analys[ie]s|analys[ie]s|intervention|protocol|methode|methoden|methodologie|werkwijze|"
-     r"onderzoeksopzet|metodo|metodos|metodi|metodologia|methodik", "Methods"),
-    (r"results?|findings|outcomes|resultaten|bevindingen|resultats|resultados|risultati|ergebnisse", "Results"),
+     r"onderzoeksopzet|metodo|metodos|metodi|metodologia|methodik|"
+     # systematic and scoping reviews
+     r"search strategy|literature search|search and selection|information sources|eligibility criteria|"
+     r"inclusion criteria|exclusion criteria|inclusion and exclusion criteria|study selection|screening|"
+     r"data extraction|data items|risk of bias(?: assessment)?|quality assessment|critical appraisal|"
+     r"synthesis methods?|coding", "Methods"),
+    (r"results?|findings|outcomes|resultaten|bevindingen|resultats|resultados|risultati|ergebnisse|"
+     r"study characteristics|characteristics of (?:the )?included studies|included studies|themes", "Results"),
     (r"general discussion|discussion|limitations?|strengths and limitations|implications|"
      r"practical implications|future (?:research|directions)|discussie|beschouwing|discusion|discussao|"
      r"discussione|diskussion", "Discussion"),
@@ -689,6 +695,24 @@ def headings_from_rules(candidates: list[dict], book_like: bool) -> list[Heading
     return out
 
 
+SECTION_GUIDE = """Sections: Abstract, Introduction, Methods, Results, Discussion, Conclusion, References, Appendix,
+Back matter, Other. Sub-sections inherit the section of their parent ("Participants" under Methods is Methods).
+- Many APA-style papers have no "Introduction" heading (the paper's title may be repeated above the
+  introduction); then that repeated title opens the Introduction. Papers that do have an "Introduction" heading
+  use it. Topical headings between the introduction and the first Method heading ("Risky play and
+  development", "The present study") are part of the introduction.
+- Papers with several studies or experiments: a heading that names a study ("Study 1", "Experiment 2") is
+  Other; that study's own Method, Results and Discussion headings carry those sections. A General Discussion
+  is Discussion.
+- Systematic, scoping and other reviews and meta-analyses: search strategy, eligibility, study selection,
+  data extraction, quality or risk-of-bias assessment and synthesis methods are Methods; study
+  characteristics, the synthesis itself, themes and effect sizes are Results.
+- Qualitative studies: Findings and Themes are Results.
+- Theoretical, narrative or position papers without a Method section: topical sections are Other, apart from
+  an opening introduction and a closing conclusion or discussion.
+- Books and theses: chapters are Other unless the chapter is itself an introduction, method, results,
+  discussion or conclusion chapter."""
+
 GEMINI_PROMPT = """You find the heading structure of one scholarly document from a list of candidate lines.
 
 Document: {kind}, {pages} PDF pages. Title: {title}
@@ -704,16 +728,24 @@ Leave out: the document title, author names and affiliations, running headers, f
 table cells, list items, equations, page furniture of the journal, the labels inside a structured
 abstract (such as "Background:" or "Methods:" within the abstract itself), and boxed summaries beside the text
 ("Practice points", "Key points", "Highlights", "What this paper adds").
-A heading that names a study or experiment ("Study 1", "Experiment 2") has section Other; its own Method,
-Results and Discussion headings are sub-sections with those sections.
-For each heading give its level ({levels}) and the section it opens, one of:
-Abstract, Introduction, Methods, Results, Discussion, Conclusion, References, Appendix, Back matter, Other.
-Sub-sections inherit the section of their parent ("Participants" under Methods is Methods).
-Many APA-style papers have no "Introduction" heading (the paper's title may be repeated above the
-introduction); then return that repeated title, if it is a candidate, with section Introduction. Papers that
-do have an "Introduction" heading use it. Topical headings between the introduction and the first Method
-heading ("Risky play and development", "The present study") are part of the introduction.
+For each heading give its level ({levels}) and the section it opens. If the paper's title is repeated above
+an APA introduction and is a candidate, return it with section Introduction.
+{guide}
 {contents_rule}Answer only with the JSON."""
+
+
+BOOKMARK_PROMPT = """These are the bookmarks (outline) of one scholarly document. Check them.
+
+Document: {kind}, {pages} PDF pages. Title: {title}
+
+Bookmarks, in order. Each: id | level | PDF page | text.
+{bookmarks}
+
+Return the bookmarks that are headings of this document's own structure, each with its level ({levels}) and
+the section it opens. Leave out bookmarks for the title, figures, tables, author information, journal or
+publisher pages, and labels inside a structured abstract ("Background", "Methods" under the Abstract).
+{guide}
+Answer only with the JSON."""
 
 
 def _candidate_line(c: dict, labels: list[str] | None) -> str:
@@ -750,6 +782,7 @@ def gemini_headings(scan: dict, labels: list[str] | None, book_like: bool, title
         else "1 = section such as Methods, 2 = sub-section, 3 = sub-sub-section",
         contents_rule=("The chapters should match the printed table of contents; a chapter missing from the "
                        "candidates is simply left out.\n" if contents else ""),
+        guide=SECTION_GUIDE,
     )
     try:
         raw = ask(prompt)
@@ -785,6 +818,46 @@ def gemini_headings(scan: dict, labels: list[str] | None, book_like: bool, title
     return headings, note
 
 
+def gemini_check_bookmarks(headings: list[Heading], pages: int, book_like: bool, title: str,
+                           ask: Callable[[str], str]) -> tuple[list[Heading], str]:
+    """Gemini's check of the bookmarks: which are headings, their level and section.
+    The text and page stay the bookmark's own; a section named by the heading itself
+    ("Methods") is kept when Gemini gives none."""
+    rows = [f"b{i} | {h.level} | {h.page} | {h.text[:160]}" for i, h in enumerate(headings)]
+    prompt = BOOKMARK_PROMPT.format(
+        kind="book, thesis or report" if book_like else "journal article or paper", pages=pages,
+        title=title or "(unknown)", bookmarks="\n".join(rows), guide=SECTION_GUIDE,
+        levels="1 = part or chapter, 2 = section, 3 = sub-section" if book_like
+        else "1 = section such as Methods, 2 = sub-section, 3 = sub-sub-section")
+    try:
+        data = json.loads(ask(prompt))
+    except Exception as e:
+        return [], f"gemini failed ({type(e).__name__})"
+    items = data.get("headings") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return [], "gemini answer not understood"
+    by_id = {f"b{i}": h for i, h in enumerate(headings)}
+    kept: dict[str, Heading] = {}
+    for item in items:
+        if not isinstance(item, dict) or item.get("id") not in by_id or item["id"] in kept:
+            continue
+        h = by_id[item["id"]]
+        try:
+            level = max(1, min(4, int(item.get("level") or h.level)))
+        except (TypeError, ValueError):
+            level = h.level
+        section = item.get("section") if item.get("section") in SECTIONS else None
+        if is_study_heading(h.text):
+            section = None
+        elif section is None:
+            section = h.section
+        kept[item["id"]] = Heading(page=h.page, text=h.text, level=level, section=section, y=h.y)
+    out = [kept[f"b{i}"] for i in range(len(headings)) if f"b{i}" in kept]
+    if len(out) < 2:
+        return [], "gemini kept fewer than 2 bookmarks"
+    return out, f"gemini kept {len(out)} of {len(headings)} bookmarks"
+
+
 def gemini_asker(model: str, embedding_config: dict | None = None) -> Callable[[str], str]:
     """A function sending one heading prompt to Gemini and returning its JSON text."""
     from zotero_mcp.gemini_util import json_asker
@@ -816,6 +889,13 @@ def analyse(scan: dict, item_type: str = "", pages_field: str = "", title: str =
     headings = headings_from_toc(scan.get("toc") or [], st.pages, book_like)
     if headings:
         st.headings, st.headings_from = headings, "bookmarks"
+        if ask is not None:
+            # Bookmarks are exact about text and page; Gemini checks which are headings
+            # and what part of the paper each opens ("Research design", "Case studies").
+            checked, note = gemini_check_bookmarks(headings, st.pages, book_like, title, ask)
+            st.note = note
+            if checked:
+                st.headings, st.headings_from = checked, "bookmarks + gemini"
         return st
     if ask is not None:
         headings, note = gemini_headings(scan, labels, book_like, title, ask)

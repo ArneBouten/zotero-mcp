@@ -27,8 +27,6 @@ from zotero_mcp.gemini_util import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 
-# Cached Gemini answers are only reused for the same prompt wording.
-_PROMPT_TAG = hashlib.sha1(st.GEMINI_PROMPT.encode("utf-8")).hexdigest()[:8]
 
 
 def structure_dir() -> Path:
@@ -201,7 +199,10 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
                     sig = st.file_signature(pdf)
 
                     def cached_ask(prompt, _sig=sig):
-                        ck = f"{_sig}-{st.STRUCTURE_VERSION}-{_PROMPT_TAG}-{model.replace('/', '_')}"
+                        # Per file and exact prompt: a changed prompt, or the bookmark check and
+                        # the candidate list of the same file, are asked separately.
+                        tag = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:12]
+                        ck = f"{_sig}-{st.STRUCTURE_VERSION}-{tag}-{model.replace('/', '_')}"
                         hit = cache.get(ck)
                         if hit is not None:
                             return hit

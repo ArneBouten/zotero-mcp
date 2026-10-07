@@ -433,3 +433,39 @@ def test_pdf_labels_that_are_not_page_numbers_are_not_used():
     assert not bad(["", "555", "556", "557"], False)
     assert not bad(["i", "ii", "1", "2", "3"], False)
     assert not bad(["Cover", "i", "ii", "1", "2", "3", "4", "5", "1", "2"], True)
+
+
+def test_gemini_checks_bookmarks_and_keeps_their_text_and_pages():
+    toc = [[1, "Abstract", 1], [1, "Learning to notice in the context of reform", 2], [1, "Research design", 4],
+           [2, "Data analysis", 7], [1, "Case Studies", 9], [1, "Study 1", 9], [1, "Discussion", 18],
+           [1, "Table 3", 20], [1, "References", 22]]
+    hs = st.headings_from_toc(toc, 24, book_like=False)
+    assert "Table 3" not in [h.text for h in hs]
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return json.dumps({"headings": [
+            {"id": "b0", "level": 1, "section": "Abstract"}, {"id": "b1", "level": 1, "section": "Introduction"},
+            {"id": "b2", "level": 1, "section": "Methods"}, {"id": "b3", "level": 2, "section": "Other"},
+            {"id": "b4", "level": 1, "section": "Results"}, {"id": "b5", "level": 1, "section": "Methods"},
+            {"id": "b6", "level": 1, "section": "Discussion"}, {"id": "b7", "level": 1, "section": "References"}]})
+
+    scan = {"pages": 24, "toc": toc, "labels": [], "margins": [], "candidates": []}
+    s = st.analyse(scan, "journalArticle", "", "Learning to notice", ask=ask)
+    assert s.headings_from == "bookmarks + gemini" and "b3 | 2 | 7 | Data analysis" in prompts[0]
+    assert "scoping" in prompts[0]                      # the article-type guide is in the prompt
+    got = {h.text: (h.page, h.section) for h in s.headings}
+    assert got["Research design"] == (4, "Methods") and got["Case Studies"] == (9, "Results")
+    assert got["Data analysis"] == (7, "Methods")       # Gemini's "Other" does not undo a named section
+    assert got["Study 1"] == (9, None)                  # a study heading has no section of its own
+    # Gemini unavailable: the bookmarks are used as they are.
+    s = st.analyse(scan, "journalArticle", "", "", ask=lambda p: "not json")
+    assert s.headings_from == "bookmarks" and s.note.startswith("gemini failed")
+
+
+def test_review_and_qualitative_section_names():
+    assert st.canonical_section("2.2 Eligibility criteria") == "Methods"
+    assert st.canonical_section("Risk of bias assessment") == "Methods"
+    assert st.canonical_section("3.1 Study characteristics") == "Results"
+    assert st.canonical_section("Themes") == "Results"
