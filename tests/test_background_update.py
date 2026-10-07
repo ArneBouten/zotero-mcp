@@ -268,3 +268,21 @@ def test_config_json_is_left_alone(home):
     before = (home / ".config" / "zotero-mcp" / "config.json").read_text()
     assert background_update.update_is_due() is True
     assert json.loads((home / ".config" / "zotero-mcp" / "config.json").read_text()) == json.loads(before)
+
+
+# --- extraction progress --------------------------------------------------------
+
+
+def test_extraction_watch_reports_each_file_and_long_ones(capsys):
+    from zotero_mcp import local_db
+
+    with local_db._ExtractionWatch(2, interval=0.2) as watch:
+        watch.begin("a", "Long scan.pdf [KEY1]")
+        time.sleep(0.5)
+        watch.end("a", 1234, "pdf")
+        watch.begin("b", "empty.pdf [KEY2]")
+        watch.end("b", 0)
+    err = capsys.readouterr().err
+    assert "still extracting Long scan.pdf [KEY1]" in err
+    assert "[1/2] Long scan.pdf [KEY1]: 1,234 characters (pdf)" in err
+    assert "[2/2] empty.pdf [KEY2]: no text" in err

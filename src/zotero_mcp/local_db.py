@@ -14,6 +14,7 @@ import platform
 import re
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -231,6 +232,68 @@ def _source_for_path(path: Path) -> str:
     if suffix in {".html", ".htm"}:
         return "html"
     return "file"
+
+
+def _progress_line(message: str) -> None:
+    """One line on stderr, clearing an in-place progress line first."""
+    try:
+        sys.stderr.write(f"\r  {message}{' ' * 20}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+class _ExtractionWatch:
+    """Says which file is being extracted, and keeps saying so while it lasts.
+
+    An update could sit on "Extracting text: 20/51" for half an hour while
+    one worker OCR'd a long scan, with nothing to tell that from a hang. Each
+    finished file now gets a line, and every ``interval`` seconds the files
+    still being worked on are listed with how long they have taken.
+    """
+
+    def __init__(self, total: int, interval: float = 30.0):
+        self.total = total
+        self.done = 0
+        self.interval = interval
+        self._running: dict[Any, list] = {}   # token -> [name, started or None]
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="zmcp-extract-watch")
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+
+    def begin(self, token, name: str, started: bool = True) -> None:
+        with self._lock:
+            self._running[token] = [name, time.monotonic() if started else None]
+
+    def end(self, token, chars: int, source: str = "") -> None:
+        with self._lock:
+            name, started = self._running.pop(token, [str(token), None])
+            self.done += 1
+            n = self.done
+        took = f" in {time.monotonic() - started:.0f}s" if started else ""
+        what = f"{chars:,} characters" + (f" ({source})" if source else "") if chars else "no text"
+        _progress_line(f"[{n}/{self.total}] {name}: {what}{took}")
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            now = time.monotonic()
+            with self._lock:
+                busy = []
+                for token, entry in self._running.items():
+                    if entry[1] is None and getattr(token, "running", lambda: False)():
+                        entry[1] = now  # a pool future that a worker has picked up
+                    if entry[1] is not None and now - entry[1] >= self.interval:
+                        busy.append((entry[0], now - entry[1]))
+            for name, secs in busy:
+                took = f"{secs:.0f}s" if secs < 120 else f"{secs / 60:.0f} min"
+                _progress_line(f"... still extracting {name} ({took} so far; a long scan is OCR'd page by page)")
 
 
 def _init_extraction_worker() -> None:
@@ -1553,6 +1616,15 @@ class LocalZoteroReader:
         cached = self._zotero_ft_cache_fallback(item_id, chosen, item_key)
         return FulltextExtraction(*cached) if cached else None
 
+    def _describe_extraction(self, item_id: int, item_key: str | None) -> str:
+        """The file an item's text comes from, for progress lines."""
+        try:
+            chosen = self._resolve_extraction_target(item_id)
+        except Exception:
+            chosen = None
+        name = chosen[0].name if chosen else "no file"
+        return f"{name} [{item_key or item_id}]"
+
     def _extract_fulltext_for_item(
         self, item_id: int, item_key: str | None = None
     ) -> tuple[str, str] | None:
@@ -1912,11 +1984,21 @@ class LocalZoteroReader:
         caller reaches it through a CLI command, so this only constrains
         embedding it in a script.
         """
+        items = list(items)
         if self.extraction_workers <= 1:
-            for item_id, item_key in items:
-                yield item_id, self._extract_fulltext_for_item(item_id, item_key)
+            with _ExtractionWatch(len(items)) as watch:
+                for item_id, item_key in items:
+                    watch.begin(item_id, self._describe_extraction(item_id, item_key))
+                    result = self._extract_fulltext_for_item(item_id, item_key)
+                    watch.end(item_id, len(result[0]) if result else 0, result[1] if result else "")
+                    yield item_id, result
             return
 
+        with _ExtractionWatch(len(items)) as watch:
+            yield from self._extract_items_in_pool(items, watch)
+
+    def _extract_items_in_pool(self, items, watch):
+        """The process-pool half of :meth:`extract_fulltext_for_items`."""
         max_pages = self._resolve_pdf_max_pages()
         pending: dict[Any, tuple[int, str | None, Path, str]] = {}
         # Resolve targets and serve cache hits up front — both are cheap, and
@@ -1940,10 +2022,13 @@ class LocalZoteroReader:
                 target, attachment_key = chosen
                 hit = self._cache_lookup(target, attachment_key)
                 if hit:
+                    watch.begin(item_id, f"{target.name} [{item_key}]")
+                    watch.end(item_id, len(hit[0]), "cached")
                     yield item_id, hit
                     continue
                 future = pool.submit(_extract_worker, str(target), max_pages, self.ocr_settings)
                 pending[future] = (item_id, item_key, target, attachment_key)
+                watch.begin(future, f"{target.name} [{item_key}]", started=False)
 
             settled: set[Any] = set()
             not_done = set(pending)
@@ -2002,6 +2087,7 @@ class LocalZoteroReader:
                         logger.debug(f"Extraction worker failed for item {item_id}: {e}")
                         text = ""
                     settled.add(future)
+                    watch.end(future, len(text or ""), _source_for_path(target) if text else "")
                     if text:
                         source = _source_for_path(target)
                         self._cache_store(target, attachment_key, item_key, text, source)

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.12] - 2026-10-07
+
+### Changed
+
+- **Index updates say which file they are reading.** Every attachment extracted gets a line with its file name, item key, how much text came out and how long it took. A file still being worked on after 30 seconds is listed every 30 seconds with its running time, so a long OCR no longer looks like an update stuck at "Extracting text: 20/51".
+
 ## [0.13.2+arne.11] - 2026-10-07
 
 ### Changed
