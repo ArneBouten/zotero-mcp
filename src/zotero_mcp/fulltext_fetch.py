@@ -408,10 +408,24 @@ class Http:
         return 429, None
 
     def fetch(self, url: str, *, max_bytes: int = MAX_PDF_BYTES, referer: str | None = None) -> Fetched:
-        """GET a page or file like a browser would, re-checking every redirect."""
+        """GET a page or file, re-checking every redirect.
+
+        Publishers often refuse clients that do not look like a browser, while
+        some bot shields (AWS WAF on figshare, for one) challenge a browser
+        identity that cannot run JavaScript but let a plain client through.
+        So a refusal with the browser identity is retried once as zotero-mcp.
+        """
+        got = self._fetch(url, max_bytes=max_bytes, referer=referer, ua=BROWSER_UA)
+        if not got.error and not got.is_pdf and got.status in (202, 403, 429):
+            plain = self._fetch(url, max_bytes=max_bytes, referer=referer, ua=API_UA)
+            if plain.is_pdf or (not plain.error and plain.status == 200):
+                return plain
+        return got
+
+    def _fetch(self, url: str, *, max_bytes: int, referer: str | None, ua: str) -> Fetched:
         current = url
         headers = {
-            "User-Agent": BROWSER_UA,
+            "User-Agent": ua,
             "Accept": "application/pdf,text/html;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-GB,en;q=0.9,nl;q=0.8",
         }
@@ -694,11 +708,11 @@ def src_publisher(item: ItemInfo, http: Http, settings: Settings, budget: Budget
         if item.url.startswith("http"):
             page = http.fetch(item.url, max_bytes=8 * 1024 * 1024)
             if page.is_pdf:
-                yield Candidate(page.url, "the item's URL", None, by_identifier=True)
+                yield Candidate(page.url, "item's URL field", None, by_identifier=True)
             elif page.status == 200:
                 pdf = _pdf_link_in_page(page)
                 if pdf:
-                    yield Candidate(pdf, "the item's URL (citation_pdf_url)", None, by_identifier=True, referer=page.url)
+                    yield Candidate(pdf, "item's URL field, PDF link on that page", None, by_identifier=True, referer=page.url)
         return
     doi = item.doi
     page = http.fetch(f"https://doi.org/{quote(doi, safe='/')}", max_bytes=8 * 1024 * 1024)
@@ -826,6 +840,55 @@ def src_web(item: ItemInfo, http: Http, settings: Settings, budget: Budget) -> I
             yield Candidate(url, "web search", None, unblock=_needs_unblock(url, settings))
         elif "researchgate.net/publication/" in lower:
             yield Candidate(url, "ResearchGate", None, unblock=True)
+
+
+#: Display names, and the key each paid source needs.
+SOURCE_NAMES = {
+    "src_unpaywall": "Unpaywall", "src_openalex": "OpenAlex", "src_semantic_scholar": "Semantic Scholar",
+    "src_europepmc": "Europe PMC", "src_arxiv": "arXiv", "src_core": "CORE", "src_oapen": "OAPEN",
+    "src_publisher": "publisher page (via DOI, or the item's URL)",
+    "src_scholar": "Google Scholar (via SerpApi)", "src_web": "web search (via Tavily)",
+}
+SOURCE_KEYS = {"src_scholar": "serpapi", "src_web": "tavily", "src_core": "core"}
+_BUDGETS = {"serpapi": "serpapi_monthly", "tavily": "tavily_monthly"}
+
+
+def source_status(source, settings: Settings, budget: Budget) -> str | None:
+    """Why a source will not run, or None when it will."""
+    key = SOURCE_KEYS.get(source.__name__)
+    if key and not settings.has(key):
+        return f"skipped (no {KEY_ENV[key]})"
+    limit_attr = _BUDGETS.get(key or "")
+    if limit_attr and not budget.allows(key, getattr(settings, limit_attr)):
+        return f"skipped (free monthly allowance of {getattr(settings, limit_attr)} used up)"
+    return None
+
+
+def describe_setup(settings: Settings, budget: Budget, steps: Iterable[str]) -> list[str]:
+    """One line per step: its services and whether each can run."""
+    lines = []
+    for step in steps:
+        parts = []
+        for source in SOURCES.get(step, []):
+            name = SOURCE_NAMES.get(source.__name__, source.__name__)
+            why = source_status(source, settings, budget)
+            key = SOURCE_KEYS.get(source.__name__)
+            if why:
+                parts.append(f"{name}: {why.removeprefix('skipped ').strip('()')}")
+            elif key in _BUDGETS:
+                limit = getattr(settings, _BUDGETS[key])
+                parts.append(f"{name}: {budget.used(key)}/{limit} used this month")
+            else:
+                parts.append(name)
+        lines.append(f"  {step}: " + "; ".join(parts))
+    extras = []
+    if settings.has("openalex"):
+        extras.append("OpenAlex key found")
+    if settings.has("zenrows"):
+        extras.append(f"ZenRows for ResearchGate: {budget.used('zenrows')}/{settings.zenrows_monthly_credits} credits used")
+    extras.append(f"Unpaywall email: {'set' if settings.email else 'default (set UNPAYWALL_EMAIL)'}")
+    lines.append("  " + "; ".join(extras))
+    return lines
 
 
 SOURCES: dict[str, list[Callable[..., Iterator[Candidate]]]] = {
@@ -1058,27 +1121,65 @@ def find_pdf_for(
     n = 0
     for step in steps:
         for source in SOURCES.get(step, []):
-            try:
-                candidates = list(source(item, http, settings, budget))
-            except Exception as e:
-                attempts.append(Attempt(source.__name__.removeprefix("src_"), "", f"source failed ({type(e).__name__})"))
+            name = SOURCE_NAMES.get(source.__name__, source.__name__.removeprefix("src_"))
+            why = source_status(source, settings, budget)
+            if why:
+                log(f"  [{step}] {name}: {why}")
                 continue
+            try:
+                candidates = [c for c in source(item, http, settings, budget) if c.url not in tried]
+            except Exception as e:
+                attempts.append(Attempt(name, "", f"source failed ({type(e).__name__})"))
+                log(f"  [{step}] {name}: failed ({type(e).__name__})")
+                continue
+            if not candidates:
+                log(f"  [{step}] {name}: no copy")
+                continue
+            log(f"  [{step}] {name}: {len(candidates)} link(s)")
             for cand in candidates:
                 if cand.url in tried:
                     continue
                 if n >= settings.max_candidates:
+                    log(f"  stopped after {n} links (max_candidates)")
                     return None, None, None, attempts
                 tried.add(cand.url)
                 n += 1
-                log(f"    trying {cand.source}: {_redact(cand.url)[:110]}")
+                via = " via ZenRows" if cand.unblock and settings.has("zenrows") else ""
+                log(f"      {_host_of(cand.url)}{via} ({cand.source}): {_redact(cand.url)[:100]}")
                 path, check, outcome = _try_candidate(item, cand, http, settings, budget, workdir)
                 attempts.append(Attempt(cand.source, _redact(cand.url), outcome))
                 if path and check and check.ok:
+                    log(f"        accepted: {check.reason} ({VERSION_LABELS.get(check.version, 'version unknown')})")
                     return path, cand, check, attempts
+                log(f"        rejected: {outcome}")
     return None, None, None, attempts
 
 
+_FIGSHARE_RE = re.compile(r"/articles/(?:[^/]+/)*(\d{6,})/?$")
+
+
+def _figshare_pdf(url: str, http: Http) -> str | None:
+    """The file behind a figshare page (figshare.com and the many university
+    repositories built on it), whose landing pages refuse plain requests."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    m = _FIGSHARE_RE.search(parsed.path)
+    if not m or not ("figshare" in host or "repository" in host):
+        return None
+    status, data = http.api_json(f"https://api.figshare.com/v2/articles/{m.group(1)}")
+    if status != 200 or not isinstance(data, dict):
+        return None
+    for f in data.get("files") or []:
+        if (f.get("mimetype") or "").endswith("pdf") or (f.get("name") or "").lower().endswith(".pdf"):
+            return f.get("download_url")
+    return None
+
+
 def _try_candidate(item, cand, http, settings, budget, workdir) -> tuple[str | None, Check | None, str]:
+    fig = _figshare_pdf(cand.url, http)
+    if fig:
+        cand = Candidate(fig, cand.source + ", file via the figshare API", cand.version,
+                         cand.by_identifier, False, cand.url)
     got = http.fetch_unblocked(cand.url, budget) if cand.unblock else None
     if got is None:
         got = http.fetch(cand.url, referer=cand.referer)
@@ -1241,7 +1342,9 @@ class RunReport:
         for r in rows[:limit] if limit else rows:
             if r.status in ("attached", "found"):
                 where = f" — saved to {r.saved_to}" if r.saved_to else ""
-                lines.append(f"- **{r.status}** {r.label} [{r.key}]: {r.source}, {VERSION_LABELS.get(r.version, r.version)}{where}")
+                host = _host_of(r.url) if r.url else ""
+                lines.append(f"- **{r.status}** {r.label} [{r.key}]: {r.source}"
+                             f"{' at ' + host if host else ''}, {VERSION_LABELS.get(r.version, r.version)}{where}")
             else:
                 lines.append(f"- **{r.status}** {r.label} [{r.key}]: {r.reason}")
                 for a in r.attempts[-6:]:
@@ -1292,9 +1395,9 @@ def run(
     items, results = select_items(
         keys=keys, collection=collection, limit=limit, retry=retry, backend=backend, settings=settings
     )
-    missing_keys = [n for n in ("serpapi", "tavily") if not settings.has(n)]
-    if missing_keys:
-        log(f"Note: no key for {', '.join(missing_keys)}; those steps are skipped.")
+    log("Steps and services:")
+    for line in describe_setup(settings, budget, steps):
+        log(line)
     log(f"{len(items)} item(s) to fetch{' (dry run)' if dry_run else ''}.")
     writer = None
     if not dry_run and not save_dir and items:
@@ -1302,7 +1405,8 @@ def run(
     state = _load_state()
     with tempfile.TemporaryDirectory(prefix="zmcp-fulltext-") as workdir:
         for i, item in enumerate(items, 1):
-            log(f"[{i}/{len(items)}] {item.label}")
+            ident = f"DOI {item.doi}" if item.doi else (f"ISBN {item.isbn}" if item.isbn else "no DOI")
+            log(f"[{i}/{len(items)}] {item.label} [{item.key}, {ident}]")
             res = ItemResult(item.key, item.label, "not found")
             try:
                 path, cand, check, attempts = find_pdf_for(item, http, settings, budget, steps, log, workdir)
@@ -1331,15 +1435,16 @@ def run(
                         tags = [TAG_FETCHED] + ([VERSION_TAGS[check.version]] if check.version in VERSION_TAGS else [])
                         writer.set_tags(item.key, add=tags, remove=[TAG_NOT_FOUND])
                         res.status = "attached"
-                    log(f"    -> {res.status}: {cand.source}, {label}")
+                    log(f"  -> {res.status}: {cand.source} at {_host_of(cand.url)}, {label}"
+                        + (f" -> {res.saved_to}" if res.saved_to else ""))
                 else:
                     res.reason = _not_found_reason(attempts)
                     if writer:
                         writer.set_tags(item.key, add=[TAG_NOT_FOUND])
-                    log(f"    -> not found: {res.reason}")
+                    log(f"  -> not found: {res.reason}")
             except Exception as e:
                 res.status, res.reason = "error", f"{type(e).__name__}: {e}"
-                log(f"    -> error: {res.reason}")
+                log(f"  -> error: {res.reason}")
             if not dry_run:
                 state[item.key] = {"last_attempt": _dt.datetime.now().isoformat(timespec="seconds"), "status": res.status}
                 _save_state(state)

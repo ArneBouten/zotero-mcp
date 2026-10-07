@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.11] - 2026-10-07
+
+### Changed
+
+- **`fetch-fulltext` says what it is doing.** A run starts by listing each step's services and whether each can run (key found, allowance used this month). For every item it prints its key and DOI, each service it asks and what came back, every link it tries with the site's name, and why a PDF was accepted or rejected.
+
+### Fixed
+
+- **PDFs on figshare and repositories built on it (Loughborough and others) were never downloaded.** Their pages refuse plain requests; the file is now taken through the figshare API. A download refused with a browser identity is also retried once as a plain client, which some bot shields let through.
+
 ## [0.13.2+arne.10] - 2026-10-07
 
 ### Added
