@@ -342,3 +342,20 @@ def test_introductions_with_and_without_a_heading():
                      st.Heading(3, "2. Outdoor play in Belgium", 1, None),
                      st.Heading(4, "3. Method", 1, "Methods")], chunks) == [
         "Abstract", "Abstract", "Abstract", "Introduction", "Introduction", "Methods"]
+
+
+def test_level_two_introduction_headings_are_not_parts_of_the_abstract():
+    body = "Children who play outside take risks, and theory says why. " * 30
+    chunks = [_chunk(0, 1, 0, "Title. Abstract We asked why."),
+              _chunk(1, 1, 60, "Abstract We asked why children take risks. " * 4),
+              _chunk(2, 2, 3000, body), _chunk(3, 3, 5000, "Risky Play and Development " + body),
+              _chunk(4, 4, 7000, "The Present Study " + body),
+              _chunk(5, 5, 9000, "Method Participants Forty children. " * 10)]
+    # APA 7: the introduction's sub-headings are level 2; the repeated title was not found.
+    heads = [st.Heading(1, "Abstract", 1, "Abstract"), st.Heading(3, "Risky Play and Development", 2, None),
+             st.Heading(4, "The Present Study", 2, "Introduction"), st.Heading(5, "Method", 1, "Methods")]
+    metas, _ = st.label_passages(chunks, st.Structure(pages=5, headings=heads, headings_from="gemini"),
+                                 "journalArticle")
+    assert [(m.get("section"), m.get("heading")) for m in metas[1:]] == [
+        ("Abstract", "Abstract"), ("Introduction", None), ("Introduction", "Risky Play and Development"),
+        ("Introduction", "The Present Study"), ("Methods", "Method")]

@@ -855,6 +855,10 @@ def label_passages(chunks: list[dict], st: Structure | None, item_type: str = ""
                                None)
             if intro_start is None:
                 intro_start = next((pos + 2500 for pos, h in marks if h.section == "Abstract"), 0)
+    # Where an abstract has certainly ended (about 300 words after its heading).
+    abstract_over = next((pos + 2500 for pos, h in marks if h.section == "Abstract"), None)
+    if abstract_over is None:
+        abstract_over = float("inf")
 
     n = len(chunks)
     out = []
@@ -872,6 +876,10 @@ def label_passages(chunks: list[dict], st: Structure | None, item_type: str = ""
             path = {lvl: x for lvl, x in path.items() if lvl < h.level}
             path[h.level] = h
         chain = [path[lvl] for lvl in sorted(path)]
+        if marks and not (st and st.book_like) and probe >= abstract_over:
+            # The abstract is over: headings after it (an APA introduction's level-2
+            # "The Present Study" when the repeated title was not found) are not its parts.
+            chain = [h for h in chain if h.section != "Abstract"]
         if marks:
             # Under an Abstract, Appendix or References heading, its sub-headings
             # ("Methods" in a structured abstract) do not change the section.
