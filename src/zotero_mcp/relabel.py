@@ -87,15 +87,24 @@ def _item_fields(reader, key: str) -> dict:
     return out
 
 
-def _pdf_for(reader, key: str, max_page: int | None) -> Path | None:
-    """The item's PDF that matches its indexed text (enough pages), first one wins."""
+def _pdf_for(reader, key: str, attachment_keys: str = "") -> Path | None:
+    """The PDF that was indexed (its key is in the passage metadata), else the item's first PDF."""
+    import re
+
+    for att in [a for a in re.split(r"[,;\s]+", attachment_keys or "") if a]:
+        try:
+            path = reader.resolve_attachment_file(att)
+        except Exception:
+            path = None
+        if path and str(path).lower().endswith(".pdf"):
+            return Path(path)
     try:
         atts = reader.get_attachment_paths(key)
     except Exception:
         return None
     pdfs = [a["resolved_path"] for a in atts
             if a.get("exists") and a.get("resolved_path") and str(a["resolved_path"]).lower().endswith(".pdf")]
-    return pdfs[0] if pdfs else None
+    return Path(pdfs[0]) if pdfs else None
 
 
 def _chunks(collection, key: str) -> list[dict]:
@@ -172,9 +181,11 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
         structure = None
         pdf = None
         if has_pages and reader is not None:
-            pdf = _pdf_for(reader, key, max(int(c["meta"].get("page") or 0) for c in chunks))
+            pdf = _pdf_for(reader, key, str(chunks[0]["meta"].get("attachment_keys") or ""))
+        unreadable = False
         if pdf:
             scan = st.read_pdf(pdf)
+            unreadable = scan is None
             if scan:
                 cached_ask = None
                 if ask is not None:
@@ -193,6 +204,7 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
         metas, rep = st.label_passages(chunks, structure, item_type)
         changed = [(c["id"], m) for c, m in zip(chunks, metas) if m != c["meta"]]
         return {"key": key, "type": item_type, "pdf": str(pdf) if pdf else "", "structure": structure,
+                "unreadable": unreadable,
                 "report": rep, "changed": changed, "chunks": chunks, "metas": metas}
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -204,8 +216,9 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
             s = res["structure"]
             rep = res["report"]
             totals["items"] += 1
-            totals[f"pages from {s.labels_from if s else 'no PDF'}"] += 1
-            totals[f"headings from {s.headings_from if s else 'no PDF'}"] += 1
+            why = "PDF unreadable" if res.get("unreadable") else "no PDF"
+            totals[f"pages from {s.labels_from if s else why}"] += 1
+            totals[f"headings from {s.headings_from if s else why}"] += 1
             totals["reference passages found by shape"] += rep.get("references", 0)
             if s and s.note.startswith("gemini failed"):
                 totals["Gemini calls that failed"] += 1
@@ -218,6 +231,10 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
                 search.chroma_client.update_metadatas(ids, [m for _c, m in res["changed"]])
             totals["passages updated" if not dry_run else "passages that would change"] += len(res["changed"])
             heads = len(s.headings) if s else 0
+            if not s:
+                log(f"[{n}/{len(todo)}] {key} ({res['type']}): {why}; "
+                    f"{len(res['changed'])} passage(s) changed (reference lists only)")
+                continue
             log(f"[{n}/{len(todo)}] {key} ({res['type']}): pages {s.labels_from if s else '-'}, "
                 f"{heads} headings from {s.headings_from if s else '-'}"
                 f"{', ' + s.note if s and s.note else ''}; {len(res['changed'])} passage(s) changed")

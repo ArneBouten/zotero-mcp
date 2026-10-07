@@ -40,8 +40,9 @@ def json_asker(model: str, schema: dict, embedding_config: dict | None = None) -
     def ask(prompt: str) -> str:
         resp = client.models.generate_content(
             model=model, contents=prompt,
-            config=types.GenerateContentConfig(temperature=0, response_mime_type="application/json",
-                                               response_schema=schema),
+            config=types.GenerateContentConfig(
+                temperature=0, response_mime_type="application/json", response_schema=schema,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)),
         )
         return resp.text or ""
 

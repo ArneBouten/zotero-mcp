@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.23] - 2026-10-07
+
+### Fixed
+
+- **`relabel-index` and the metadata audit could not read most PDFs on Windows.** The child process that reads a PDF printed its result with characters a Windows console cannot encode ("ﬁ", "≥"), and crashed. Its output is now plain ASCII JSON. A trial run reported such PDFs as "no PDF"; the report now says "PDF unreadable" when the file exists but could not be read.
+- `relabel-index` reads the attachment that was indexed (its key is in the passage metadata) rather than the item's first PDF.
+- Adding a book by ISBN uses the optional Google Books key from `keys.env`.
+- Gemini's "automatic function calling" warning no longer appears.
+
 ## [0.13.2+arne.22] - 2026-10-07
 
 ### Added

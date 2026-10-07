@@ -245,3 +245,17 @@ def test_relabel_updates_metadata_only_and_skips_done_items(tmp_path, monkeypatc
     # A second run finds nothing to do.
     out = relabel.run(search=search, reader=FakeReader(pdf), gemini=False, log=lambda m: None, workers=1)
     assert out["totals"].get("items", 0) == 0
+
+
+def test_the_child_process_survives_a_windows_console_encoding(tmp_path, monkeypatch):
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 100), "Results", fontsize=12)
+    doc.set_toc([[1, "Résultats ≥ 3: ﬁnal", 1]])
+    path = tmp_path / "u.pdf"
+    doc.save(path)
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    scan = st.read_pdf(path)
+    assert scan is not None and scan["toc"][0][1] == "Résultats ≥ 3: ﬁnal"
+    pages = st.read_first_pages(path, 1)
+    assert pages is not None and pages["texts"]

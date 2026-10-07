@@ -915,12 +915,13 @@ def read_first_pages(path: str | Path, n: int = 4, scan_more: int = 0, timeout: 
 
 def _main(argv: list[str]) -> int:  # pragma: no cover - child process
     if len(argv) >= 2 and argv[0] == "scan":
-        print(json.dumps(scan_pdf(argv[1]), ensure_ascii=False))
+        # ASCII-only JSON: a Windows console encoding cannot print every character.
+        print(json.dumps(scan_pdf(argv[1])))
         return 0
     if len(argv) >= 2 and argv[0] == "pages":
         n = int(argv[2]) if len(argv) > 2 else 4
         more = int(argv[3]) if len(argv) > 3 else 0
-        print(json.dumps(first_pages(argv[1], n, more), ensure_ascii=False))
+        print(json.dumps(first_pages(argv[1], n, more)))
         return 0
     print("usage: python -m zotero_mcp.structure scan <file.pdf>", file=sys.stderr)
     return 2
