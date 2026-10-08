@@ -16,6 +16,7 @@ import datetime as _dt
 import hashlib
 import json
 import logging
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -26,6 +27,9 @@ from zotero_mcp import structure as st
 from zotero_mcp.gemini_util import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
+
+#: Gemini failures in a row after which a run stops asking it.
+GEMINI_STOP_AFTER = 10
 
 
 
@@ -126,8 +130,9 @@ def _chunks(collection, key: str) -> list[dict]:
     return rows
 
 
-def items_to_label(collection, force: bool = False) -> list[str]:
-    """Parent keys whose first passage carries no current structure labels."""
+def items_to_label(collection, force: bool = False, retry_gemini: bool = False) -> list[str]:
+    """Parent keys whose first passage carries no current structure labels (or, with
+    ``retry_gemini``, labels made by the rules because Gemini failed)."""
     keys = []
     seen = set()
     ids = sorted(collection.get(include=[]).get("ids") or [])
@@ -139,7 +144,9 @@ def items_to_label(collection, force: bool = False) -> list[str]:
             if key in seen:
                 continue
             seen.add(key)
-            if force or int((meta or {}).get("structure_v") or 0) < st.STRUCTURE_VERSION:
+            meta = meta or {}
+            if force or int(meta.get("structure_v") or 0) < st.STRUCTURE_VERSION \
+                    or (retry_gemini and meta.get("structure_gemini") == "failed"):
                 keys.append(key)
     return keys
 
@@ -169,7 +176,7 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
             raw_ask = None
         ask = raw_ask
 
-    todo = keys or items_to_label(collection, force=force)
+    todo = keys or items_to_label(collection, force=force, retry_gemini=bool(ask))
     if limit:
         todo = todo[:limit]
     log(f"{len(todo)} item(s) to label{' (dry run: nothing is written)' if dry_run else ''}"
@@ -177,6 +184,10 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
     totals: Counter = Counter()
     samples: list[dict] = []
     started = time.monotonic()
+    #: Gemini failing many times in a row (a daily limit, a spending cap, no network):
+    #: stop asking for the rest of the run; those items are retried next time.
+    gemini_state = {"in_a_row": 0, "stopped": ""}
+    lock = threading.Lock()
 
     def one(key: str) -> dict:
         chunks = _chunks(collection, key)
@@ -202,16 +213,35 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
                         # Per file and exact prompt: a changed prompt, or the bookmark check and
                         # the candidate list of the same file, are asked separately.
                         tag = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:12]
-                        ck = f"{_sig}-{st.STRUCTURE_VERSION}-{tag}-{model.replace('/', '_')}"
+                        ck = f"{_sig}-{tag}-{model.replace('/', '_')}"
                         hit = cache.get(ck)
                         if hit is not None:
                             return hit
-                        answer = ask(prompt)
+                        if gemini_state["stopped"]:
+                            raise RuntimeError(f"Gemini stopped for this run: {gemini_state['stopped']}")
+                        try:
+                            answer = ask(prompt)
+                        except Exception as e:
+                            with lock:
+                                gemini_state["in_a_row"] += 1
+                                if gemini_state["in_a_row"] >= GEMINI_STOP_AFTER and not gemini_state["stopped"]:
+                                    gemini_state["stopped"] = f"{type(e).__name__}: {str(e)[:200]}"
+                                    log(f"  Gemini failed {GEMINI_STOP_AFTER} times in a row; not asked again in this "
+                                        f"run ({gemini_state['stopped']}). Those items are retried next time.")
+                            raise
+                        with lock:
+                            gemini_state["in_a_row"] = 0
                         cache.put(ck, answer)
                         return answer
                 structure = st.analyse(scan, item_type, fields.get("pages", ""), fields.get("title", ""),
                                        ask=cached_ask)
         metas, rep = st.label_passages(chunks, structure, item_type)
+        for m in metas:
+            # Rules stood in for Gemini: ask again next time.
+            if structure is not None and structure.note.startswith("gemini failed"):
+                m["structure_gemini"] = "failed"
+            else:
+                m.pop("structure_gemini", None)
         changed = [(c["id"], m) for c, m in zip(chunks, metas) if m != c["meta"]]
         return {"key": key, "type": item_type, "pdf": str(pdf) if pdf else "", "structure": structure,
                 "unreadable": unreadable,
@@ -251,17 +281,24 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
             if len(samples) < 60:
                 samples.append(res)
     totals["minutes"] = round((time.monotonic() - started) / 60, 1)
-    report_path = _write_report(totals, samples, dry_run)
+    from zotero_mcp.gemini_util import usage_summary
+
+    usage = usage_summary()
+    report_path = _write_report(totals, samples, dry_run, usage)
     log(f"Done. {dict(totals)}")
+    if usage:
+        log(f"Gemini: {usage}")
     if report_path:
         log(f"Report: {report_path}")
     return {"totals": dict(totals), "report": report_path}
 
 
-def _write_report(totals: Counter, samples: list[dict], dry_run: bool) -> str | None:
+def _write_report(totals: Counter, samples: list[dict], dry_run: bool, usage: str = "") -> str | None:
     lines = [f"# Passage labels ({_dt.datetime.now():%Y-%m-%d %H:%M}){' — dry run' if dry_run else ''}", ""]
     for k, v in sorted(totals.items()):
         lines.append(f"- {k}: {v}")
+    if usage:
+        lines.append(f"- Gemini usage: {usage}")
     lines += ["", "## Examples to check", ""]
     for res in samples:
         s = res["structure"]

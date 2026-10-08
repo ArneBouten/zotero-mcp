@@ -469,3 +469,73 @@ def test_review_and_qualitative_section_names():
     assert st.canonical_section("Risk of bias assessment") == "Methods"
     assert st.canonical_section("3.1 Study characteristics") == "Results"
     assert st.canonical_section("Themes") == "Results"
+
+
+def test_gemini_failures_stop_the_run_asking_and_are_retried_next_time(tmp_path, monkeypatch):
+    pymupdf = pytest.importorskip("pymupdf")
+    from zotero_mcp import relabel
+
+    monkeypatch.setattr(relabel, "structure_dir", lambda: tmp_path / "structure")
+    monkeypatch.setattr(relabel, "GEMINI_STOP_AFTER", 2)
+    rows, pdfs = {}, {}
+    for n in range(4):
+        doc = pymupdf.open()
+        texts = ["Introduction Children play outside.", "Methods Forty children.", "Results They played more."]
+        for t in texts:
+            doc.new_page().insert_text((72, 100), t, fontsize=10)
+        doc.set_toc([[1, "Introduction", 1], [1, "Methods", 2], [1, "Results", 3]])
+        pdf = tmp_path / f"p{n}.pdf"
+        doc.save(pdf)
+        start = 0
+        for i, t in enumerate(texts):
+            rows[f"K{n}#{i}"] = ({"parent_item_key": f"K{n}", "chunk_index": i, "page": i + 1, "char_start": start,
+                                  "char_end": start + len(t), "item_type": "journalArticle"}, t)
+            start += len(t) + 1
+        pdfs[f"K{n}"] = pdf
+
+    class Reader(FakeReader):
+        def get_attachment_paths(self, key):
+            return [{"exists": True, "resolved_path": str(pdfs[key])}]
+
+    calls = []
+
+    def failing(prompt):
+        calls.append(prompt)
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: daily limit")
+
+    search = FakeSearch(rows)
+    logs = []
+    out = relabel.run(search=search, reader=Reader(pdfs["K0"]), gemini=True, ask=failing, log=logs.append,
+                      workers=1)
+    assert out["totals"]["Gemini calls that failed"] == 4 and len(calls) == 2   # stopped after 2 in a row
+    assert any("not asked again" in m for m in logs)
+    first = search.chroma_client.collection.rows["K3#0"][0]
+    assert first["structure_gemini"] == "failed" and first["section"] == "Introduction"   # bookmarks stood in
+    assert len(relabel.items_to_label(search.chroma_client.collection, retry_gemini=True)) == 4
+    assert relabel.items_to_label(search.chroma_client.collection) == []
+
+
+def test_gemini_usage_is_counted_and_per_minute_limits_are_waited_out(monkeypatch):
+    from types import SimpleNamespace
+
+    from zotero_mcp import gemini_batch, gemini_util
+
+    answers = [RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 7s."),
+               SimpleNamespace(text='{"ok": 1}', usage_metadata=SimpleNamespace(
+                   prompt_token_count=4000, candidates_token_count=300, thoughts_token_count=200))]
+
+    class Models:
+        def generate_content(self, model, contents, config):
+            a = answers.pop(0)
+            if isinstance(a, Exception):
+                raise a
+            return a
+
+    monkeypatch.setattr(gemini_batch, "create_gemini_client", lambda cfg: SimpleNamespace(models=Models()))
+    monkeypatch.setattr(gemini_util, "USAGE", {})
+    waits = []
+    ask = gemini_util.json_asker("gemini-3.8-flash", {"type": "object"}, sleep=waits.append)
+    assert ask("x") == '{"ok": 1}' and waits == [8.0]
+    summary = gemini_util.usage_summary()
+    assert summary == ("gemini-3.8-flash: 1 call(s), 4.0k input tokens, 500 output (200 of it thinking), "
+                       "about $0.00")

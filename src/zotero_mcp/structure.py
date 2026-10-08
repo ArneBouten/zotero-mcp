@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 #: Bumped when the output changes, so stored labels from an older version are
 #: recomputed.
-STRUCTURE_VERSION = 2
+STRUCTURE_VERSION = 3
 
 SECTIONS = ("Abstract", "Introduction", "Methods", "Results", "Discussion", "Conclusion",
             "References", "Appendix", "Back matter")
@@ -788,7 +788,7 @@ def gemini_headings(scan: dict, labels: list[str] | None, book_like: bool, title
         raw = ask(prompt)
         data = json.loads(raw)
     except Exception as e:
-        return [], f"gemini failed ({type(e).__name__})"
+        return [], f"gemini failed ({type(e).__name__}: {str(e)[:160]})"
     items = data.get("headings") if isinstance(data, dict) else data
     if not isinstance(items, list):
         return [], "gemini answer not understood"
@@ -832,7 +832,7 @@ def gemini_check_bookmarks(headings: list[Heading], pages: int, book_like: bool,
     try:
         data = json.loads(ask(prompt))
     except Exception as e:
-        return [], f"gemini failed ({type(e).__name__})"
+        return [], f"gemini failed ({type(e).__name__}: {str(e)[:160]})"
     items = data.get("headings") if isinstance(data, dict) else data
     if not isinstance(items, list):
         return [], "gemini answer not understood"

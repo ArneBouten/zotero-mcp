@@ -1754,6 +1754,10 @@ def run(
             if n % 50 == 0:
                 _save_state(state)
     _save_state(state)
+    from zotero_mcp.gemini_util import usage_summary
+
+    if (usage := usage_summary()):
+        log(f"Gemini (reading PDFs): {usage}")
     report = AuditReport(audits, bool(apply), started, review_counts)
     if writer is not None and any(a.by_kind("propose") for a in audits):
         report.saved_search = writer.ensure_saved_search()

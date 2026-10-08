@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.30] - 2026-10-09
+
+### Added
+
+- **Gemini usage per run.** `relabel-index` and `metadata-audit` print, and the relabel report records, the Gemini calls, input and output tokens (thinking included, which is billed as output) and the cost at list price.
+
+### Fixed
+
+- **A full `relabel-index` run on 7 October had 792 Gemini failures** (after about 370 successes): the items fell back to bookmarks or rules and were marked done. Now a per-minute limit is waited out, a run stops asking Gemini after 10 failures in a row and says why, and items labelled without Gemini because it failed are asked again in the next run.
+- The note for a failed Gemini call includes the error text, not only its type.
+
+### Changed
+
+- Passage labels are version 3, so the next run labels every item again with arne.29's bookmark check and section guide. Gemini answers are cached per file, prompt and model only (no longer per label version), so a later version change does not ask Gemini again for unchanged prompts.
+
 ## [0.13.2+arne.29] - 2026-10-07
 
 ### Added

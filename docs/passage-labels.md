@@ -73,7 +73,9 @@ py -3.12 -m zotero_mcp.cli relabel-index --force
 py -3.12 -m zotero_mcp.cli relabel-index --items KEY1,KEY2
 ```
 
-Each run writes a report with examples to check to `~/.config/zotero-mcp/structure/runs/`.
+Each run writes a report with examples to check to `~/.config/zotero-mcp/structure/runs/`, and says what Gemini used: calls, input and output tokens (thinking included) and the cost at list price.
+
+**When Gemini fails** (a daily limit, a spending cap, no network), a run waits out a per-minute limit and otherwise stops asking Gemini after 10 failures in a row. Those items get labels from their bookmarks or the rules, and the next run asks Gemini for them again.
 
 **New and re-indexed items** get labels after each index update when this is in config.json:
 
