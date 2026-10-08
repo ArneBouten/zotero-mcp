@@ -1486,6 +1486,19 @@ PDF_SCHEMA = {
 }
 
 
+def pdf_prompt(path: str | Path) -> str | None:
+    """The prompt for Gemini's reading of a PDF's first pages; None when they have no text."""
+    from zotero_mcp import structure
+
+    pages = structure.read_first_pages(path, 4, 15)
+    if not pages or not pages.get("texts"):
+        return None
+    text = "\n\n".join(f"[PDF page {p}]\n{t}" for p, t in pages["texts"])[:40000]
+    if len(text.strip()) < 200:
+        return None
+    return PDF_PROMPT.format(text=text)
+
+
 def _pdf_gemini_reader(model: str | None = None, config_path: str | None = None,
                        log: Callable[[str], None] = print) -> Callable[[str], dict | None] | None:
     """Gemini reading the first pages of an item's PDF; answers cached per file.
@@ -1495,9 +1508,10 @@ def _pdf_gemini_reader(model: str | None = None, config_path: str | None = None,
     from zotero_mcp import gemini_util, structure
 
     cfg = gemini_util.load_semantic_config(config_path)
-    model = model or (cfg.get("structure") or {}).get("gemini_model") or gemini_util.DEFAULT_MODEL
+    cfg_model, thinking = gemini_util.model_settings(cfg)
+    model = model or cfg_model
     try:
-        raw_ask = gemini_util.json_asker(model, PDF_SCHEMA, cfg.get("embedding_config"))
+        raw_ask = gemini_util.json_asker(model, PDF_SCHEMA, cfg.get("embedding_config"), thinking=thinking)
     except Exception:
         return None
     failures: list[str] = []
@@ -1531,13 +1545,10 @@ def _pdf_gemini_reader(model: str | None = None, config_path: str | None = None,
                 return json.loads(hit.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 pass
-            pages = structure.read_first_pages(path, 4, 15)
-            if not pages or not pages.get("texts"):
+            prompt = pdf_prompt(path)
+            if prompt is None:
                 return None
-            text = "\n\n".join(f"[PDF page {p}]\n{t}" for p, t in pages["texts"])[:40000]
-            if len(text.strip()) < 200:
-                return None
-            data = gemini_util.ask_json(ask, PDF_PROMPT.format(text=text))
+            data = gemini_util.ask_json(ask, prompt)
             if isinstance(data, dict):
                 try:
                     cache.mkdir(parents=True, exist_ok=True)

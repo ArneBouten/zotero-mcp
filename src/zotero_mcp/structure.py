@@ -858,7 +858,8 @@ def gemini_check_bookmarks(headings: list[Heading], pages: int, book_like: bool,
     return out, f"gemini kept {len(out)} of {len(headings)} bookmarks"
 
 
-def gemini_asker(model: str, embedding_config: dict | None = None) -> Callable[[str], str]:
+def gemini_asker(model: str, embedding_config: dict | None = None, thinking: str | None = "low",
+                 usage_key: str | None = None) -> Callable[[str], str]:
     """A function sending one heading prompt to Gemini and returning its JSON text."""
     from zotero_mcp.gemini_util import json_asker
 
@@ -871,7 +872,7 @@ def gemini_asker(model: str, embedding_config: dict | None = None) -> Callable[[
             "required": ["id", "level", "section"]}}},
         "required": ["headings"],
     }
-    return json_asker(model, schema, embedding_config)
+    return json_asker(model, schema, embedding_config, thinking=thinking, usage_key=usage_key)
 
 
 def file_signature(path: str | Path) -> str:

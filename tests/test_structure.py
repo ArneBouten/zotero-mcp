@@ -539,3 +539,74 @@ def test_gemini_usage_is_counted_and_per_minute_limits_are_waited_out(monkeypatc
     summary = gemini_util.usage_summary()
     assert summary == ("gemini-3.8-flash: 1 call(s), 4.0k input tokens, 500 output (200 of it thinking), "
                        "about $0.00")
+
+
+# compare-gemini: several models on the same items, quality and cost side by side.
+from collections import Counter  # noqa: E402
+
+from zotero_mcp import gemini_compare, gemini_util  # noqa: E402
+
+
+def test_models_are_parsed_with_their_thinking_level():
+    assert gemini_compare.parse_models("gemini-3.8-flash:low, gemini-3.5-flash-lite:minimal, x") == [
+        ("gemini-3.8-flash", "low"), ("gemini-3.5-flash-lite", "minimal"), ("x", "low")]
+
+
+def test_two_models_are_compared_on_headings_and_pdf_reading(tmp_path, monkeypatch):
+    pymupdf = pytest.importorskip("pymupdf")
+    from zotero_mcp import relabel
+
+    monkeypatch.setattr(relabel, "structure_dir", lambda: tmp_path / "structure")
+    monkeypatch.setattr(gemini_util, "USAGE", {})
+    doc = pymupdf.open()
+    texts = ["Introduction Children play outside every day. " * 12, "Methods Forty children took part. " * 12,
+             "Results The children played more on the new playground. " * 12]
+    for t in texts:
+        doc.new_page().insert_textbox(pymupdf.Rect(72, 72, 520, 760), t, fontsize=10)
+    doc.set_toc([[1, "Introduction", 1], [1, "Methods", 2], [1, "Results", 3]])
+    pdf = tmp_path / "a.pdf"
+    doc.save(pdf)
+    rows, start = {}, 0
+    for i, t in enumerate(texts):
+        rows[f"K#{i}"] = ({"parent_item_key": "K", "chunk_index": i, "page": i + 1, "char_start": start,
+                          "char_end": start + len(t), "item_type": "journalArticle"}, t)
+        start += len(t) + 1
+
+    def asker(model, schema, thinking, label):
+        def ask(prompt):
+            usage = gemini_util.USAGE.setdefault(label, Counter())
+            usage["calls"] += 1
+            usage["input"] += 1000
+            usage["thinking"] += 500 if thinking == "low" else 0
+            usage["output"] += 100
+            if "headings" in schema.get("properties", {}):
+                section = "Results" if model == "lite" else "Methods"
+                return json.dumps({"headings": [{"id": "b0", "level": 1, "section": "Introduction"},
+                                                {"id": "b1", "level": 1, "section": section},
+                                                {"id": "b2", "level": 1, "section": "Results"}]})
+            return json.dumps({"document": "journal article", "version": "published",
+                               "title": "Children at play", "authors": ["Ann Smith"],
+                               "year": "2020" if model == "lite" else "2021"})
+        return ask
+
+    class Backend:
+        def get_items(self, keys):
+            return {"K": {"data": {"title": "Children at play", "date": "2021",
+                                   "creators": [{"creatorType": "author", "lastName": "Smith"}]}}}
+
+    logs = []
+    out = gemini_compare.run(models=[("gemini-3.8-flash", "low"), ("lite", "minimal")], limit=1, keys=["K"],
+                 search=FakeSearch(rows), reader=FakeReader(pdf), backend=Backend(), asker=asker,
+                 log=logs.append, workers=1)
+    ref, lite = out["summary"]["gemini-3.8-flash (low)"], out["summary"]["lite (minimal)"]
+    assert ref["counts"]["agrees_zotero"] == 3 and lite["counts"]["agrees_zotero"] == 2   # lite misread the year
+    assert lite["counts"]["same_section"] == 2 and lite["counts"]["shared"] == 3
+    assert "$" in ref["cost"] and "per 1,000 items" in ref["cost"]
+    report = open(out["report"], encoding="utf-8").read()
+    assert "| Methods ⚠ | 1 Methods | 1 Results |" in report and "| year | 2021 | 2021 | 2020 |" in report
+    # Run again: everything comes from the cache, nothing is asked.
+    monkeypatch.setattr(gemini_util, "USAGE", {})
+    gemini_compare.run(models=[("gemini-3.8-flash", "low"), ("lite", "minimal")], limit=1, keys=["K"],
+           search=FakeSearch(rows), reader=FakeReader(pdf), backend=Backend(), asker=asker,
+           log=logs.append, workers=1)
+    assert gemini_util.USAGE == {}

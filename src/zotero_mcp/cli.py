@@ -925,6 +925,18 @@ def main():
     relabel_parser.add_argument("--workers", type=int, default=3, help="Items read at once (default 3)")
     relabel_parser.add_argument("--config-path", help="Path to the semantic search config file")
 
+    compare_parser = subparsers.add_parser(
+        "compare-gemini",
+        help="Run several Gemini models on the same items (headings and PDF reading) and compare quality and cost",
+    )
+    compare_parser.add_argument("--models", default="gemini-3.8-flash:low,gemini-3.6-flash:minimal,"
+                                "gemini-3.5-flash-lite:minimal",
+                                help="Comma-separated model:thinking pairs; the first is the reference")
+    compare_parser.add_argument("--limit", type=int, default=30, help="Items to compare (default 30)")
+    compare_parser.add_argument("--items", help="Comma-separated item keys instead of a random sample")
+    compare_parser.add_argument("--seed", type=int, default=1, help="Random sample number (default 1)")
+    compare_parser.add_argument("--config-path", help="Path to the semantic search config file")
+
     layer_parser = subparsers.add_parser(
         "ocr-pdfs",
         help="OCR scanned PDFs in Zotero storage and write the text into the files (searchable PDFs)",
@@ -1454,6 +1466,18 @@ def main():
             relabel.run(keys=keys, limit=args.limit, config_path=str(_semantic_config_path(args.config_path)),
                         gemini=args.gemini, dry_run=args.dry_run, force=args.force or bool(keys),
                         workers=args.workers)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    elif args.command == "compare-gemini":
+        setup_zotero_environment()
+        from zotero_mcp import gemini_compare
+
+        keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
+        try:
+            gemini_compare.run(models=gemini_compare.parse_models(args.models), limit=len(keys) if keys else args.limit,
+                               seed=args.seed, keys=keys, config_path=str(_semantic_config_path(args.config_path)))
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)

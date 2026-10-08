@@ -167,10 +167,11 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
     cfg = structure_config(config_path)
     use_gemini = cfg.get("gemini", False) if gemini is None else gemini
     model = cfg.get("gemini_model") or DEFAULT_MODEL
+    thinking = cfg.get("gemini_thinking") or "low"
     cache = _Cache()
     if use_gemini and ask is None:
         try:
-            raw_ask = st.gemini_asker(model, search.chroma_client.embedding_config)
+            raw_ask = st.gemini_asker(model, search.chroma_client.embedding_config, thinking=thinking)
         except Exception as e:
             log(f"Gemini unavailable ({type(e).__name__}: {e}); using bookmarks and rules only.")
             raw_ask = None

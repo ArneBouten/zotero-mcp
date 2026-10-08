@@ -88,3 +88,22 @@ Each run writes a report with examples to check to `~/.config/zotero-mcp/structu
 **Kinds of papers.** Gemini is told how sections work in APA papers (no Introduction heading), papers with several studies ("Study 2" has its own Method and Results; a General Discussion is Discussion), systematic and scoping reviews (search, eligibility, screening, data extraction and risk of bias are Methods; study characteristics and the synthesis are Results), qualitative studies (Findings and Themes are Results), theoretical papers (topical sections are Other) and books. The rules know the review terms too.
 
 **Cost with Gemini:** a bookmark check is a few hundred tokens (a third of articles). The other items send their candidate lines: an article is about 4,000 tokens, a book up to 20,000: about 0.5 cent per article and 2 cents per book with Gemini 3.8 Flash (2026 prices; Google doubles them in January 2027), once, because answers are cached. The model is fixed (`gemini-3.8-flash`) rather than the `gemini-flash-latest` alias, which Google moves to each new model.
+
+## Comparing Gemini models
+
+`compare-gemini` runs several models on the same random items and compares both Gemini tasks: judging headings (the bookmark check or the candidate lines) and reading a PDF's first pages for the metadata audit. Nothing is written to Zotero or the index.
+
+```powershell
+# Default: 3.8 Flash (low thinking, the reference), 3.6 Flash and 3.5 Flash-Lite (minimal thinking), 30 items
+py -3.12 -m zotero_mcp.cli compare-gemini
+py -3.12 -m zotero_mcp.cli compare-gemini --models "gemini-3.8-flash:low,gemini-3.5-flash-lite:minimal" --limit 50
+```
+
+The report (`structure/runs/compare-<date-time>.md`) gives per model:
+
+- **Quality:** how many headings and main sections (Introduction, Methods, Results, Discussion) it found; how often it agrees with the reference model on headings and their sections; and how many of the item's filled Zotero fields (title, authors, year, journal, volume, issue, pages, DOI) its PDF reading matches.
+- **Cost:** calls, output and thinking tokens, seconds, and the cost of the run and per 1,000 items at list price.
+
+Per item it shows the headings side by side (⚠ where the models differ) and the PDF fields on which they disagree with each other or with Zotero. Answers are cached, so a second run or an added model only pays for what is new.
+
+To switch, set `"gemini_model"` and `"gemini_thinking"` (`low`, `minimal`, `medium` or `high`; 3.8 Flash has no `minimal`) under `semantic_search.structure` in config.json. Both the passage labels and the metadata audit use them.

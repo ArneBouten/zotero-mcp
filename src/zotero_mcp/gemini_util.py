@@ -21,7 +21,9 @@ DEFAULT_MODEL = "gemini-3.8-flash"
 
 #: US dollars per million tokens (input, output; thinking counts as output), standard tier,
 #: prompts up to 200k tokens. Google's list price for 2026; it doubles from January 2027.
-PRICES = {"gemini-3.8-flash": (0.75, 3.75)}
+PRICES = {"gemini-3.8-flash": (0.75, 3.75), "gemini-3.7-flash": (0.75, 3.75), "gemini-3.6-flash": (0.75, 3.75),
+          "gemini-3.5-flash": (1.50, 9.00), "gemini-3.5-flash-lite": (0.30, 2.50)}
+DEFAULT_THINKING = "low"
 
 #: Tokens and calls of this process, per model: what a run cost.
 USAGE: dict[str, Counter] = {}
@@ -55,8 +57,9 @@ def usage_summary() -> str:
                 continue
             text = (f"{model}: {c['calls']} call(s), {_tokens(c['input'])} input tokens, "
                     f"{_tokens(c['output'] + c['thinking'])} output ({_tokens(c['thinking'])} of it thinking)")
-            if model in PRICES:
-                pin, pout = PRICES[model]
+            base = model.split(" ")[0]
+            if base in PRICES:
+                pin, pout = PRICES[base]
                 cost = c["input"] / 1e6 * pin + (c["output"] + c["thinking"]) / 1e6 * pout
                 text += f", about ${cost:.2f}"
             if c["failed"]:
@@ -75,6 +78,12 @@ def _retry_delay(error: Exception) -> float | None:
     return float(m.group(1)) if m else 20.0
 
 
+def model_settings(cfg: dict) -> tuple[str, str]:
+    """(model, thinking level) from ``semantic_search.structure`` in config.json."""
+    st = cfg.get("structure") or {}
+    return st.get("gemini_model") or DEFAULT_MODEL, st.get("gemini_thinking") or DEFAULT_THINKING
+
+
 def load_semantic_config(config_path: str | None = None) -> dict:
     """The ``semantic_search`` section of config.json ({} when unreadable)."""
     try:
@@ -91,7 +100,8 @@ def load_semantic_config(config_path: str | None = None) -> dict:
 
 
 def json_asker(model: str, schema: dict, embedding_config: dict | None = None,
-               thinking: str | None = "low", sleep: Callable[[float], None] = time.sleep) -> Callable[[str], str]:
+               thinking: str | None = DEFAULT_THINKING, sleep: Callable[[float], None] = time.sleep,
+               usage_key: str | None = None) -> Callable[[str], str]:
     """A function that sends one prompt and returns the JSON answer as text.
 
     No temperature: Google deprecated it in July 2026 and newer models reject it;
@@ -118,7 +128,7 @@ def json_asker(model: str, schema: dict, embedding_config: dict | None = None,
         for attempt in range(3):
             try:
                 resp = client.models.generate_content(model=model, contents=prompt, config=config())
-                _count(model, resp)
+                _count(usage_key or model, resp)
                 return resp.text or ""
             except Exception as e:
                 if state["thinking"] and "thinking" in str(e).lower():
@@ -130,9 +140,9 @@ def json_asker(model: str, schema: dict, embedding_config: dict | None = None,
                 if delay is not None and attempt < 2 and delay <= 60:
                     sleep(delay + 1)
                     continue
-                _count(model, failed=True)
+                _count(usage_key or model, failed=True)
                 raise
-        _count(model, failed=True)
+        _count(usage_key or model, failed=True)
         raise RuntimeError("Gemini did not answer")
 
     return ask

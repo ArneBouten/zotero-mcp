@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.31] - 2026-10-09
+
+### Added
+
+- **`compare-gemini`**: runs several Gemini models and thinking levels (default: 3.8 Flash low, 3.6 Flash minimal, 3.5 Flash-Lite minimal) on the same random items, for both Gemini tasks (headings and PDF reading), and reports quality (agreement with the reference model and with the item's Zotero fields) and cost (tokens, thinking, seconds, dollars per 1,000 items), with a side-by-side view per item. Answers are cached.
+- `semantic_search.structure.gemini_thinking` sets the thinking level (default `low`) for the passage labels and the metadata audit.
+
 ## [0.13.2+arne.30] - 2026-10-09
 
 ### Added
