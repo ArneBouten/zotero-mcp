@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.32] - 2026-10-09
+
+### Fixed
+
+- A whole book's outline (more than 150 bookmarks) is no longer sent to Gemini for checking: in the model comparison the 947 bookmarks of an Oxford handbook took minutes and failed for two of three models. Such outlines are used as they are.
+
 ## [0.13.2+arne.31] - 2026-10-09
 
 ### Added

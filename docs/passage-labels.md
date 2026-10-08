@@ -31,7 +31,7 @@ In a test on 40 random articles from this library, 35 got their printed pages an
 
 ## Headings and sections
 
-1. **Bookmarks** (the PDF's outline), when they name the document's own sections. A third of the articles here have them, and they are exact. A top bookmark that only holds the title is dropped, as are bookmarks for tables and figures. Bookmarks that stop halfway (only up to the method, say) are not used. With `--gemini`, Gemini checks the bookmarks: which are headings, their level, and the part of the paper each opens, also when the heading does not name it ("Research design" is Methods, "Case studies" Results). Text and page stay the bookmark's own.
+1. **Bookmarks** (the PDF's outline), when they name the document's own sections. A third of the articles here have them, and they are exact. A top bookmark that only holds the title is dropped, as are bookmarks for tables and figures. Bookmarks that stop halfway (only up to the method, say) are not used. With `--gemini`, Gemini checks the bookmarks: which are headings, their level, and the part of the paper each opens, also when the heading does not name it ("Research design" is Methods, "Case studies" Results). Text and page stay the bookmark's own. A whole book's outline (more than 150 bookmarks) is used without the check: it is exact, and too long for one answer.
 2. **Gemini judging candidate lines** (optional, `--gemini`).
    - **Candidates:** short lines set apart from the body text by size, weight, typeface, colour, capitals, numbering or space, including run-in headings ("**Participants.** Children…").
    - **Left out:** running headers, captions and lowercase list items.

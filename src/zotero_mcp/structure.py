@@ -818,6 +818,10 @@ def gemini_headings(scan: dict, labels: list[str] | None, book_like: bool, title
     return headings, note
 
 
+#: Longer outlines (a whole book) are used as they are.
+MAX_BOOKMARKS_TO_CHECK = 150
+
+
 def gemini_check_bookmarks(headings: list[Heading], pages: int, book_like: bool, title: str,
                            ask: Callable[[str], str]) -> tuple[list[Heading], str]:
     """Gemini's check of the bookmarks: which are headings, their level and section.
@@ -890,7 +894,11 @@ def analyse(scan: dict, item_type: str = "", pages_field: str = "", title: str =
     headings = headings_from_toc(scan.get("toc") or [], st.pages, book_like)
     if headings:
         st.headings, st.headings_from = headings, "bookmarks"
-        if ask is not None:
+        if ask is not None and len(headings) > MAX_BOOKMARKS_TO_CHECK:
+            # A whole book's outline (hundreds of chapters and sections): exact as it is,
+            # and too long to check in one answer.
+            st.note = f"{len(headings)} bookmarks, used without a Gemini check"
+        elif ask is not None:
             # Bookmarks are exact about text and page; Gemini checks which are headings
             # and what part of the paper each opens ("Research design", "Case studies").
             checked, note = gemini_check_bookmarks(headings, st.pages, book_like, title, ask)

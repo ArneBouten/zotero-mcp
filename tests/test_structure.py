@@ -610,3 +610,11 @@ def test_two_models_are_compared_on_headings_and_pdf_reading(tmp_path, monkeypat
            search=FakeSearch(rows), reader=FakeReader(pdf), backend=Backend(), asker=asker,
            log=logs.append, workers=1)
     assert gemini_util.USAGE == {}
+
+
+def test_a_whole_books_outline_is_not_sent_for_checking():
+    toc = [[1, f"Chapter {i}", i] for i in range(1, 200)] + [[1, "References", 200]]
+    asked = []
+    s = st.analyse({"pages": 400, "toc": toc, "labels": [], "margins": [], "candidates": []}, "book", "", "",
+                   ask=lambda p: asked.append(p) or "{}")
+    assert not asked and s.headings_from == "bookmarks" and "without a Gemini check" in s.note
