@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.33] - 2026-10-09
+
+### Added
+
+- **Progress window for fetching full text** (`fetch-fulltext --window`, used by the right-click actions): every paper with its status, like Zotero's Find Full Text; a button to search the papers not found with the browser, available as soon as one is not found and at the end; a summary and the report at the end; double-click shows the paper in Zotero. The terminal opens minimised with the details.
+- **Several papers at once** (`--workers`, default 4). Requests to one site stay spaced out; the browser step runs after the other steps, one paper at a time, and a paper is only tagged not found after it.
+
 ## [0.13.2+arne.32] - 2026-10-09
 
 ### Fixed

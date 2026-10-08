@@ -399,3 +399,54 @@ def test_background_run_reports_through_status(home, monkeypatch):
         finished, text = ff.background_status(run_id)
     assert finished, text
     assert text  # a report, or the error it ran into: never silence
+
+
+def test_papers_are_searched_at_once_and_the_browser_comes_after(tmp_path, monkeypatch):
+    good = good_pdf(tmp_path)
+    order = []
+
+    def open_access(item, http_, settings, budget):
+        order.append(("open-access", item.key))
+        return iter(())
+
+    def browser(item, http_, settings, budget):
+        order.append(("browser", item.key))
+        if item.key == "ABCD1234":
+            yield ff.Candidate("https://rg.net/a.pdf", "your browser", "published", by_identifier=True)
+
+    monkeypatch.setattr(ff, "SOURCES", {"open-access": [open_access], "browser": [browser]})
+    events = []
+    writer = FakeWriter()
+    report = ff.run(
+        steps=["open-access", "browser"], log=lambda m: None, settings=ff.Settings(host_delay=0),
+        http=FakeHttp({"https://rg.net/a.pdf": (200, "application/pdf", good)}),
+        writer_factory=lambda: writer, backend=_backend(), workers=2, progress=events.append,
+    )
+    # Every paper is tried by the other steps first; the browser comes after, one at a time.
+    assert [o[0] for o in order] == ["open-access", "open-access", "browser", "browser"]
+    assert [(r.key, r.status) for r in report.results] == [("ABCD1234", "attached"), ("NOPE0001", "not found")]
+    statuses = [(e["key"], e["status"]) for e in events if e["key"] == "NOPE0001"]
+    assert statuses == [("NOPE0001", "waiting"), ("NOPE0001", "searching"), ("NOPE0001", "waiting for browser"),
+                        ("NOPE0001", "browser"), ("NOPE0001", "not found")]
+    # Not found is only tagged once, after the browser step.
+    assert writer.tags.count(("NOPE0001", [ff.TAG_NOT_FOUND], [])) == 1
+    assert events[-1]["status"] == "done"
+
+
+def test_the_progress_window_bookkeeping():
+    from zotero_mcp.fulltext_window import Progress
+
+    p = Progress()
+    p.active_runs = 1
+    for key, status in [("A", "waiting"), ("B", "waiting"), ("C", "skipped"), ("A", "searching"), ("A", "attached"),
+                        ("B", "not found")]:
+        p.apply({"key": key, "label": key, "status": status, "detail": ""})
+    assert p.browser_button() == (True, "Search 1 not found with the browser")
+    assert p.summary().startswith("Searching (2 of 2 done)") and p.fraction() == 1.0
+    p.browser_busy = True
+    assert p.browser_button()[0] is False
+    p.browser_busy, p.active_runs = False, 0
+    p.apply({"key": "B", "label": "B", "status": "browser"})
+    p.apply({"key": "B", "label": "B", "status": "not found"})
+    assert p.not_found_for_browser() == []      # tried with the browser already: not offered again
+    assert p.summary() == "Done: 1 attached, 1 not found, 1 skipped (already a PDF, or no title)."

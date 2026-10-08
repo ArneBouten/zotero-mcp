@@ -37,8 +37,10 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -218,6 +220,7 @@ class Budget:
     """Monthly (or daily) counters for the services with a free allowance."""
 
     def __init__(self, path: Path | None = None):
+        self._lock = threading.RLock()
         self.path = path or (state_dir() / "budget.json")
         try:
             self.data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -236,14 +239,15 @@ class Budget:
         return self.used(service, daily) + cost <= limit
 
     def spend(self, service: str, cost: int = 1, daily: bool = False) -> None:
-        bucket = self.data.setdefault(service, {})
-        period = self._period(daily)
-        bucket[period] = int(bucket.get(period, 0)) + cost
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        with self._lock:
+            bucket = self.data.setdefault(service, {})
+            period = self._period(daily)
+            bucket[period] = int(bucket.get(period, 0)) + cost
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +425,7 @@ class Http:
         self.session = session or requests.Session()
         self.sleep = sleep
         self._last_hit: dict[str, float] = {}
+        self._pace_lock = threading.Lock()
         #: item key -> candidates that a plain request could not get
         self.blocked: dict[str, list] = {}
         #: the browser session, started by the browser step when first needed
@@ -428,13 +433,17 @@ class Http:
         self.log: Callable[[str], None] = lambda m: None
 
     def _pace(self, url: str) -> None:
+        """Wait so that one site gets at most one request per ``host_delay``, also when
+        several papers are searched at the same time (each request books its turn)."""
         host = urlparse(url).hostname or ""
         base = ".".join(host.split(".")[-2:])
-        last = self._last_hit.get(base)
-        now = time.monotonic()
-        if last is not None and now - last < self.settings.host_delay:
-            self.sleep(self.settings.host_delay - (now - last))
-        self._last_hit[base] = time.monotonic()
+        with self._pace_lock:
+            now = time.monotonic()
+            last = self._last_hit.get(base)
+            turn = now if last is None else max(now, last + self.settings.host_delay)
+            self._last_hit[base] = turn
+        if turn > now:
+            self.sleep(turn - now)
 
     def api_json(self, url: str, *, params=None, headers=None, method="GET", body=None, timeout=25):
         """GET/POST a JSON API. Returns (status, data or None)."""
@@ -1265,8 +1274,6 @@ def _ask_sources(runnable, item, http, settings, budget, parallel: bool = True) 
 
     if not parallel or len(runnable) < 2:
         return {name: ask(source) for source, name in runnable}
-    from concurrent.futures import ThreadPoolExecutor
-
     with ThreadPoolExecutor(max_workers=min(10, len(runnable))) as pool:
         futures = {name: pool.submit(ask, source) for source, name in runnable}
         return {name: f.result() for name, f in futures.items()}
@@ -1560,6 +1567,19 @@ def _not_found_reason(attempts: list[Attempt]) -> str:
     return "copies found, but none downloaded as a matching PDF"
 
 
+#: Papers searched at the same time by default (the browser step always takes one at a time).
+DEFAULT_WORKERS = 4
+_STATE_LOCK = threading.Lock()
+
+
+def _save_item_state(key: str, value: dict) -> None:
+    """Record one item's attempt; reloads the file so parallel runs do not overwrite each other."""
+    with _STATE_LOCK:
+        state = _load_state()
+        state[key] = value
+        _save_state(state)
+
+
 def run(
     *,
     keys: list[str] | None = None,
@@ -1574,8 +1594,16 @@ def run(
     http: Http | None = None,
     writer_factory: Callable[[], Any] | None = None,
     backend=None,
+    workers: int = DEFAULT_WORKERS,
+    progress: Callable[[dict], None] | None = None,
 ) -> RunReport:
-    """Fetch full texts for the selected items. See the module docstring."""
+    """Fetch full texts for the selected items. See the module docstring.
+
+    Up to ``workers`` papers are searched at the same time; the browser step (one
+    Chrome window) comes after the other steps, for the papers still missing, one
+    at a time. ``progress`` receives an event per change of a paper's status
+    ({"key", "label", "status", "detail"}), for a progress window.
+    """
     settings = settings or Settings.load()
     budget = Budget()
     http = http or Http(settings)
@@ -1588,58 +1616,108 @@ def run(
     log("Steps and services:")
     for line in describe_setup(settings, budget, steps):
         log(line)
-    log(f"{len(items)} item(s) to fetch{' (dry run)' if dry_run else ''}.")
+    log(f"{len(items)} item(s) to fetch{' (dry run)' if dry_run else ''}"
+        f"{f', {min(workers, len(items))} at a time' if workers > 1 and len(items) > 1 else ''}.")
+    notify = progress or (lambda event: None)
+    for r in results:
+        notify({"key": r.key, "label": r.label, "status": "skipped", "detail": r.reason})
+    for item in items:
+        notify({"key": item.key, "label": item.label, "status": "waiting", "detail": ""})
     writer = None
     if not dry_run and not save_dir and items:
         writer = (writer_factory or (lambda: ZoteroWriter(log=None)))()
-    state = _load_state()
-    with tempfile.TemporaryDirectory(prefix="zmcp-fulltext-") as workdir:
-        for i, item in enumerate(items, 1):
-            ident = f"DOI {item.doi}" if item.doi else (f"ISBN {item.isbn}" if item.isbn else "no DOI")
-            log(f"[{i}/{len(items)}] {item.label} [{item.key}, {ident}]")
-            res = ItemResult(item.key, item.label, "not found")
-            try:
-                path, cand, check, attempts = find_pdf_for(item, http, settings, budget, steps, log, workdir)
-                res.attempts = attempts
-                if path and cand and check:
-                    res.source, res.url, res.version = cand.source, _redact(cand.url), check.version
-                    label = VERSION_LABELS.get(check.version, "version unknown")
-                    title = f"Full Text PDF ({label})"
-                    if save_dir:
-                        os.makedirs(save_dir, exist_ok=True)
-                        dest = os.path.join(save_dir, f"{item.key} - {_safe_filename(item)}")
-                        with open(path, "rb") as src, open(dest, "wb") as out:
-                            out.write(src.read())
-                        res.status, res.saved_to = "found", dest
-                    elif dry_run:
-                        res.status = "found"
-                    else:
-                        named = os.path.join(workdir, _safe_filename(item))
-                        os.replace(path, named)
-                        note = (
-                            f"<p>Fetched by zotero-mcp fetch-fulltext on {_dt.date.today().isoformat()} "
-                            f"from {cand.source}: {_redact(cand.url)}. Version: {label}. "
-                            f"Check: {check.reason}.</p>"
-                        )
+    write_lock = threading.Lock()
+    log_lock = threading.Lock()
+    browser_later = "browser" in steps and len(steps) > 1
+    first_steps = [s for s in steps if s != "browser"] if browser_later else steps
+    done: dict[str, ItemResult] = {}
+
+    def one(i: int, item: ItemInfo, item_steps: list[str], workdir: str, final: bool) -> ItemResult:
+        lines: list[str] = []
+        ident = f"DOI {item.doi}" if item.doi else (f"ISBN {item.isbn}" if item.isbn else "no DOI")
+        lines.append(f"[{i}/{len(items)}] {item.label} [{item.key}, {ident}]"
+                     + (" (browser)" if item_steps == ["browser"] else ""))
+        notify({"key": item.key, "label": item.label,
+                "status": "browser" if item_steps == ["browser"] else "searching", "detail": ""})
+        res = done.get(item.key) or ItemResult(item.key, item.label, "not found")
+        try:
+            path, cand, check, attempts = find_pdf_for(item, http, settings, budget, item_steps, lines.append, workdir)
+            res.attempts = list(res.attempts or []) + list(attempts)
+            if path and cand and check:
+                res.source, res.url, res.version = cand.source, _redact(cand.url), check.version
+                label = VERSION_LABELS.get(check.version, "version unknown")
+                title = f"Full Text PDF ({label})"
+                if save_dir:
+                    os.makedirs(save_dir, exist_ok=True)
+                    dest = os.path.join(save_dir, f"{item.key} - {_safe_filename(item)}")
+                    with open(path, "rb") as src, open(dest, "wb") as out:
+                        out.write(src.read())
+                    res.status, res.saved_to = "found", dest
+                elif dry_run:
+                    res.status = "found"
+                else:
+                    # A folder per paper: papers searched at once may share a file name.
+                    os.makedirs(os.path.join(workdir, item.key), exist_ok=True)
+                    named = os.path.join(workdir, item.key, _safe_filename(item))
+                    os.replace(path, named)
+                    note = (
+                        f"<p>Fetched by zotero-mcp fetch-fulltext on {_dt.date.today().isoformat()} "
+                        f"from {cand.source}: {_redact(cand.url)}. Version: {label}. "
+                        f"Check: {check.reason}.</p>"
+                    )
+                    with write_lock:
                         res.attachment_key = writer.attach_pdf(item, named, title, note) or ""
                         tags = [TAG_FETCHED] + ([VERSION_TAGS[check.version]] if check.version in VERSION_TAGS else [])
                         writer.set_tags(item.key, add=tags, remove=[TAG_NOT_FOUND])
-                        res.status = "attached"
-                    log(f"  -> {res.status}: {cand.source} at {_host_of(cand.url)}, {label}"
-                        + (f" -> {res.saved_to}" if res.saved_to else ""))
-                else:
-                    res.reason = _not_found_reason(attempts)
+                    res.status = "attached"
+                res.reason = ""
+                lines.append(f"  -> {res.status}: {cand.source} at {_host_of(cand.url)}, {label}"
+                             + (f" -> {res.saved_to}" if res.saved_to else ""))
+                notify({"key": item.key, "label": item.label, "status": res.status,
+                        "detail": f"{cand.source}, {label}"})
+            else:
+                res.status, res.reason = "not found", _not_found_reason(res.attempts)
+                if final:
                     if writer:
-                        writer.set_tags(item.key, add=[TAG_NOT_FOUND])
-                    log(f"  -> not found: {res.reason}")
-            except Exception as e:
-                res.status, res.reason = "error", f"{type(e).__name__}: {e}"
-                log(f"  -> error: {res.reason}")
-            if not dry_run:
-                state[item.key] = {"last_attempt": _dt.datetime.now().isoformat(timespec="seconds"), "status": res.status}
-                _save_state(state)
-                _append_log(res)
-            results.append(res)
+                        with write_lock:
+                            writer.set_tags(item.key, add=[TAG_NOT_FOUND])
+                    lines.append(f"  -> not found: {res.reason}")
+                    notify({"key": item.key, "label": item.label, "status": "not found", "detail": res.reason})
+                else:
+                    lines.append(f"  -> not found yet: {res.reason}; left for the browser step")
+                    notify({"key": item.key, "label": item.label, "status": "waiting for browser",
+                            "detail": res.reason})
+        except Exception as e:
+            res.status, res.reason = "error", f"{type(e).__name__}: {e}"
+            lines.append(f"  -> error: {res.reason}")
+            notify({"key": item.key, "label": item.label, "status": "error", "detail": res.reason})
+        if not dry_run and (final or res.status != "not found"):
+            _save_item_state(item.key, {"last_attempt": _dt.datetime.now().isoformat(timespec="seconds"),
+                                        "status": res.status})
+            _append_log(res)
+        with log_lock:
+            for line in lines:
+                log(line)
+        return res
+
+    with tempfile.TemporaryDirectory(prefix="zmcp-fulltext-") as workdir:
+        numbered = list(enumerate(items, 1))
+        if first_steps:
+            final = not browser_later
+            if workers > 1 and len(items) > 1:
+                with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
+                    futures = {pool.submit(one, i, item, first_steps, workdir, final): item for i, item in numbered}
+                    for fut in futures:
+                        done[futures[fut].key] = fut.result()
+            else:
+                for i, item in numbered:
+                    done[item.key] = one(i, item, first_steps, workdir, final)
+        if "browser" in steps:
+            for i, item in numbered:
+                if item.key in done and done[item.key].status != "not found":
+                    continue
+                done[item.key] = one(i, item, ["browser"], workdir, True)
+    results.extend(done[item.key] for item in items if item.key in done)
     if getattr(http, "browser", None) is not None:
         try:
             http.browser.close()
@@ -1650,11 +1728,12 @@ def run(
     try:
         runs = state_dir() / "runs"
         runs.mkdir(parents=True, exist_ok=True)
-        path = runs / f"{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+        path = runs / f"{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}{'-browser' if steps == ['browser'] else ''}.md"
         path.write_text(report.markdown(), encoding="utf-8")
         report.report_path = str(path)
     except OSError:
         pass
+    notify({"key": "", "label": "", "status": "done", "detail": report.report_path})
     return report
 
 

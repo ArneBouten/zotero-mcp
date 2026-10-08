@@ -82,11 +82,24 @@ zotero-mcp fetch-fulltext --items ABCD1234,EFGH5678
 zotero-mcp fetch-fulltext --collection KEY --steps open-access,publisher
 zotero-mcp fetch-fulltext --save-dir C:\temp\pdfs   # save instead of attaching
 zotero-mcp fetch-fulltext --open-missing            # open Scholar for what is left
+zotero-mcp fetch-fulltext --collection KEY --window # with the progress window
 ```
 
 Zotero must be running, with local writes authorized (`zotero-mcp
 authorize-local`) or web API credentials set. Requests to one site are spaced
-at least 6 seconds apart, so a run of 25 items takes several minutes.
+at least 6 seconds apart.
+
+**Several papers at once.** Four papers are searched at the same time
+(`--workers N`); requests to one site stay spaced out. The browser step comes
+after the other steps, for the papers still missing, one at a time in one
+Chrome window.
+
+**The progress window** (`--window`; the right-click actions in Zotero use it)
+lists every paper with its status, like Zotero's own Find Full Text: searching,
+attached (and from where), no file found. As soon as one paper is not found, a
+button offers the browser step for the papers not found so far; it stays there
+at the end, with a summary and the run's report. Double-clicking a paper shows
+it in Zotero. The terminal opens minimised and keeps the details.
 
 ## Keys and limits
 

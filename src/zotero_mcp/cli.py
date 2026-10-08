@@ -893,6 +893,10 @@ def main():
                               help="Also retry items tagged fulltext/not-found recently")
     fetch_parser.add_argument("--open-missing", action="store_true",
                               help="Open a Google Scholar search in the browser for each item still not found")
+    fetch_parser.add_argument("--window", action="store_true",
+                              help="Show a progress window (each paper and its status, a button for the browser step)")
+    fetch_parser.add_argument("--workers", type=int, default=4,
+                              help="Papers searched at the same time (default 4; the browser step takes one at a time)")
 
     meta_parser = subparsers.add_parser(
         "metadata-audit",
@@ -1419,11 +1423,18 @@ def main():
         if unknown:
             print(f"Unknown step(s): {', '.join(unknown)}. Choose from {', '.join(fulltext_fetch.STEPS)}.")
             sys.exit(1)
+        run_kwargs = dict(keys=keys, collection=args.collection, limit=args.limit, dry_run=args.dry_run,
+                          save_dir=args.save_dir, steps=steps, retry=args.retry, workers=max(1, args.workers))
+        if args.window:
+            try:
+                from zotero_mcp import fulltext_window
+
+                fulltext_window.run_window(run_kwargs)
+                return
+            except ImportError as e:
+                print(f"No progress window ({e}); showing the progress here instead.")
         try:
-            report = fulltext_fetch.run(
-                keys=keys, collection=args.collection, limit=args.limit, dry_run=args.dry_run,
-                save_dir=args.save_dir, steps=steps, retry=args.retry,
-            )
+            report = fulltext_fetch.run(**run_kwargs)
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)
