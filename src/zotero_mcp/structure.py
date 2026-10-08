@@ -1155,6 +1155,26 @@ def read_first_pages(path: str | Path, n: int = 4, scan_more: int = 0, timeout: 
         return None
 
 
+def _extract(src: str, dest: str, first: int, last: int) -> None:
+    import pymupdf
+
+    with pymupdf.open(src) as doc, pymupdf.open() as out:
+        out.insert_pdf(doc, from_page=first, to_page=last)
+        out.save(dest, garbage=3, deflate=True)
+
+
+def extract_pages(src: str | Path, dest: str | Path, first: int, last: int, timeout: int = 120) -> bool:
+    """Copy PDF pages ``first``..``last`` (0-based) of ``src`` into a new file, in a child process."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-I", "-m", "zotero_mcp.structure", "extract", str(src), str(dest), str(first), str(last)],
+            capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
+        )
+    except Exception:
+        return False
+    return proc.returncode == 0 and Path(dest).exists()
+
+
 def _main(argv: list[str]) -> int:  # pragma: no cover - child process
     if len(argv) >= 2 and argv[0] == "scan":
         # ASCII-only JSON: a Windows console encoding cannot print every character.
@@ -1164,6 +1184,9 @@ def _main(argv: list[str]) -> int:  # pragma: no cover - child process
         n = int(argv[2]) if len(argv) > 2 else 4
         more = int(argv[3]) if len(argv) > 3 else 0
         print(json.dumps(first_pages(argv[1], n, more)))
+        return 0
+    if len(argv) >= 5 and argv[0] == "extract":
+        _extract(argv[1], argv[2], int(argv[3]), int(argv[4]))
         return 0
     print("usage: python -m zotero_mcp.structure scan <file.pdf>", file=sys.stderr)
     return 2

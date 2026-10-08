@@ -911,6 +911,8 @@ def main():
     meta_parser.add_argument("--process-review", action="store_true",
                              help="Only apply or discard proposals on items tagged metadata/accept or metadata/reject")
     meta_parser.add_argument("--workers", type=int, default=4, help="Items checked at once (default 4)")
+    meta_parser.add_argument("--no-attachments", action="store_true",
+                             help="Skip the attachment check (another work, manuscript, proof, whole book)")
     meta_parser.add_argument("--no-gemini", action="store_true",
                              help="Check the PDF by rules only; do not let Gemini read its first pages")
 
@@ -928,6 +930,18 @@ def main():
     gem.add_argument("--no-gemini", dest="gemini", action="store_false", help="Bookmarks and rules only")
     relabel_parser.add_argument("--workers", type=int, default=3, help="Items read at once (default 3)")
     relabel_parser.add_argument("--config-path", help="Path to the semantic search config file")
+
+    maintain_parser = subparsers.add_parser(
+        "maintain",
+        help="Check metadata (and the attached PDFs), fetch missing PDFs, then check again what no registry knew",
+    )
+    maintain_parser.add_argument("--items", help="Comma-separated item keys")
+    maintain_parser.add_argument("--collection", help="A collection (key)")
+    maintain_parser.add_argument("--new", action="store_true", help="The items added since the last run")
+    maintain_parser.add_argument("--since", help="The items added since this date (YYYY-MM-DD)")
+    maintain_parser.add_argument("--report-only", action="store_true", help="Change nothing; report only")
+    maintain_parser.add_argument("--no-fetch", action="store_true", help="Metadata only, no PDF fetching")
+    maintain_parser.add_argument("--window", action="store_true", help="Show the fetch progress window")
 
     compare_parser = subparsers.add_parser(
         "compare-gemini",
@@ -1461,6 +1475,7 @@ def main():
                 keys=keys, collection=args.collection, limit=args.limit,
                 apply=args.apply or args.process_review, review_only=args.process_review,
                 workers=args.workers, gemini=False if args.no_gemini else None,
+                check_attachments=not args.no_attachments,
             )
         except Exception as e:
             print(f"Error: {e}")
@@ -1477,6 +1492,22 @@ def main():
             relabel.run(keys=keys, limit=args.limit, config_path=str(_semantic_config_path(args.config_path)),
                         gemini=args.gemini, dry_run=args.dry_run, force=args.force or bool(keys),
                         workers=args.workers)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    elif args.command == "maintain":
+        setup_zotero_environment()
+        from zotero_mcp import maintenance
+
+        keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
+        if not (keys or args.collection or args.new or args.since):
+            print("Choose what to maintain: --items, --collection, --new or --since YYYY-MM-DD.")
+            sys.exit(1)
+        try:
+            maintenance.run(keys=keys, collection=args.collection, new=args.new,
+                            since=f"{args.since}T00:00:00" if args.since else None, apply=not args.report_only,
+                            fetch=not args.no_fetch, window=args.window)
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)

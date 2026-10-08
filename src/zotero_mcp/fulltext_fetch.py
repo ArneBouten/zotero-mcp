@@ -60,6 +60,8 @@ BOOK_TYPES = {"book", "bookSection", "thesis", "report"}
 
 TAG_NOT_FOUND = "fulltext/not-found"
 TAG_FETCHED = "fulltext/fetched"
+#: A PDF the metadata audit found wrong (another work, a manuscript, a proof): to replace.
+TAG_CHECK_PDF = "fulltext/check-pdf"
 VERSION_TAGS = {"accepted": "fulltext/accepted-manuscript", "preprint": "fulltext/preprint"}
 VERSION_LABELS = {
     "published": "published version",
@@ -1198,6 +1200,18 @@ class ZoteroWriter:
                 self.ctx.info(f"Could not add the source note to {att_key}: {e}")
         return att_key
 
+    def trash_child(self, parent: str, attachment_key: str) -> bool:
+        """Move an attachment of ``parent`` to Zotero's trash (recoverable there)."""
+        try:
+            att = self.zot.item(attachment_key)
+            if att.get("data", {}).get("parentItem") != parent:
+                return False        # moved to another item meanwhile: leave it
+            ok, _detail = self._helpers.trash_item(self.zot, att)
+            return bool(ok)
+        except Exception as e:
+            self.ctx.info(f"Could not move {attachment_key} to the trash: {e}")
+            return False
+
     def set_tags(self, key: str, add: Iterable[str] = (), remove: Iterable[str] = ()) -> None:
         add, remove = list(add), set(remove)
         try:
@@ -1287,8 +1301,10 @@ def find_pdf_for(
     steps: Iterable[str] = DEFAULT_STEPS,
     log: Callable[[str], None] = lambda m: None,
     workdir: str | None = None,
+    want_published: bool = False,
 ) -> tuple[str | None, Candidate | None, Check | None, list[Attempt]]:
-    """Walk the steps until a PDF passes the checks. Returns its local path."""
+    """Walk the steps until a PDF passes the checks (and, with ``want_published``,
+    is the published version). Returns its local path."""
     attempts: list[Attempt] = []
     tried: set[str] = set()
     workdir = workdir or tempfile.mkdtemp(prefix="zmcp-fulltext-")
@@ -1325,6 +1341,9 @@ def find_pdf_for(
                 via = " via ZenRows" if cand.unblock and settings.has("zenrows") else ""
                 log(f"      {_host_of(cand.url)}{via} ({cand.source}): {_redact(cand.url)[:100]}")
                 path, check, outcome = _try_candidate(item, cand, http, settings, budget, workdir)
+                if path and check and check.ok and want_published and check.version != "published":
+                    outcome = f"not the published version ({VERSION_LABELS.get(check.version, 'version unknown')})"
+                    check = None
                 attempts.append(Attempt(cand.source, _redact(cand.url), outcome))
                 if path and check and check.ok:
                     log(f"        accepted: {check.reason} ({VERSION_LABELS.get(check.version, 'version unknown')})")
@@ -1489,7 +1508,9 @@ def select_items(
             if keys:
                 skipped.append(ItemResult(info.key, info.label, "skipped", reason=f"item type {info.item_type}"))
             continue
-        if _has_file(children.get(info.key, [])):
+        bad = set(bad_pdf(info.key, state).get("attachments") or [])
+        own = [c for c in children.get(info.key, []) if (c.get("key") or c.get("data", {}).get("key")) not in bad]
+        if _has_file(own):
             if keys:
                 skipped.append(ItemResult(info.key, info.label, "skipped", reason="already has a PDF or EPUB"))
             continue
@@ -1576,8 +1597,32 @@ def _save_item_state(key: str, value: dict) -> None:
     """Record one item's attempt; reloads the file so parallel runs do not overwrite each other."""
     with _STATE_LOCK:
         state = _load_state()
-        state[key] = value
+        state.setdefault(key, {}).update(value)
         _save_state(state)
+
+
+def mark_bad_pdf(item_key: str, attachment_key: str, problem: str, want_published: bool) -> None:
+    """Note that an item's PDF is wrong, so the fetcher looks for (and replaces it with) the right one."""
+    with _STATE_LOCK:
+        state = _load_state()
+        entry = state.setdefault(item_key, {})
+        bad = entry.get("bad_pdf") or {"attachments": []}
+        if attachment_key and attachment_key not in bad["attachments"]:
+            bad["attachments"].append(attachment_key)
+        bad.update(problem=problem, want_published=bool(want_published))
+        entry["bad_pdf"] = bad
+        _save_state(state)
+
+
+def bad_pdf(item_key: str, state: dict | None = None) -> dict:
+    return ((state if state is not None else _load_state()).get(item_key) or {}).get("bad_pdf") or {}
+
+
+def clear_bad_pdf(item_key: str) -> None:
+    with _STATE_LOCK:
+        state = _load_state()
+        if (state.get(item_key) or {}).pop("bad_pdf", None) is not None:
+            _save_state(state)
 
 
 def run(
@@ -1640,8 +1685,10 @@ def run(
         notify({"key": item.key, "label": item.label,
                 "status": "browser" if item_steps == ["browser"] else "searching", "detail": ""})
         res = done.get(item.key) or ItemResult(item.key, item.label, "not found")
+        bad = bad_pdf(item.key)
         try:
-            path, cand, check, attempts = find_pdf_for(item, http, settings, budget, item_steps, lines.append, workdir)
+            path, cand, check, attempts = find_pdf_for(item, http, settings, budget, item_steps, lines.append, workdir,
+                                                       want_published=bool(bad.get("want_published")))
             res.attempts = list(res.attempts or []) + list(attempts)
             if path and cand and check:
                 res.source, res.url, res.version = cand.source, _redact(cand.url), check.version
@@ -1668,7 +1715,12 @@ def run(
                     with write_lock:
                         res.attachment_key = writer.attach_pdf(item, named, title, note) or ""
                         tags = [TAG_FETCHED] + ([VERSION_TAGS[check.version]] if check.version in VERSION_TAGS else [])
-                        writer.set_tags(item.key, add=tags, remove=[TAG_NOT_FOUND])
+                        writer.set_tags(item.key, add=tags, remove=[TAG_NOT_FOUND, TAG_CHECK_PDF])
+                        replaced = [a for a in bad.get("attachments") or [] if writer.trash_child(item.key, a)]
+                    if bad:
+                        clear_bad_pdf(item.key)
+                    if replaced:
+                        lines.append(f"  replaced the wrong PDF ({bad.get('problem', '')}); it is in Zotero's trash")
                     res.status = "attached"
                 res.reason = ""
                 lines.append(f"  -> {res.status}: {cand.source} at {_host_of(cand.url)}, {label}"
@@ -1678,7 +1730,7 @@ def run(
             else:
                 res.status, res.reason = "not found", _not_found_reason(res.attempts)
                 if final:
-                    if writer:
+                    if writer and not bad:      # an item with a wrong PDF keeps it until a right one is found
                         with write_lock:
                             writer.set_tags(item.key, add=[TAG_NOT_FOUND])
                     lines.append(f"  -> not found: {res.reason}")

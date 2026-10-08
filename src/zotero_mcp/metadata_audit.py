@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as _dt
 import html
 import json
+import os
 import re
 import threading
 from collections import Counter
@@ -698,6 +699,10 @@ class ItemAudit:
     reference: str = ""
     error: str = ""
     retracted: bool = False
+    #: a problem with the attached PDF (attachment_check.Problem), or None
+    attachment: Any = None
+    #: the item's tags when it was read
+    tags: set = field(default_factory=set)
 
     def by_kind(self, kind: str) -> list[Change]:
         return [c for c in self.changes if c.kind == kind]
@@ -743,6 +748,12 @@ class Context:
         self.pdf_text = pdf_text or (lambda key: "")
         self.rejected = rejected or {}
         self.learned = learned or {}
+        #: the item's PDF attachments with their first pages (attachment check), and the library's
+        #: DOI/title index to name the item a stray PDF belongs to
+        self.pdfs: Callable[[str], list[dict]] | None = None
+        self.index: dict | None = None
+        #: citation data of the item's saved web page (HTML snapshot): {"title", "doi", ...}
+        self.page_meta: Callable[[str], dict] | None = None
         #: Gemini's reading of the item's PDF (first pages): a dict of fields, or None.
         self.pdf_read = pdf_read
         #: Google Scholar's Cite (SerpApi), for items with no record and no readable PDF.
@@ -795,10 +806,25 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
     audit = ItemAudit(info.key, info.label, info.item_type)
     settings = ctx.settings
     http = _Recorder(ctx.http)
+    audit.tags = {t.get("tag") for t in data.get("tags") or [] if isinstance(t, dict)}
     try:
-        return _audit_item(raw, data, info, audit, http, settings, ctx)
+        audit = _audit_item(raw, data, info, audit, http, settings, ctx)
     finally:
         ctx.note_failures(http.failed)
+    if ctx.pdfs is not None:
+        from zotero_mcp import attachment_check
+
+        try:
+            problem = attachment_check.check(
+                info, data, ctx.pdfs(info.key),
+                reading=(lambda: ctx.pdf_read(info.key)) if ctx.pdf_read else None, index=ctx.index)
+        except Exception as e:
+            problem = None
+            audit.flags.append(f"attachment not checked ({type(e).__name__})")
+        if problem is not None:
+            audit.attachment = problem
+            audit.flags.append(f"attachment: {problem.describe()}")
+    return audit
 
 
 def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http: _Recorder,
@@ -826,6 +852,9 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
     elif info.isbn and info.item_type == "book":
         ref = openlibrary(info.isbn, http, settings) or google_books(info.isbn, http, settings)
     if ref is None and not info.doi:
+        # A DOI printed on the item's own PDF or saved web page: free, and surer than a title search.
+        ref = _doi_from_attachments(info, ctx, http, settings)
+    if ref is None and not info.doi:
         match = crossref_by_title(info, http, settings)
         if match is not None and match.kind == "posted-content" and info.item_type != "preprint":
             match = None    # a preprint of the item: look for the published record elsewhere
@@ -840,6 +869,14 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
                 match = semantic_scholar_by_title(info, http, settings)
             elif match is None:
                 http.failed.add("semanticscholar.org")
+        if ref is None and match is None:
+            # Gemini's reading of the PDF may give the DOI the rules missed (an image, an odd layout).
+            reading = pdf_reading()
+            doi = norm_doi((reading or {}).get("doi") or "")
+            if doi:
+                rec = crossref(doi, http, settings) or datacite(doi, http, settings)
+                if rec is not None and _matches_item(info, rec, 1):
+                    ref, rec.by = rec, "pdf-doi"
         if ref is None and match is None and http.failed:
             return _not_checked(audit, data, http)
         if ref is None and match and match.doi:
@@ -859,18 +896,21 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
     if ref is None:
         audit.flags.append("no registry record found")
         reading = pdf_reading()
+        page = ctx.page_meta(info.key) if ctx.page_meta else {}
         if reading and reading.get("title"):
             _from_pdf_only(audit, data, info, reading)
+        elif page.get("title"):
+            _from_pdf_only(audit, data, info, page, source=PAGE_SOURCE)
         elif ctx.scholar is not None:
             _from_scholar(audit, data, info, ctx.scholar(info))
         _type_flags(audit, data)
         return audit
-    audit.reference = f"{ref.source} (by {ref.by})"
+    audit.reference = f"{ref.source} (by {_BY.get(ref.by, ref.by)})"
     if (problem := _kind_mismatch(info.item_type, ref)):
         audit.flags.append(problem)
         _type_flags(audit, data)
         return audit
-    if ref.by == "doi":
+    if ref.by in ("doi", "pdf-doi", "page-doi"):
         if ref.kind == "posted-content" and info.item_type not in ("preprint", "report", "manuscript"):
             if ref.published_doi:
                 audit.changes.append(Change("DOI", info.doi, ref.published_doi, "propose", [ref.source],
@@ -960,8 +1000,7 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
                 audit.changes.append(Change(name, "", new, "fill", [ref.source]))
             continue
         if not old.strip():
-            audit.changes.append(Change(name, "", new, "fill", [ref.source],
-                                        "matched by title" if ref.by == "title" else ""))
+            audit.changes.append(Change(name, "", new, "fill", [ref.source], _FILL_WHY.get(ref.by, "")))
             continue
         if name == "ISSN":
             continue    # a journal has several valid ISSNs (print, online); only empty ones are filled
@@ -1134,6 +1173,33 @@ def _note_updates(audit: ItemAudit, ref: Record) -> None:
 
 
 PDF_SOURCE = "the item's PDF (read by Gemini)"
+PAGE_SOURCE = "the item's saved web page"
+_BY = {"pdf-doi": "the DOI printed on its PDF", "page-doi": "the DOI on its saved web page"}
+_FILL_WHY = {"title": "matched by title", "pdf-doi": "the DOI printed on the item's PDF",
+             "page-doi": "the DOI on the item's saved web page"}
+_DOI_IN_TEXT = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)", re.I)
+
+
+def _doi_from_attachments(info: ff.ItemInfo, ctx, http, settings) -> Record | None:
+    """The record of a DOI printed on the item's PDF or saved web page, when it is clearly the item."""
+    tried: list[tuple[str, str]] = []
+    page = ctx.page_meta(info.key) if ctx.page_meta else {}
+    if page.get("doi"):
+        tried.append((norm_doi(page["doi"]), "page-doi"))
+    try:
+        text = ctx.pdf_text(info.key) or ""
+    except Exception:
+        text = ""
+    for m in _DOI_IN_TEXT.findall(text[:20000])[:3]:
+        doi = norm_doi(m.rstrip(".,;)]"))
+        if doi and all(doi != d for d, _ in tried):
+            tried.append((doi, "pdf-doi"))
+    for doi, by in tried:
+        rec = crossref(doi, http, settings) or datacite(doi, http, settings)
+        if rec is not None and _matches_item(info, rec, 1):
+            rec.by = by
+            return rec
+    return None
 _PDF_FIELDS = {"year": "year", "publicationTitle": "journal", "volume": "volume", "issue": "issue",
                "pages": "pages", "DOI": "doi", "publisher": "publisher", "ISBN": "isbn",
                "bookTitle": "book_title", "university": "university", "institution": "publisher"}
@@ -1168,12 +1234,15 @@ def _from_scholar(audit: ItemAudit, data: dict, info: ff.ItemInfo, rec: Record |
             audit.changes.append(Change(name, old, new, "propose", [rec.source], "Google Scholar says otherwise"))
 
 
-def _from_pdf_only(audit: ItemAudit, data: dict, info: ff.ItemInfo, reading: dict | None) -> None:
-    """No registry knows the item: what its own PDF says becomes proposals."""
+def _from_pdf_only(audit: ItemAudit, data: dict, info: ff.ItemInfo, reading: dict | None,
+                   source: str = "") -> None:
+    """No registry knows the item: what its own PDF (or saved web page) says becomes proposals."""
+    source = source or PDF_SOURCE
+    what = "PDF" if source == PDF_SOURCE else "saved web page"
     if not reading or not reading.get("title"):
         return
     if info.title and title_match(info.title, reading["title"]) < 0.8:
-        audit.flags.append(f"the attached PDF looks like another work (its title: {reading['title'][:90]})")
+        audit.flags.append(f"the attached {what} looks like another work (its title: {reading['title'][:90]})")
         return
     for name in _fields_for(info.item_type):
         if name in ("title", "abstractNote"):
@@ -1185,9 +1254,9 @@ def _from_pdf_only(audit: ItemAudit, data: dict, info: ff.ItemInfo, reading: dic
         if not worth_proposing(name, old, new):
             continue
         if not old.strip():
-            audit.changes.append(Change(name, "", new, "propose", [PDF_SOURCE], "read from the PDF"))
+            audit.changes.append(Change(name, "", new, "propose", [source], f"read from the {what}"))
         elif not same(name, old, new):
-            audit.changes.append(Change(name, old, new, "propose", [PDF_SOURCE], "the PDF says otherwise"))
+            audit.changes.append(Change(name, old, new, "propose", [source], f"the {what} says otherwise"))
 
 
 def _kind_mismatch(item_type: str, ref: Record) -> str | None:
@@ -1389,6 +1458,21 @@ class MetadataWriter:
     def trash(self, child: dict) -> None:
         self._helpers.trash_item(self.zot, child)
 
+    def move_attachment(self, attachment_key: str, new_parent: str) -> None:
+        att = self.zot.item(attachment_key)
+        att["data"]["parentItem"] = new_parent
+        self.zot.update_item(att)
+
+    def item_pages(self, key: str) -> str:
+        return str(self.zot.item(key).get("data", {}).get("pages") or "")
+
+    def attach_file(self, parent: str, path: str, title: str) -> str | None:
+        ok, detail, att_key = self._helpers._attach_and_verify(self.zot, title, path, parent, self.ctx,
+                                                               content_type="application/pdf")
+        if not ok:
+            raise RuntimeError(detail)
+        return att_key
+
     def ensure_saved_search(self) -> str:
         try:
             for s in self.zot.searches() or []:
@@ -1484,6 +1568,69 @@ PDF_SCHEMA = {
     },
     "required": ["document", "version", "title"],
 }
+
+
+_META_RE = re.compile(r"<meta\s+[^>]*?(?:name|property)\s*=\s*[\"']([^\"']+)[\"'][^>]*?content\s*=\s*[\"']([^\"']*)[\"']"
+                      r"|<meta\s+[^>]*?content\s*=\s*[\"']([^\"']*)[\"'][^>]*?(?:name|property)\s*=\s*[\"']([^\"']+)[\"']",
+                      re.I)
+
+
+def page_meta(page_html: str) -> dict:
+    """The citation data publishers put in a page's head (Highwire ``citation_*`` and Dublin Core tags)."""
+    tags: dict[str, list[str]] = {}
+    for m in _META_RE.finditer(page_html[:400000]):
+        name = (m.group(1) or m.group(4) or "").strip().lower()
+        value = html.unescape(m.group(2) if m.group(1) else m.group(3) or "").strip()
+        if name and value:
+            tags.setdefault(name, []).append(value)
+
+    def first(*names: str) -> str:
+        for n in names:
+            if tags.get(n):
+                return tags[n][0]
+        return ""
+
+    doi = first("citation_doi", "dc.identifier", "prism.doi")
+    m = re.search(r"10\.\d{4,9}/\S+", doi)
+    year = re.search(r"\d{4}", first("citation_publication_date", "citation_date", "citation_online_date",
+                                     "dc.date", "prism.publicationdate"))
+    fp, lp = first("citation_firstpage"), first("citation_lastpage")
+    return {
+        "title": first("citation_title", "dc.title"), "doi": m.group(0) if m else "",
+        "authors": tags.get("citation_author") or tags.get("dc.creator") or [],
+        "year": year.group(0) if year else "",
+        "journal": first("citation_journal_title", "prism.publicationname"),
+        "volume": first("citation_volume", "prism.volume"), "issue": first("citation_issue", "prism.number"),
+        "pages": f"{fp}-{lp}" if fp and lp else fp, "publisher": first("citation_publisher", "dc.publisher"),
+        "isbn": first("citation_isbn"), "book_title": first("citation_inbook_title", "citation_book_title"),
+        "version": "published",
+    }
+
+
+def page_meta_reader() -> Callable[[str], dict]:
+    """Citation data of the item's saved web page (an HTML snapshot), read from the file."""
+    try:
+        from zotero_mcp.local_db import get_serial_reader
+
+        reader = get_serial_reader()
+    except Exception:
+        reader = None
+
+    def read(key: str) -> dict:
+        if reader is None:
+            return {}
+        for att in reader.get_attachment_paths(key) or []:
+            path = att.get("resolved_path")
+            ctype = (att.get("content_type") or "").lower()
+            if att.get("exists") and path and ("html" in ctype or str(path).lower().endswith((".html", ".htm"))):
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        return page_meta(f.read(400000))
+                except OSError:
+                    continue
+        return {}
+
+    return read
 
 
 def pdf_prompt(path: str | Path) -> str | None:
@@ -1629,7 +1776,7 @@ class AuditReport:
 
     def totals(self) -> dict[str, int]:
         t = {"items": len(self.audits), "filled": 0, "corrected": 0, "proposals": 0, "items_to_review": 0,
-             "flags": 0, "no_source": 0, "errors": 0, "retracted": 0, "not_checked": 0}
+             "flags": 0, "no_source": 0, "errors": 0, "retracted": 0, "not_checked": 0, "attachments": 0}
         for a in self.audits:
             t["filled"] += len(a.by_kind("fill"))
             t["corrected"] += len(a.by_kind("correct"))
@@ -1638,6 +1785,7 @@ class AuditReport:
             t["flags"] += len(a.flags)
             t["no_source"] += any("no registry record" in f for f in a.flags)
             t["not_checked"] += any(f.startswith(NOT_CHECKED) for f in a.flags)
+            t["attachments"] += a.attachment is not None
             t["errors"] += bool(a.error)
             t["retracted"] += a.retracted
         return t
@@ -1654,7 +1802,9 @@ class AuditReport:
             f"{t['flags']} other findings; no registry record for {t['no_source']} items"
             + (f"; {t['retracted']} retracted item(s), tagged '{TAG_RETRACTED}'" if t["retracted"] else "")
             + (f"; {t['not_checked']} item(s) not checked because a registry did not answer (run again later)"
-               if t["not_checked"] else "") + ".",
+               if t["not_checked"] else "")
+            + (f"; {t['attachments']} attached PDF(s) to check (another work, manuscript, proof or whole book), "
+               f"tagged '{ff.TAG_CHECK_PDF}'" if t["attachments"] else "") + ".",
             "",
         ]
         if self.review_counts:
@@ -1704,6 +1854,10 @@ def run(
     workers: int = 4,
     gemini: bool | None = None,
     pdf_read: Callable[[str], dict | None] | None = None,
+    check_attachments: bool = True,
+    pdfs: Callable[[str], list[dict]] | None = None,
+    fetch: Callable[..., Any] | None = None,
+    fetch_replacements: bool = True,
 ) -> AuditReport:
     from zotero_mcp import library as _library
 
@@ -1740,7 +1894,19 @@ def run(
                   if settings.has("serpapi") and pdf_text is None else None,
                   learned=state.get("_learned") or {})
     ctx.log = log
-    log(f"{len(items)} item(s) to check{'' if apply else ' (report only)'}.")
+    if pdf_text is None:
+        ctx.page_meta = page_meta_reader()
+    if check_attachments and (pdfs is not None or pdf_text is None):
+        from zotero_mcp import attachment_check
+
+        ctx.pdfs = pdfs or attachment_check.pdf_reader()
+        try:
+            whole = items if not (keys or collection) else backend.list_items("-attachment", limit=100000)
+            ctx.index = attachment_check.library_index(whole)
+        except Exception:
+            ctx.index = attachment_check.library_index(items)
+    log(f"{len(items)} item(s) to check{'' if apply else ' (report only)'}"
+        f"{', with their PDFs' if ctx.pdfs is not None else ''}.")
 
     def one(raw):
         try:
@@ -1750,6 +1916,7 @@ def run(
             return ItemAudit(info.key, info.label, info.item_type, error=f"{type(e).__name__}: {e}")
 
     audits: list[ItemAudit] = []
+    to_fetch: list[str] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         for n, audit in enumerate(pool.map(one, items), 1):
             audits.append(audit)
@@ -1761,10 +1928,20 @@ def run(
             log(f"[{n}/{len(items)}] {audit.label} [{audit.key}]: {summary}")
             if writer is not None and not audit.error:
                 _write(writer, audit, log)
+                if audit.attachment is not None and not audit.error:
+                    if _fix_attachment(writer, audit, log, pdfs=ctx.pdfs):
+                        to_fetch.append(audit.key)
             state.setdefault(audit.key, {})["last_audit"] = _dt.datetime.now().isoformat(timespec="seconds")
             if n % 50 == 0:
                 _save_state(state)
     _save_state(state)
+    if to_fetch and fetch_replacements:
+        # The right PDF for items whose attachment is wrong: it replaces the wrong one once found.
+        log(f"Looking for the right PDF of {len(to_fetch)} item(s) ...")
+        try:
+            (fetch or ff.run)(keys=to_fetch, log=log, retry=True)
+        except Exception as e:
+            log(f"  the search for the right PDFs failed: {type(e).__name__}: {e}")
     from zotero_mcp.gemini_util import usage_summary
 
     if (usage := usage_summary()):
@@ -1781,6 +1958,58 @@ def run(
     except OSError:
         pass
     return report
+
+
+def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
+                    pdfs: Callable[[str], list[dict]] | None = None) -> bool:
+    """Act on a wrong attachment; True when the fetcher should look for the right PDF."""
+    from zotero_mcp import attachment_check
+
+    problem = audit.attachment
+    if ff.TAG_CHECK_PDF in audit.tags and problem.kind != "whole book":
+        return True     # noted in an earlier run: only look for the right PDF again
+    note = [f"<p><b>Attached PDF to check ({_dt.date.today()})</b>: {html.escape(problem.describe())}.</p>"]
+    fetch = False
+    try:
+        if problem.kind == "another work":
+            other = problem.other_item
+            if other and pdfs is not None and not pdfs(other):
+                writer.move_attachment(problem.attachment_key, other)
+                writer.add_note(other, f"<p>zotero-mcp moved this PDF here from item {audit.key} "
+                                       f"({html.escape(audit.label)}), where it was attached by mistake.</p>")
+                note.append(f"<p>It belongs to item {other}, which had no PDF, and was moved there.</p>")
+            else:
+                ff.mark_bad_pdf(audit.key, problem.attachment_key, problem.kind, want_published=False)
+                note.append("<p>The right PDF is searched for; once found and checked it replaces this one, "
+                            "which then goes to Zotero's trash.</p>")
+            fetch = True
+        elif problem.kind in ("manuscript", "preprint", "proof"):
+            ff.mark_bad_pdf(audit.key, problem.attachment_key, problem.kind, want_published=True)
+            note.append("<p>The published version is searched for; once found it replaces this one, which then "
+                        "goes to Zotero's trash. Until then this PDF stays.</p>")
+            fetch = True
+        elif problem.kind == "whole book":
+            import tempfile
+
+            folder = tempfile.mkdtemp(prefix="zmcp-chapter-")
+            out = os.path.join(folder, "chapter.pdf")
+            span = attachment_check.extract_chapter(problem.path, writer.item_pages(audit.key), out)
+            if span:
+                writer.attach_file(audit.key, out, f"Chapter PDF (from the book, PDF pages {span[0]}-{span[1]})")
+                note.append(f"<p>The chapter (PDF pages {span[0]}-{span[1]} of the book) was cut out and "
+                            "attached as its own PDF; the book stays attached.</p>")
+                writer.apply(audit, [], tags_add=[], tags_remove=[ff.TAG_CHECK_PDF])
+                writer.add_note(audit.key, "".join(note))
+                log(f"    -> attached the chapter cut from the book (PDF pages {span[0]}-{span[1]})")
+                return False
+            note.append("<p>The chapter's pages could not be found in the book by their printed numbers.</p>")
+        writer.apply(audit, [], tags_add=[ff.TAG_CHECK_PDF])
+        writer.add_note(audit.key, "".join(note))
+        log(f"    -> {problem.describe()}")
+    except Exception as e:
+        log(f"    -> could not act on the attachment: {type(e).__name__}: {e}")
+        return False
+    return fetch
 
 
 def _write(writer, audit: ItemAudit, log: Callable[[str], None]) -> None:

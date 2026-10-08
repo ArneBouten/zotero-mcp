@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.34] - 2026-10-09
+
+### Added
+
+- **Attachment check** in the metadata audit: another work, an accepted manuscript, preprint or proof of a published article, or a whole book attached to a chapter. Found by the first pages (free); Gemini only reads a PDF when neither the item's DOI nor its title is there. With `--apply`: tag `fulltext/check-pdf` and a note; a stray PDF moves to its own item when that has none; otherwise the right PDF (for a manuscript or proof: the published version) is fetched and replaces the wrong one, which goes to Zotero's trash; a chapter is cut out of an attached book. `--no-attachments` skips it.
+- **`maintain`**: metadata (with the attachment check), then PDFs for the items without one, then the metadata again for the items no registry knew, now with their PDF. For `--items`, `--collection`, `--since` or `--new`; with `"maintenance": {"new_items": true}` in config.json it runs for new items before the index update at every start of Claude Desktop. Right-click action "Check metadata and fetch PDFs".
+- The audit looks up **a DOI printed on the item's PDF or in its saved web page** (citation tags) before a title search, and Gemini's reading of the PDF can give the DOI too. A saved web page's citation data gives proposals for items no registry knows.
+- The fetcher replaces PDFs marked wrong, and for a manuscript or proof accepts only the published version.
+
 ## [0.13.2+arne.33] - 2026-10-09
 
 ### Added

@@ -58,6 +58,7 @@ def sync_semantic_update() -> bool:
     """
     if not update_is_due():
         return False
+    _maintain_new_items()
 
     from zotero_mcp.semantic_search import create_semantic_search
     from zotero_mcp.utils import is_local_mode
@@ -81,6 +82,20 @@ def sync_semantic_update() -> bool:
         f"Database update completed: {stats.get('processed_items', 0)} items processed\n"
     )
     return True
+
+
+def _maintain_new_items() -> None:
+    """Before indexing: check the metadata of items added since the last start and fetch
+    their PDFs, so the index gets them complete (``"maintenance": {"new_items": true}``)."""
+    try:
+        from zotero_mcp import maintenance
+
+        if not maintenance.config_new_items(_config_path()):
+            return
+        sys.stderr.write("Maintaining new items (metadata, then PDFs)...\n")
+        maintenance.run(new=True, log=lambda m: sys.stderr.write(m + "\n"))
+    except Exception as e:  # never in the way of the index update
+        sys.stderr.write(f"Warning: maintaining new items failed: {e}\n")
 
 
 def _child_stdout():

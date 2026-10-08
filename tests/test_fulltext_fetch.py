@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import json
 import pytest
 
 from zotero_mcp import fulltext_fetch as ff
@@ -223,6 +224,10 @@ class FakeWriter:
         self.attached.append((item.key, Path(path).name, title, note))
         return "ATT00001"
 
+    def trash_child(self, parent, attachment_key):
+        self.trashed = getattr(self, "trashed", []) + [(parent, attachment_key)]
+        return True
+
     def set_tags(self, key, add=(), remove=()):
         self.tags.append((key, list(add), list(remove)))
 
@@ -264,7 +269,8 @@ def test_run_attaches_tags_and_reports(tmp_path, monkeypatch):
     # The source's own label wins: accepted manuscripts often print the DOI too.
     assert title == "Full Text PDF (accepted manuscript)"
     assert "Unpaywall (repository)" in note
-    assert ("ABCD1234", [ff.TAG_FETCHED, "fulltext/accepted-manuscript"], [ff.TAG_NOT_FOUND]) in writer.tags
+    assert ("ABCD1234", [ff.TAG_FETCHED, "fulltext/accepted-manuscript"], [ff.TAG_NOT_FOUND, ff.TAG_CHECK_PDF]) \
+        in writer.tags
     assert ("NOPE0001", [ff.TAG_NOT_FOUND], []) in writer.tags
     assert Path(report.report_path).exists()
     assert "attached" in report.markdown()
@@ -450,3 +456,34 @@ def test_the_progress_window_bookkeeping():
     p.apply({"key": "B", "label": "B", "status": "not found"})
     assert p.not_found_for_browser() == []      # tried with the browser already: not offered again
     assert p.summary() == "Done: 1 attached, 1 not found, 1 skipped (already a PDF, or no title)."
+
+
+def test_a_pdf_marked_wrong_is_replaced_and_a_manuscript_only_by_the_published_version(tmp_path, monkeypatch):
+    good = good_pdf(tmp_path)
+    item = json.loads(json.dumps(ITEM))
+    backend = FakeBackend({"ABCD1234": item}, {"ABCD1234": [
+        {"key": "BADPDF01", "data": {"key": "BADPDF01", "itemType": "attachment", "contentType": "application/pdf",
+                                     "linkMode": "imported_file"}}]})
+    version = {"v": "accepted"}
+
+    def source(item_, http_, settings, budget):
+        yield ff.Candidate("https://repo.org/x.pdf", "Unpaywall (repository)", version["v"], by_identifier=True)
+
+    monkeypatch.setattr(ff, "SOURCES", {"open-access": [source]})
+    http = FakeHttp({"https://repo.org/x.pdf": (200, "application/pdf", good)})
+    # Without a mark, the item has a PDF and is left alone.
+    items, skipped = ff.select_items(keys=["ABCD1234"], backend=backend)
+    assert not items and skipped[0].reason == "already has a PDF or EPUB"
+    # The audit found the PDF is the manuscript: only the published version replaces it.
+    ff.mark_bad_pdf("ABCD1234", "BADPDF01", "manuscript", want_published=True)
+    writer = FakeWriter()
+    report = ff.run(steps=["open-access"], log=lambda m: None, settings=ff.Settings(host_delay=0), http=http,
+                    writer_factory=lambda: writer, backend=backend, workers=1)
+    assert report.results[0].status == "not found" and not writer.attached
+    assert not [t for t in writer.tags if ff.TAG_NOT_FOUND in t[1]]      # it keeps its manuscript, not "not found"
+    assert ff.bad_pdf("ABCD1234")["attachments"] == ["BADPDF01"]
+    version["v"] = "published"
+    report = ff.run(steps=["open-access"], log=lambda m: None, settings=ff.Settings(host_delay=0), http=http,
+                    writer_factory=lambda: writer, backend=backend, workers=1)
+    assert report.results[0].status == "attached" and writer.trashed == [("ABCD1234", "BADPDF01")]
+    assert ff.bad_pdf("ABCD1234") == {}

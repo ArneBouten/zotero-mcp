@@ -113,3 +113,7 @@ py -3.12 -m zotero_mcp.cli metadata-audit --process-review
 Writing goes the same way as the other write tools (the Zotero web API key). The OpenAlex, Semantic Scholar and Unpaywall keys, and an optional `GOOGLE_BOOKS_API_KEY`, come from the full-text fetcher's `keys.env`.
 
 From Claude, `zotero_metadata_audit` checks up to 15 items per call (`apply` false by default); use the command line for whole collections or the library.
+
+## The attached PDF, and DOIs on the PDF or web page
+
+The audit also checks the attached PDF (another work, an accepted manuscript or proof of a published article, a whole book on a chapter) and, with `--apply`, has it replaced or the chapter cut out: see [maintenance.md](maintenance.md). For an item without a DOI, a DOI printed on its PDF's first pages or in its saved web page's citation data is looked up first (free, and surer than a title search); Gemini's reading of the PDF can give it too.

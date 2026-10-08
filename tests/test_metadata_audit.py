@@ -587,3 +587,25 @@ def test_values_that_would_make_a_field_worse_are_not_proposed():
     assert not w("volume", "19", "2019") and not w("volume", "19", "19 3") and not w("issue", "3", "3_suppl")
     assert not w("pages", "1-18", "Article # 3") and w("pages", "1-18", "e30") and w("pages", "", "363-378")
     assert ma.same("volume", "4", "04") and ma.same("issue", "06", "6")
+
+
+def test_a_doi_printed_on_the_pdf_or_saved_page_finds_the_record_without_a_title_search():
+    http = FakeHttp({"api.crossref.org/works/10.1037": (200, CROSSREF)})
+    ctx = ma.Context(http, ff.Settings(), pdf_text=lambda k: "American Psychologist 55 (2000) 68-78\n"
+                                                              "https://doi.org/10.1037/0003-066X.55.1.68.")
+    a = ma.audit_item(item(DOI=""), ctx)
+    assert a.reference == "Crossref (by the DOI printed on its PDF)"
+    doi = next(c for c in a.changes if c.field == "DOI")
+    assert doi.kind == "fill" and doi.why == "the DOI printed on the item's PDF"
+    assert not any("openalex" in u or "query" in u for u in http.calls)
+    # From a saved web page's citation tags.
+    page = ('<html><head><meta name="citation_title" content="Self-determination theory and the facilitation">'
+            '<meta content="10.1037/0003-066X.55.1.68" name="citation_doi">'
+            '<meta name="citation_author" content="Ryan, Richard M."><meta name="citation_firstpage" content="68">'
+            '<meta name="citation_lastpage" content="78"></head>')
+    meta = ma.page_meta(page)
+    assert meta["doi"] == "10.1037/0003-066X.55.1.68" and meta["pages"] == "68-78"
+    ctx = ma.Context(http, ff.Settings(), pdf_text=lambda k: "")
+    ctx.page_meta = lambda key: meta
+    a = ma.audit_item(item(DOI=""), ctx)
+    assert a.reference == "Crossref (by the DOI on its saved web page)"
