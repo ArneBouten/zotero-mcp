@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.49] - 2026-10-09
+
+### Fixed
+
+- A `metadata/accept` or `metadata/reject` tag put on the suggestions note, rather than on the paper, was ignored; it now counts for the paper.
+
 ## [0.13.2+arne.48] - 2026-10-09
 
 ### Added

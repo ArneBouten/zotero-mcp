@@ -1850,7 +1850,21 @@ def process_review(writer, backend, log: Callable[[str], None] = print) -> dict[
     counts = {"accepted": 0, "rejected": 0}
     state = _load_state()
     for tag, accept in ((TAG_ACCEPT, True), (TAG_REJECT, False)):
+        done: set[str] = set()
         for raw in backend.list_items(None, limit=10000, tag=[tag]):
+            data = raw.get("data", raw)
+            if data.get("itemType") == "note":
+                # The tag on the suggestions note itself (natural to do): it means its paper.
+                parent = data.get("parentItem")
+                if not parent or NOTE_MARK not in (data.get("note") or ""):
+                    continue
+                raw = (backend.get_items([parent]) or {}).get(parent)
+                if raw is None:
+                    continue
+            key = raw.get("key") or raw.get("data", {}).get("key")
+            if key in done:
+                continue
+            done.add(key)
             decide(writer, raw, accept, state, log=log)
             counts["accepted" if accept else "rejected"] += 1
     _save_state(state)

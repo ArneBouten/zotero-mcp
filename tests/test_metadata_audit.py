@@ -273,6 +273,20 @@ def test_the_report_lists_papers_still_waiting_from_earlier_checks():
     assert "from earlier checks: 1 paper" in text or "and 1 paper from earlier checks" in text
 
 
+def test_an_accept_tag_on_the_suggestions_note_counts_for_its_paper():
+    raw = item(volume="56")
+    items = {"ABCD1234": raw}
+    writer = FakeWriter(items)
+    ma.run(apply=True, log=lambda m: None, settings=ff.Settings(), http=FakeHttp({"api.crossref.org": (200, CROSSREF)}),
+           backend=FakeBackend(items), writer_factory=lambda: writer, pdf_text=lambda k: "", workers=1)
+    [note] = writer.proposal_notes("ABCD1234")
+    tagged = {"key": "NOTE0001", "data": dict(note["data"], key="NOTE0001", itemType="note", parentItem="ABCD1234",
+                                               tags=[{"tag": ma.TAG_ACCEPT}])}
+    counts = ma.process_review(writer, FakeBackend({**items, "NOTE0001": tagged}), log=lambda m: None)
+    assert counts == {"accepted": 1, "rejected": 0}
+    assert raw["data"]["volume"] == "55" and not writer.proposal_notes("ABCD1234")
+
+
 def test_reject_tag_is_processed_on_the_next_run():
     raw = item(volume="56")
     items = {"ABCD1234": raw}

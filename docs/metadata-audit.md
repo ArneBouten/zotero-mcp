@@ -82,7 +82,7 @@ Items with proposals get the tag `metadata/review` and a note "Proposed metadata
 To decide:
 
 - **With a click (easiest):** the progress window's **Review** button (under "To do"), or in Zotero right-click › **Review suggested metadata** (selected papers, a collection, or from the Tools menu all papers waiting). A window lists each suggestion under its paper, with yours, the suggested value and why. **Accept** changes the field in Zotero at once; **Reject** keeps yours. Select a paper row to decide all its suggestions together; undecided ones stay waiting. In a terminal: `zotero-mcp metadata-review`.
-- **With a tag:** `metadata/accept` (apply all of that item's suggestions) or `metadata/reject` (discard them). This is carried out at the next check of any paper (Check & complete, Check metadata only, or a new paper's import), not at once.
+- **With a tag** on the paper or on its suggestions note: `metadata/accept` (apply all of that paper's suggestions) or `metadata/reject` (discard them). This is carried out at the next check of any paper (Check & complete, Check metadata only, or a new paper's import), not at once.
 - **Through Claude:** "show my metadata review list", "accept the volume and pages for item X, reject the title". This uses `zotero_metadata_review`.
 
 A rejected value is remembered (`~/.config/zotero-mcp/metadata/state.json`) and not proposed again. With the tag or through Claude, accepting only some fields counts the rest as rejected.
