@@ -627,6 +627,7 @@ def review_window(keys: list[str] | None = None, *, collection: str | None = Non
     tree.pack(side="left", fill="both", expand=True)
 
     changes: dict[str, object] = {}         # row id -> Change
+    loading = {"left": 1}                   # papers still to read; 1 until the count is known
     results: queue.Queue = queue.Queue()
     busy = {"n": 0}
 
@@ -649,8 +650,11 @@ def review_window(keys: list[str] | None = None, *, collection: str | None = Non
     def counted() -> None:
         n = len(changes)
         papers = len(tree.get_children())
-        head.configure(text=(f"{n} suggestion{'s' if n != 1 else ''} on {papers} paper{'s' if papers != 1 else ''}"
-                             if n else "Nothing left to review"))
+        text = (f"{n} suggestion{'s' if n != 1 else ''} on {papers} paper{'s' if papers != 1 else ''}"
+                if n else ("Loading…" if loading["left"] else "Nothing left to review"))
+        if loading["left"] and n:
+            text += f" · loading {loading['left']} more…"
+        head.configure(text=text)
         state = "normal" if n and not busy["n"] else "disabled"
         for b in (accept_btn, reject_btn):
             b.configure(state=state)
@@ -693,8 +697,23 @@ def review_window(keys: list[str] | None = None, *, collection: str | None = Non
                         messagebox.showerror("Review suggested metadata", item[2], parent=root)
                     else:
                         show(item[1])
-                        if not item[1]:
-                            head.configure(text="Nothing waiting for review")
+                    loading["left"] = 0
+                    counted()
+                    continue
+                if item[0] == "__total__":
+                    loading["left"] = item[1]
+                    counted()
+                    continue
+                if item[0] == "__row__":
+                    # Shown as soon as it is read: you can start while the rest loads.
+                    loading["left"] = max(0, loading["left"] - 1)
+                    if item[1] is not None:
+                        show([item[1]])
+                        if not tree.selection():
+                            first = next(iter(changes))
+                            tree.selection_set(first)
+                            tree.focus(first)
+                    counted()
                     continue
                 key, fields, done, error = item
                 busy["n"] -= 1
@@ -782,7 +801,14 @@ def review_window(keys: list[str] | None = None, *, collection: str | None = Non
 
     def load() -> None:
         try:
-            results.put(("__loaded__", session.load(keys, collection), None))
+            if not hasattr(session, "candidates"):
+                results.put(("__loaded__", session.load(keys, collection), None))
+                return
+            raws = session.candidates(keys, collection)
+            results.put(("__total__", len(raws)))
+            for raw in raws:
+                results.put(("__row__", session.load_one(raw)))
+            results.put(("__loaded__", [], None))
         except Exception as e:
             results.put(("__loaded__", [], f"The suggestions could not be read: {type(e).__name__}: {e}"))
 
@@ -793,6 +819,68 @@ def review_window(keys: list[str] | None = None, *, collection: str | None = Non
         root.attributes("-topmost", True)
         root.after(600, lambda: root.attributes("-topmost", False))
         root.mainloop()
+
+
+def reports_window(runs: list[dict] | None = None, folder=None) -> None:
+    """The latest runs' reports, newest first; double-click (or Open) opens a run's reports."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    from zotero_mcp import maintenance
+
+    runs = maintenance.recent_reports() if runs is None else runs
+    root = tk.Tk()
+    root.title("Reports — zotero-mcp")
+    root.geometry("760x420")
+    ui = _style(root, ttk)
+    root.configure(background=ui["bg"])
+    frame = ttk.Frame(root, padding=(18, 14, 18, 12), style="App.TFrame")
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text="Reports", style="Title.TLabel").pack(anchor="w")
+    ttk.Label(frame, text="The latest checks, newest first. Double-click one to open its report.",
+              style="Muted.TLabel").pack(anchor="w", pady=(4, 10))
+    buttons = ttk.Frame(frame, style="App.TFrame")
+    buttons.pack(side="bottom", fill="x", pady=(12, 0))
+    holder = ttk.Frame(frame, style="Card.TFrame", padding=1)
+    holder.pack(fill="both", expand=True)
+    tree = ttk.Treeview(holder, columns=["when", "what", "summary"], show="headings", style="Papers.Treeview")
+    for col, text, width in (("when", "When", 150), ("what", "What", 110), ("summary", "Result", 440)):
+        tree.heading(col, text=text, anchor="w")
+        tree.column(col, width=width, anchor="w", stretch=col == "summary")
+    tree.tag_configure("stripe", background=ui["stripe"])
+    tree.pack(fill="both", expand=True)
+    for i, run in enumerate(runs):
+        tree.insert("", "end", iid=str(i), values=(run["when"].strftime("%d-%m-%Y %H:%M"), run["what"],
+                                                   run["summary"]), tags=("stripe",) if i % 2 else ())
+    if runs:
+        tree.selection_set("0")
+
+    def open_selected(_event=None) -> None:
+        for iid in tree.selection():
+            for path in runs[int(iid)]["paths"]:
+                try:
+                    os.startfile(str(path))  # type: ignore[attr-defined]  # Windows
+                except Exception:
+                    pass
+
+    def open_folder() -> None:
+        try:
+            os.startfile(str(folder or runs[0]["paths"][0].parent))  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    ttk.Button(buttons, text="Open", command=open_selected, style="Accent.TButton").pack(side="left")
+    ttk.Button(buttons, text="Close", command=root.destroy).pack(side="right")
+    ttk.Button(buttons, text="Open folder", command=open_folder).pack(side="right", padx=(0, 8))
+    if not runs:
+        ttk.Label(holder, text="No reports yet: run Check & complete or Check metadata only first.",
+                  style="Muted.TLabel").place(relx=0.5, rely=0.5, anchor="center")
+    tree.bind("<Double-1>", open_selected)
+    tree.bind("<Return>", open_selected)
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(600, lambda: root.attributes("-topmost", False))
+    root.mainloop()
 
 
 def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mode: str = "fetch",

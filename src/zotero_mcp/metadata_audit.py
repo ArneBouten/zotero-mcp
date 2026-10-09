@@ -1853,19 +1853,29 @@ class ReviewSession:
             self._backend = library.get_library_backend()
         return self._backend
 
-    def load(self, keys: list[str] | None = None, collection: str | None = None) -> list[tuple[str, str, list[Change]]]:
+    def candidates(self, keys: list[str] | None = None, collection: str | None = None) -> list[dict]:
+        """The papers to look at (one quick request): the ones named, those in the collection
+        waiting for review, or every paper waiting for review."""
         if collection and not keys:
-            keys = [i.get("key") or i.get("data", {}).get("key") for i in self.backend.collection_items(collection) or []
+            return [i for i in self.backend.collection_items(collection) or []
                     if TAG_REVIEW in {t.get("tag") for t in i.get("data", {}).get("tags") or []}]
-            if not keys:
-                return []
-        out = []
-        for raw, changes in review_list(self.writer, self.backend, keys):
-            key = raw.get("key") or raw.get("data", {}).get("key")
-            self.raws[key] = raw
-            by_field = {c.field: c for c in changes}
-            out.append((key, ff.ItemInfo.from_zotero(raw).label, list(by_field.values())))
-        return out
+        if keys:
+            found = self.backend.get_items(keys) or {}
+            return [found[k] for k in keys if k in found]
+        return list(self.backend.list_items(None, limit=10000, tag=[TAG_REVIEW]) or [])
+
+    def load_one(self, raw: dict) -> tuple[str, str, list[Change]] | None:
+        """One paper's suggestions (its notes are read: one request), or None when it has none."""
+        key = raw.get("key") or raw.get("data", {}).get("key")
+        changes = [c for n in self.writer.proposal_notes(key) for c in parse_proposals(n["data"].get("note", ""))]
+        if not changes:
+            return None
+        self.raws[key] = raw
+        by_field = {c.field: c for c in changes}
+        return key, ff.ItemInfo.from_zotero(raw).label, list(by_field.values())
+
+    def load(self, keys: list[str] | None = None, collection: str | None = None) -> list[tuple[str, str, list[Change]]]:
+        return [row for raw in self.candidates(keys, collection) if (row := self.load_one(raw))]
 
     def decide(self, key: str, accept: list[str], reject: list[str]) -> tuple[int, int, int]:
         state = _load_state()

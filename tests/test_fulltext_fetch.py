@@ -273,15 +273,24 @@ def test_run_attaches_tags_and_reports(tmp_path, monkeypatch):
             [ff.TAG_NOT_FOUND, ff.TAG_CHECK_PDF, "fulltext/preprint", ff.TAG_PROOF]) \
         in writer.tags
     assert ("NOPE0001", [ff.TAG_NOT_FOUND], []) in writer.tags
+    # A manuscript is the best copy for now: the published version is looked for again after the
+    # retry period, not at the next run.
+    entry = ff._load_state()["ABCD1234"]
+    assert entry["bad_pdf"] == {"attachments": ["ATT00001"], "problem": "manuscript", "want_published": True}
+    assert ff.published_searched_recently(entry, 30) and not ff.published_searched_recently(entry, 0)
+    from zotero_mcp import maintenance
+
+    assert maintenance._published_wanted_later(["ABCD1234", "NOPE0001"]) == ["ABCD1234"]
     assert Path(report.report_path).exists()
     assert "attached" in report.markdown()
 
     # A second run leaves the not-found item alone until --retry.
     items, _ = ff.select_items(backend=_backend())
-    assert [i.key for i in items] == ["ABCD1234", "NOPE0001"]  # tags live in Zotero, not the fake
+    # ABCD1234 has its manuscript and waits for its published version; tags live in Zotero, not the fake.
+    assert [i.key for i in items] == ["NOPE0001"]
     b = _backend()
     b.items["NOPE0001"]["data"]["tags"] = [{"tag": ff.TAG_NOT_FOUND}]
-    assert [i.key for i in ff.select_items(backend=b)[0]] == ["ABCD1234"]
+    assert [i.key for i in ff.select_items(backend=b)[0]] == []
     assert [i.key for i in ff.select_items(backend=b, retry=True)[0]] == ["ABCD1234", "NOPE0001"]
 
 
@@ -484,8 +493,10 @@ def test_a_pdf_marked_wrong_is_replaced_and_a_manuscript_only_by_the_published_v
     assert not [t for t in writer.tags if ff.TAG_NOT_FOUND in t[1]]      # it keeps its manuscript, not "not found"
     assert ff.bad_pdf("ABCD1234")["attachments"] == ["BADPDF01"]
     version["v"] = "published"
+    # Searched in vain just now: a whole-library run waits; --retry (or naming the paper) searches again.
+    assert ff.select_items(backend=backend)[0] == []
     report = ff.run(steps=["open-access"], log=lambda m: None, settings=ff.Settings(host_delay=0), http=http,
-                    writer_factory=lambda: writer, backend=backend, workers=1)
+                    writer_factory=lambda: writer, backend=backend, workers=1, retry=True)
     assert report.results[0].status == "attached" and writer.trashed == [("ABCD1234", "BADPDF01")]
     assert ff.bad_pdf("ABCD1234") == {}
 
@@ -635,3 +646,65 @@ def test_the_fetchers_chrome_comes_forward_only_while_a_page_needs_you(monkeypat
     assert session.wait_if_blocked() is True
     assert calls == ["normal", "maximized", "minimized"]          # forward for the login, then back
     assert ff.Settings().browser_minimized is True
+
+
+# --- copies found by title must be the work itself -------------------------------
+
+
+def _title_item(**data):
+    base = {"key": "TITLE001", "data": {"key": "TITLE001", "itemType": "journalArticle", "date": "1994",
+            "title": "Motivation and strategy use in science: Individual differences and classroom effects",
+            "creators": [{"creatorType": "author", "lastName": "Anderman"}], "DOI": "10.1002/tea.3660310805"}}
+    base["data"].update(data)
+    return ff.ItemInfo.from_zotero(base)
+
+
+def test_a_copy_found_by_title_must_carry_the_title_itself_at_the_top():
+    item = _title_item()
+    web = ff.Candidate("https://school.org/goal_structures.pdf", "web search", None)
+    review = ("Annu. Rev. Psychol. 2006. 57:487-503 doi: 10.1146/annurev.psych.56.091103.070258 CLASSROOM GOAL "
+              "STRUCTURE, STUDENT MOTIVATION, AND ACADEMIC ACHIEVEMENT Judith L. Meece, Eric M. Anderman, Lynley H. "
+              "Anderman. Motivation, strategy use, science classrooms, individual differences and effects ... " * 3)
+    check = ff.check_pdf(item, {"pages": 17, "text": review}, web, 100_000)
+    assert not check.ok and "another work" in check.reason
+    # The same words without another DOI, but not printed as the title: not this work either.
+    words = ("A review of motivation in science classrooms: strategy use, individual differences, classroom "
+             "effects. Anderman reviews ... " * 40)
+    assert not ff.check_pdf(item, {"pages": 17, "text": words}, web, 100_000).ok
+    own = ("Journal of Research in Science Teaching 31(8) Motivation and Strategy Use in Science: Individual "
+           "Differences and Classroom Effects Lynley Hicks Anderman and Allison J. Young ... " * 5)
+    assert ff.check_pdf(item, {"pages": 17, "text": own}, web, 100_000).ok
+    # The item's own DOI near the top counts as much as its title (some PDFs lose the title).
+    garbled = ("Original research Anderman ... http://dx.doi.org/10.​1002/tea.​3660310805 motivation "
+               "strategy use science individual differences classroom effects ... " * 5)
+    assert ff.check_pdf(item, {"pages": 17, "text": garbled}, web, 100_000).ok
+    # A publisher's preview is never the paper.
+    preview = ff.Candidate("https://api.pageplace.de/preview/DT0400/preview-978.pdf", "web search", None)
+    assert ff.check_pdf(item, {"pages": 17, "text": own}, preview, 100_000).reason == "a publisher's preview"
+    # Found by DOI: the usual check (the publisher's own copy).
+    assert ff.check_pdf(item, {"pages": 17, "text": words}, ff.Candidate("https://pub.org/x.pdf", "Unpaywall", None,
+                                                                         by_identifier=True), 100_000).ok
+
+
+def test_recheck_moves_a_wrong_pdf_found_by_title_to_the_trash(tmp_path):
+    import json as _json
+
+    ff.state_dir().mkdir(parents=True, exist_ok=True)
+    rows = [{"key": "TITLE001", "status": "attached", "source": "web search", "url": "https://school.org/x.pdf",
+             "attachment_key": "ATTWRONG", "time": "2026-10-09T08:00:00"},
+            {"key": "TITLE001", "status": "attached", "source": "Unpaywall", "url": "https://pub.org/y.pdf",
+             "attachment_key": "ATTDOI01", "time": "2026-10-09T08:00:00"}]
+    (ff.state_dir() / "log.jsonl").write_text("\n".join(_json.dumps(r) for r in rows), encoding="utf-8")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF" + b"0" * 10_000)
+    raw = {"key": "TITLE001", "data": {"key": "TITLE001", "itemType": "journalArticle", "date": "1994", "tags": [],
+           "title": "Motivation and strategy use in science: Individual differences and classroom effects",
+           "creators": [{"creatorType": "author", "lastName": "Anderman"}]}}
+    writer = FakeWriter()
+    text = "CLASSROOM GOAL STRUCTURE ... motivation strategy use science individual differences classroom effects Anderman " * 30
+    totals = ff.recheck_attached(backend=FakeBackend({"TITLE001": raw}, {}), writer_factory=lambda: writer,
+                                 paths=lambda k, a: str(pdf), probe=lambda p: {"pages": 12, "text": text},
+                                 log=lambda m: None)
+    assert totals == {"checked": 1, "wrong": 1, "gone": 0}          # only the copy found by title
+    assert writer.trashed == [("TITLE001", "ATTWRONG")]
+    assert ff._load_state()["TITLE001"]["rejected_urls"] == ["https://school.org/x.pdf"]

@@ -89,6 +89,15 @@ zotero-mcp fetch-fulltext --from-downloads --items KEY1,KEY2   # PDFs from the l
   page range on the item, the PDF must have at least half those pages.
 - The item's title and first author appear on its first pages. A scan without
   a text layer is accepted only when it was found by the item's DOI or ISBN.
+- A copy found by its title (web search, Google Scholar, ResearchGate, your own
+  browser) must be this work: its title printed as such at the top of the first
+  page (or the item's DOI there), no other DOI on top, and not a publisher's
+  preview. Words alone are not enough: a review, a protocol or another paper by
+  the same author uses the same words.
+- `zotero-mcp fetch-fulltext --recheck [--since YYYY-MM-DD] [--dry-run]` checks
+  the PDFs attached by their title again with these rules; another work goes to
+  Zotero's trash, its paper loses the fetched tags and is searched again (that
+  link is not tried again).
 - The version is recorded in the attachment's title: `Full Text PDF
   (published version)`, `(accepted manuscript)`, `(preprint)` or `(version
   unknown)`. A note on the attachment gives the source and address.
@@ -98,6 +107,11 @@ zotero-mcp fetch-fulltext --from-downloads --items KEY1,KEY2   # PDFs from the l
 - `fulltext/fetched` on every item that got a PDF, plus
   `fulltext/accepted-manuscript` or `fulltext/preprint` when it is not the
   published version.
+- When only a preprint or accepted manuscript is found for a published article, it is attached
+  (tagged `fulltext/preprint` or `fulltext/accepted-manuscript`) and the published version is
+  looked for again after the retry period (30 days); once found, it replaces the preprint, which
+  goes to Zotero's trash. The same holds for a preprint or manuscript the metadata check finds
+  attached.
 - `fulltext/not-found` on items with no usable copy. They are skipped for 30
   days unless you pass `--retry` (or name the item).
 - Each run writes a report to `~/.config/zotero-mcp/fulltext/runs/`, and every

@@ -348,6 +348,54 @@ def title_in_text(title: str, text: str) -> float:
     return found / len(words)
 
 
+#: DOI prefixes of preprint servers: a preprint's own DOI is not "another work".
+_PREPRINT_DOI_PREFIXES = ("10.31234/", "10.31235/", "10.31219/", "10.35542/", "10.48550/", "10.1101/", "10.2139/",
+                          "10.21203/", "10.20944/", "10.31237/", "10.32388/", "10.5281/")
+_DOI_IN_TEXT = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)", re.I)
+
+
+def _norm_doi(doi: str) -> str:
+    return re.sub(r"[.,;:)\]]+$", "", doi.strip().lower())
+
+
+def title_near_top(title: str, text: str, limit: int = 6000) -> bool:
+    """The item's title (or its main title, before a colon, when that is long enough) as one phrase
+    near the start of the text, where a paper or book prints its own title. Words alone are not
+    enough: a review or a later paper by the same author uses the same words."""
+    hay = re.sub(r"\s+", " ", _fold(text))[:limit]
+    hay_nospace = hay.replace(" ", "")
+    phrases = [_fold(title)]
+    main = _fold(re.split(r"[:?.!]\s", title, maxsplit=1)[0])
+    if main != phrases[0] and len(main.split()) >= 3 and len(main) >= 15:
+        phrases.append(main)
+    for phrase in phrases:
+        if phrase and (f" {phrase} " in f" {hay} " or phrase.replace(" ", "") in hay_nospace):
+            return True
+    return False
+
+
+def doi_printed(item_doi: str, text: str, limit: int = 4000) -> bool:
+    """The item's own DOI near the start (where an article prints it, not further down a CV or
+    a reference list), also when the PDF breaks it with spaces or zero-width characters
+    ("10.\u200b1136/i njuryprev-2022-044530")."""
+    if not item_doi:
+        return False
+    flat = re.sub(r"[\s\u200b\u200c\u200d\u2060\ufeff]+", "", text[:limit]).lower()
+    return _norm_doi(item_doi) in flat
+
+
+def other_doi_on_top(item_doi: str, text: str, limit: int = 2500) -> str:
+    """A DOI printed near the start that is not the item's (nor a preprint server's): the PDF is
+    another work. Empty when there is none, or the item's DOI is there."""
+    if not item_doi:
+        return ""
+    found = [_norm_doi(d) for d in _DOI_IN_TEXT.findall(text[:limit])]
+    if not found or _norm_doi(item_doi) in found:
+        return ""
+    others = [d for d in found if not d.startswith(_PREPRINT_DOI_PREFIXES)]
+    return others[0] if others else ""
+
+
 @dataclass
 class ItemInfo:
     key: str
@@ -1177,6 +1225,18 @@ def check_pdf(item: ItemInfo, probe: dict | None, cand: Candidate, size: int) ->
     need = 0.6 if item.item_type in BOOK_TYPES else 0.75
     if share < need:
         return Check(False, f"title not found on its first pages ({share:.0%} of the words)")
+    if not cand.by_identifier:
+        # Found by its title (a web or Scholar search): it must be this work, not one with the same words.
+        if "/preview/" in cand.url.lower() or "preview" in urlparse(cand.url).path.lower().split("/")[-1]:
+            return Check(False, "a publisher's preview")
+        if not doi_printed(item.doi, text):
+            other = other_doi_on_top(item.doi, text)
+            if other:
+                return Check(False, f"another work: its first page shows DOI {other}")
+            limit = 8000 if item.item_type in BOOK_TYPES else 2500
+            meta_title = probe.get("meta_title") or ""
+            if not (title_near_top(item.title, text, limit) or title_similarity(item.title, meta_title) >= 0.9):
+                return Check(False, "the title is not printed as such on its first page (another work with similar words)")
     if item.first_author:
         author = _fold(item.first_author)
         hay = _haystack(text + " " + meta_text)
@@ -1347,7 +1407,9 @@ def find_pdf_for(
     """Walk the steps until a PDF passes the checks (and, with ``want_published``,
     is the published version). Returns its local path."""
     attempts: list[Attempt] = []
-    tried: set[str] = set()
+    # Links whose PDF turned out to be another work after it was attached are not tried again.
+    rejected = (_load_state().get(item.key) or {}).get("rejected_urls") or []
+    tried: set[str] = set(rejected) | {f"browser:{u}" for u in rejected}
     workdir = workdir or tempfile.mkdtemp(prefix="zmcp-fulltext-")
     for step in steps:
         n = 0  # the cap is per step, so a long open-access list never starves Scholar
@@ -1558,6 +1620,8 @@ def select_items(
             skipped.append(ItemResult(info.key, info.label, "skipped", reason="no title"))
             continue
         if not keys and not retry:
+            if published_searched_recently(state.get(info.key) or {}, (settings or Settings.load()).retry_days):
+                continue            # has a preprint or manuscript; its published version was looked for lately
             tags = {t.get("tag") for t in data.get("tags") or []}
             last = (state.get(info.key) or {}).get("last_attempt")
             if TAG_NOT_FOUND in tags and last:
@@ -1642,6 +1706,24 @@ def _save_item_state(key: str, value: dict) -> None:
         state = _load_state()
         state.setdefault(key, {}).update(value)
         _save_state(state)
+
+
+def _published_work(item: ItemInfo) -> bool:
+    """An article, chapter or paper that has a published version (not a preprint, report or thesis
+    item of its own)."""
+    return item.item_type in ("journalArticle", "conferencePaper", "bookSection")
+
+
+def published_searched_recently(entry: dict, days: int) -> bool:
+    """A paper whose attached PDF is a preprint or manuscript, searched for its published version
+    within ``days``: not searched again before then (the free search credits)."""
+    if not (entry.get("bad_pdf") or {}).get("want_published"):
+        return False
+    try:
+        last = _dt.datetime.fromisoformat(entry.get("last_attempt") or "")
+    except ValueError:
+        return False
+    return last > _dt.datetime.now() - _dt.timedelta(days=days)
 
 
 def mark_bad_pdf(item_key: str, attachment_key: str, problem: str, want_published: bool) -> None:
@@ -1884,6 +1966,12 @@ def run(
                         replaced = [a for a in bad.get("attachments") or [] if writer.trash_child(item.key, a)]
                     if bad:
                         clear_bad_pdf(item.key)
+                    if check.version in ("preprint", "accepted") and _published_work(item):
+                        # The best copy for now; the published version is looked for again later
+                        # (after the retry period), and replaces this one once found.
+                        mark_bad_pdf(item.key, res.attachment_key, "preprint" if check.version == "preprint"
+                                     else "manuscript", want_published=True)
+                        lines.append("  the published version is looked for again in a later run")
                     if replaced:
                         lines.append(f"  replaced the wrong PDF ({bad.get('problem', '')}); it is in Zotero's trash")
                     res.status = "attached"
@@ -1982,6 +2070,78 @@ SOURCES["browser"] = [src_browser]
 
 def scholar_search_url(item: ItemInfo) -> str:
     return "https://scholar.google.com/scholar?q=" + quote(f'"{item.title}" {item.first_author}'.strip())
+
+
+# ---------------------------------------------------------------------------
+# Checking again what was attached
+# ---------------------------------------------------------------------------
+
+#: Sources that find a PDF by its title (not by DOI or ISBN): their copies get the stricter check.
+TITLE_SOURCES = ("web search", "google scholar", "researchgate", "academia", "browser", "your own browser",
+                 "your download", "item's url field")
+
+
+def _found_by_title(source: str) -> bool:
+    return (source or "").lower().startswith(TITLE_SOURCES)
+
+
+def recheck_attached(*, since: str | None = None, apply: bool = True, log: Callable[[str], None] = print,
+                     backend=None, writer_factory=None, paths=None, probe=None) -> dict:
+    """Check again, with today's rules, the PDFs this fetcher attached by their title (web search,
+    Scholar, ResearchGate ...), since ``since`` (YYYY-MM-DD; default: all). A PDF that is another
+    work goes to Zotero's trash and its paper loses the fetched tags, so the next run searches again.
+    ``paths(item_key, attachment_key)`` and ``probe(path)`` can be given for tests."""
+    from zotero_mcp import library as _library
+
+    backend = backend or _library.get_library_backend()
+    if paths is None:
+        from zotero_mcp.local_db import get_serial_reader
+
+        reader = get_serial_reader()
+
+        def paths(item_key: str, att_key: str):
+            for att in reader.get_attachment_paths(item_key):
+                if att.get("key") == att_key and att.get("exists"):
+                    return str(att.get("resolved_path"))
+            return None
+    probe = probe or probe_pdf
+    try:
+        rows = [json.loads(line) for line in (state_dir() / "log.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    except OSError:
+        rows = []
+    rows = [r for r in rows if r.get("status") == "attached" and r.get("attachment_key")
+            and _found_by_title(r.get("source", "")) and (not since or (r.get("time") or "") >= since)]
+    latest = {}
+    for r in rows:                      # the last attachment per paper and attachment
+        latest[(r["key"], r["attachment_key"])] = r
+    items = backend.get_items(sorted({k for k, _a in latest})) or {}
+    writer = (writer_factory or (lambda: ZoteroWriter(log=None)))() if apply else None
+    totals = {"checked": 0, "wrong": 0, "gone": 0}
+    for (key, att), r in latest.items():
+        raw = items.get(key)
+        path = paths(key, att) if raw else None
+        if not path:
+            totals["gone"] += 1         # removed or replaced since
+            continue
+        info = ItemInfo.from_zotero(raw)
+        totals["checked"] += 1
+        found = probe(path)
+        check = check_pdf(info, found, Candidate(r.get("url") or "", r.get("source") or "", None), os.path.getsize(path))
+        if check.ok:
+            continue
+        totals["wrong"] += 1
+        log(f"  {info.label} [{key}]: {check.reason} ({r.get('source')})")
+        if writer is not None:
+            if writer.trash_child(key, att):
+                writer.set_tags(key, add=[], remove=[TAG_FETCHED] + list(VERSION_TAGS.values()))
+                before = set((_load_state().get(key) or {}).get("rejected_urls") or [])
+                _save_item_state(key, {"status": "wrong pdf removed", "last_attempt": "",
+                                       "rejected_urls": sorted(before | {r.get("url") or ""})})
+    log(f"Checked {totals['checked']} PDF(s) found by title: {totals['wrong']} another work"
+        + (", moved to Zotero's trash; their papers are searched again at the next run" if apply and totals["wrong"]
+           else "") + ".")
+    return totals
 
 
 # ---------------------------------------------------------------------------

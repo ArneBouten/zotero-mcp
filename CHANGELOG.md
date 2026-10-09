@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.55] - 2026-10-09
+
+### Fixed
+
+- **The web search attached other works** (a review with the same words, a protocol, a later paper by the same author, a CV, a publisher's preview): a PDF was accepted when most of the title's words and the first author were on its first pages. A copy found by its title (web search, Scholar, ResearchGate, your own browser) now needs its title printed as such at the top of the first page, or the item's DOI there; another DOI on top, or a preview, rejects it. Checked against every PDF attached so far: the Google Scholar ones pass, the wrong web-search ones do not.
+- `fetch-fulltext --recheck [--since DATE] [--dry-run]` checks the PDFs attached by their title again with these rules: another work goes to Zotero's trash, its paper loses the fetched tags and is searched again; that link is not tried again.
+
+### Added
+
+- **Reports** (Actions & Tags, Tools menu; `zotero-mcp reports`): a small window with the last 10 checks (when, what, result), newest first; double-click one to open its report and the PDF search's report of the same run, also after the progress window was closed or Zotero restarted. All reports are kept, in the shared `state` folder. The review window is available any time through Tools › Review suggested metadata.
+
+### Changed
+
+- **A preprint or manuscript the fetcher attaches is replaced by the published version later.** It stays tagged `fulltext/preprint` or `fulltext/accepted-manuscript`; the published version is looked for again after the retry period (30 days, not at every run, to spare the search credits) and replaces it when found. Before, only a preprint the metadata check recognised by its text was followed up.
+- **The review window fills while it loads**: each paper appears as soon as its suggestions are read ("loading 8 more…"), so you can start at once.
+
 ## [0.13.2+arne.54] - 2026-10-09
 
 ### Changed

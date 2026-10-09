@@ -30,6 +30,7 @@ py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2 --no-fetch  # metadata onl
 | **Check PDF (browser only)** | only the browser step, starting with the links an earlier run could not download | Papers an earlier run did not find |
 | **Merge certain duplicates** (Tools menu) | Zotero's own merge for papers that are certainly the same | See below |
 | **Review suggested metadata** (item, collection and Tools menu) | a window with the suggested changes: accept or reject each | See [metadata-audit.md](metadata-audit.md#the-review-list) |
+| **Reports** (Tools menu) | the last 10 checks with their result; double-click one to open its report | Any time, also after closing the window |
 
 The first four work on the selected papers (item menu) or a whole collection (collection menu). To add them all at once: Zotero → Settings → Actions & Tags → Import, and choose [`extras/zotero-actions/zotero-mcp-actions.yml`](../extras/zotero-actions/zotero-mcp-actions.yml) (importing it again later updates them). For the order above, set "Sort menu by" to Name in the same settings. The separate scripts are in the same folder. They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`; copy those two from [`extras/scripts/`](../extras/scripts/) to that folder once.
 

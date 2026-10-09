@@ -110,6 +110,7 @@ def _not_recently_missed(backend, keys: list[str]) -> list[str]:
     state = ff._load_state()
     cutoff = _dt.datetime.now() - _dt.timedelta(days=ff.Settings.load().retry_days)
     out = []
+    days = ff.Settings.load().retry_days
     for key in keys:
         entry = state.get(key) or {}
         last = entry.get("last_attempt")
@@ -117,9 +118,19 @@ def _not_recently_missed(backend, keys: list[str]) -> list[str]:
             missed = entry.get("status") == "not found" and bool(last) and _dt.datetime.fromisoformat(last) > cutoff
         except ValueError:
             missed = False
-        if not missed:
+        if not missed and not ff.published_searched_recently(entry, days):
             out.append(key)
     return out
+
+
+def _published_wanted_later(keys: list[str]) -> list[str]:
+    """The papers among ``keys`` that only wait for their published version and were searched for
+    it within the retry period: not searched again yet, also when they changed."""
+    from zotero_mcp import fulltext_fetch as ff
+
+    state = ff._load_state()
+    days = ff.Settings.load().retry_days
+    return [k for k in keys if ff.published_searched_recently(state.get(k) or {}, days)]
 
 
 def update_index(log: Callable[[str], None] = print) -> bool:
@@ -242,7 +253,8 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         summary["retractions"] = (retraction_run or check_retractions)(
             unchanged, backend=backend, log=log, progress=progress, writer=writer_factory())
     unknown = [a.key for a in audits if any("no registry record" in f for f in a.flags)]
-    fetch_keys = changed + _not_recently_missed(backend, unchanged)
+    waiting = set(_published_wanted_later(changed))
+    fetch_keys = [k for k in changed if k not in waiting] + _not_recently_missed(backend, unchanged)
 
     attached: set[str] = set()
     if fetch and keys:
@@ -290,6 +302,52 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         _save(state)
     summary["items"] = len(keys or [])
     return summary
+
+
+def recent_reports(limit: int = 10, within_minutes: int = 30) -> list[dict]:
+    """The latest runs' reports, newest first: {"when", "what", "summary", "paths"}. A PDF search's
+    report from the same run (within ``within_minutes`` after a metadata report) opens with it."""
+    import re
+
+    from zotero_mcp import fulltext_fetch as ff
+    from zotero_mcp import metadata_audit as ma
+
+    def files(folder: Path) -> list[Path]:
+        try:
+            return [p for p in folder.glob("*.md") if not p.name.startswith("bg-")]
+        except OSError:
+            return []
+
+    def summary(path: Path, pattern: str) -> str:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")[:3000]
+        except OSError:
+            return ""
+        m = re.search(pattern, text, re.M)
+        return m.group(1).strip() if m else ""
+
+    runs = []
+    for p in files(ma.meta_dir() / "runs"):
+        runs.append({"when": p.stat().st_mtime, "what": "Check", "paths": [p],
+                     "summary": summary(p, r"^\*\*(\d+ papers? checked)\.?\*\*")})
+    searches = []
+    for p in files(ff.state_dir() / "runs"):
+        searches.append({"when": p.stat().st_mtime, "what": "PDF search", "paths": [p],
+                         "summary": summary(p, r"^# Full-text fetch[^\n]*\n+([^\n#-][^\n]*)")})
+    runs.sort(key=lambda r: r["when"])
+    for search in sorted(searches, key=lambda r: r["when"]):
+        before = [r for r in runs if r["what"] == "Check" and 0 <= search["when"] - r["when"] <= within_minutes * 60
+                  and len(r["paths"]) == 1]
+        if before:
+            run = before[-1]
+            run["paths"].append(search["paths"][0])
+            run["summary"] += f", PDFs: {search['summary']}" if search["summary"] else ""
+        else:
+            runs.append(search)
+    runs.sort(key=lambda r: r["when"], reverse=True)
+    for r in runs:
+        r["when"] = _dt.datetime.fromtimestamp(r["when"])
+    return runs[:limit]
 
 
 # ---------------------------------------------------------------------------

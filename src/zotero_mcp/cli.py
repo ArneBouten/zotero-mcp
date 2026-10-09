@@ -897,6 +897,11 @@ def main():
                               help="Show a progress window (each paper and its status, a button for the browser step)")
     fetch_parser.add_argument("--workers", type=int, default=4,
                               help="Papers searched at the same time (default 4; the browser step takes one at a time)")
+    fetch_parser.add_argument("--recheck", action="store_true",
+                              help="Check again the PDFs attached by their title (web search, Scholar, ResearchGate) "
+                                   "with today's rules; another work goes to Zotero's trash (with --since YYYY-MM-DD, "
+                                   "only those attached since then; --dry-run only lists them)")
+    fetch_parser.add_argument("--since", help="With --recheck: only PDFs attached since this date (YYYY-MM-DD)")
     fetch_parser.add_argument("--from-downloads", action="store_true",
                               help="Attach the PDFs you saved to Downloads in your own browser (for --items; "
                                    "looks at the last 24 hours and waits up to 15 minutes for more)")
@@ -964,6 +969,13 @@ def main():
     maintain_parser.add_argument("--index", action="store_true",
                                  help="Then update the search index for new and changed items (as at Claude "
                                       "Desktop's start; skipped while another update runs)")
+
+    reports_parser = subparsers.add_parser(
+        "reports",
+        help="The latest checks' reports in a small window (double-click to open one)",
+    )
+    reports_parser.add_argument("--list", action="store_true", help="Print them instead of opening the window")
+    reports_parser.add_argument("--limit", type=int, default=10, help="How many (default 10)")
 
     share_parser = subparsers.add_parser(
         "share-state",
@@ -1465,6 +1477,13 @@ def main():
         setup_zotero_environment()
         from zotero_mcp import fulltext_fetch
 
+        if args.recheck:
+            try:
+                fulltext_fetch.recheck_attached(since=args.since, apply=not args.dry_run)
+            except Exception as e:
+                print(f"Error: {e}")
+                sys.exit(1)
+            return
         if args.browser_login:
             from zotero_mcp import fulltext_browser
 
@@ -1620,6 +1639,25 @@ def main():
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)
+
+    elif args.command == "reports":
+        from zotero_mcp import maintenance
+
+        runs = maintenance.recent_reports(limit=args.limit)
+        if not args.list:
+            try:
+                from zotero_mcp import fulltext_window
+
+                fulltext_window.reports_window(runs)
+                return
+            except ImportError:
+                pass
+        if not runs:
+            print("No reports yet: run Check & complete or Check metadata only first.")
+        for run in runs:
+            print(f"{run['when']:%d-%m-%Y %H:%M}  {run['what']:<10}  {run['summary']}")
+            for path in run["paths"]:
+                print(f"    {path}")
 
     elif args.command == "share-state":
         from zotero_mcp import shared_state
