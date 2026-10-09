@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.59] - 2026-10-09
+
+### Fixed
+
+- **Wrong PDFs that still got through** (found by checking every PDF of the 09-10-2026 run by hand): a chapter that cites the book ("Bandura, A. (1986). Social foundations of …"), a paper whose title merely contains a short title ("What is conscientiousness …" for the chapter "Conscientiousness"), another author's chapter with the same title, a book's front matter, a publisher's preview, a supplement, a three-page book review and a reading list. Now:
+  - a title right after a year is a citation, not the title;
+  - a book's or chapter's title, and any title of five words or fewer, must stand on lines of its own near the top;
+  - an article's first author must be in the byline at the top, not only cited further down (affiliation letters stuck to the name still count);
+  - previews, front matter, tables of contents and sample chapters (by their address), supplements, and "books" of fewer than 10 pages are never attached;
+  - a PDF the item's URL field points to directly is checked like one found by title.
+  Replayed on all 93 PDFs the fetcher attached: every wrong one is rejected, every right one still passes.
+- A PDF the fetcher attached and you moved to the trash is not attached again: its link is remembered as wrong at the next run.
+- When a wrong PDF is replaced, its "PDF to check" note goes too; a `fulltext/check-pdf` finding whose PDF is gone is cleared at the next check.
+- Metadata check: BMJ's habit of registering an article as "<title>: Table 1" no longer reads as a table's DOI, and an Oxford Handbooks chapter (registered as a "book" under the chapter's own title) no longer reads as the whole book's DOI. A DOI ending in `.supp`, `.t001` and the like is still a part's.
+
 ## [0.13.2+arne.58] - 2026-10-09
 
 ### Changed

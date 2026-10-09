@@ -469,10 +469,24 @@ def test_a_doi_alias_is_left_alone_and_large_year_gaps_are_only_proposed():
 
 
 def test_a_doi_for_a_table_or_the_whole_book_compares_nothing():
-    a, _ = audit(item(), _rec(title=["Self-determination theory and the facilitation of intrinsic motivation: Table 1"]))
+    a, _ = audit(item(), _rec(type="component", title=["Table 1"]))
+    assert not a.changes and "table, figure" in a.flags[0]
+    a, _ = audit(item(), _rec(title=["Effects of rewards: Table 2"]))
     assert not a.changes and "table, figure" in a.flags[0]
     a, _ = audit(item(itemType="bookSection", bookTitle=""), _rec(type="book", title=["Handbook of Motivation"]))
     assert not a.changes and "whole book" in a.flags[0]
+
+
+def test_registry_quirks_are_not_taken_for_another_work():
+    # BMJ registers the article under "<its title>: Table 1"; Oxford Handbooks Online registers
+    # each chapter as a "book" under the chapter's own title.
+    a, _ = audit(item(), _rec(title=["Self-determination theory and the facilitation of intrinsic motivation: Table 1"]))
+    assert not any("table, figure" in f for f in a.flags)
+    chapter = item(itemType="bookSection", bookTitle="The Oxford Handbook of Exercise Psychology")
+    a, _ = audit(chapter, _rec(type="book", title=["Self-determination theory and the facilitation of intrinsic "
+                                                   "motivation"]))
+    assert not any("whole book" in f for f in a.flags)
+    assert ma._kind_mismatch("journalArticle", ma.Record(source="Crossref", doi="10.1037/dev0000997.supp"))
 
 
 def test_chapter_prefixes_and_editions_are_not_title_differences():

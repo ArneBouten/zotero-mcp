@@ -89,11 +89,25 @@ zotero-mcp fetch-fulltext --from-downloads --items KEY1,KEY2   # PDFs from the l
   page range on the item, the PDF must have at least half those pages.
 - The item's title and first author appear on its first pages. A scan without
   a text layer is accepted only when it was found by the item's DOI or ISBN.
+- Never a part of the work: a preview, front matter, a table of contents or a
+  sample chapter (by its address), a supplement ("Supplementary Online
+  Content" at the top), or a "book" of fewer than 10 pages (a review, a reading
+  list, a preview).
 - A copy found by its title (web search, Google Scholar, ResearchGate, your own
-  browser) must be this work: its title printed as such at the top of the first
-  page (or the item's DOI there), no other DOI on top, and not a publisher's
-  preview. Words alone are not enough: a review, a protocol or another paper by
-  the same author uses the same words.
+  browser, or a PDF the item's URL field points to) must be this work: its title
+  printed as such at the top of the first page (or the item's DOI there), no
+  other DOI on top. Words alone are not enough: a review, a protocol or another
+  paper by the same author uses the same words. Also:
+  - a title that only follows a year, as in a reference ("Bandura, A. (1986).
+    Social foundations of …"), is a citation, not the title;
+  - a book's or chapter's title stands on lines of its own near the top, and so
+    does a short title (five words or fewer, "Conscientiousness"): inside a
+    sentence or a longer title it belongs to another work;
+  - an article's first author is in the byline at the top, not only cited
+    further down.
+- A PDF the fetcher attached that you then move to the trash is not attached
+  again: its link is remembered as wrong at the next run. When a wrong PDF is
+  replaced, the "PDF to check" note about it goes too.
 - `zotero-mcp fetch-fulltext --recheck [--since YYYY-MM-DD] [--dry-run]` checks
   the PDFs attached by their title again with these rules; another work goes to
   Zotero's trash, its paper loses the fetched tags and is searched again (that

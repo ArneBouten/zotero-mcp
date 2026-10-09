@@ -67,6 +67,8 @@ VERSION_TAGS = {"accepted": "fulltext/accepted-manuscript", "preprint": "fulltex
 TAG_PROOF = "fulltext/proof"
 #: A chapter's item with the whole book attached, when the chapter could not be cut out.
 TAG_WHOLE_BOOK = "fulltext/whole-book"
+#: The note the metadata audit adds with TAG_CHECK_PDF ("PDF to check (date): ...").
+_FINDING_NOTE = re.compile(r"\s*(Attached )?PDF to check\b")
 
 
 def _old_version_tags(version: str | None) -> list[str]:
@@ -369,7 +371,13 @@ def title_near_top(title: str, text: str, limit: int = 6000) -> bool:
     if main != phrases[0] and len(main.split()) >= 3 and len(main) >= 15:
         phrases.append(main)
     for phrase in phrases:
-        if phrase and (f" {phrase} " in f" {hay} " or phrase.replace(" ", "") in hay_nospace):
+        if not phrase:
+            continue
+        spaced = f" {hay} "
+        at = [m.start() for m in re.finditer(re.escape(f" {phrase} "), spaced)]
+        if any(not _cited_at(spaced, i) for i in at):
+            return True
+        if not at and phrase.replace(" ", "") in hay_nospace:
             return True
     # A scan's OCR misreads letters ("Pensistence", "$ontnol"): the title nearly letter for letter.
     words = hay.split()
@@ -380,8 +388,60 @@ def title_near_top(title: str, text: str, limit: int = 6000) -> bool:
         for i in range(0, max(1, len(words) - n + 1)):
             window = " ".join(words[i:i + n])
             if difflib.SequenceMatcher(None, phrase, window, autojunk=False).ratio() >= 0.9:
-                return True
+                # A near match one word off a cited title ("1986 social foundations of ...") is cited too.
+                around = " ".join(words[max(0, i - 4):i + 2])
+                if not re.search(r"\b(1[5-9]|20)\d\d[a-z]?\b", around):
+                    return True
     return False
+
+
+_YEAR_BEFORE = re.compile(r"\b(1[5-9]|20)\d\d[a-z]?\s*$")
+
+
+def _cited_at(hay: str, i: int) -> bool:
+    """The title at position ``i`` of the folded text follows a year, as in a reference
+    ("Bandura, A. (1986). Social foundations of ..."): the PDF cites the work, it is not it."""
+    return bool(_YEAR_BEFORE.search(hay[max(0, i - 25):i + 1]))
+
+
+def title_as_line(title: str, text: str, limit: int = 6000) -> bool:
+    """A short title ("Conscientiousness", "The health belief model") printed as a title: on a
+    line (or two or three lines) of its own, give or take a chapter number. Inside a sentence or
+    another, longer title ("What is conscientiousness and how can it be assessed?") it is not."""
+    phrase = _fold(title)
+    main = _fold(re.split(r"[:?.!]\s", title, maxsplit=1)[0])
+    targets = {p for p in (phrase, main) if p}
+    lines = [_fold(x) for x in text[:limit].splitlines()]
+    lines = [x for x in lines if x]
+    for i in range(len(lines)):
+        for n in (1, 2, 3, 4, 5):
+            window = " ".join(lines[i:i + n])
+            for t in targets:
+                if f" {t} " not in f" {window} ":
+                    continue
+                extra = len(window.split()) - len(t.split())
+                if extra <= 3:
+                    return True
+    return False
+
+
+def author_near_top(surname: str, text: str, meta_author: str = "", limit: int = 3000) -> bool:
+    """The first author's surname in the byline area (the first page's top), or the PDF's
+    author field: a paper that merely cites them names them further down."""
+    name = _fold(surname).split()
+    if not name:
+        return True
+    # Affiliation letters stick to the name ("Catrin Rodea,*" for Rode, affiliation a).
+    pattern = re.compile(rf" {re.escape(name[-1])}[a-z]{{0,2}} ")
+    return bool(pattern.search(_haystack(text[:limit])) or pattern.search(_haystack(meta_author)))
+
+
+#: Links to a part of a work, never the work: previews, front matter, tables of contents, samples.
+_PART_URL = re.compile(r"/preview/|[-_]frm\.pdf|/preface/|frontmatter|front[-_]matter|[/_-]toc\.pdf|"
+                       r"sample[-_]?chapter|/excerpt", re.I)
+#: The first words of a supplement to a paper (its online appendix), not the paper.
+_SUPPLEMENT_START = re.compile(r"^\s*(supplementary|supplemental|online supplement|supporting information|"
+                               r"electronic supplementary|appendix\b)", re.I | re.M)
 
 
 def doi_printed(item_doi: str, text: str, limit: int = 4000) -> bool:
@@ -948,11 +1008,14 @@ def src_publisher(item: ItemInfo, http: Http, settings: Settings, budget: Budget
         if item.url.startswith("http"):
             page = http.fetch(item.url, max_bytes=8 * 1024 * 1024)
             if page.is_pdf:
-                yield Candidate(page.url, "item's URL field", None, by_identifier=True)
+                # A link someone saved, not an identifier: checked like a link found by title.
+                yield Candidate(page.url, "item's URL field", None, by_identifier=False)
             elif page.status == 200:
                 pdf = _pdf_link_in_page(page)
                 if pdf:
-                    yield Candidate(pdf, "item's URL field, PDF link on that page", None, by_identifier=True, referer=page.url)
+                    # The PDF link on the item's own landing page: the work's page, as good as a DOI.
+                    yield Candidate(pdf, "item's URL field, PDF link on that page", None, by_identifier=True,
+                                    referer=page.url)
         return
     doi = item.doi
     page = http.fetch(f"https://doi.org/{quote(doi, safe='/')}", max_bytes=8 * 1024 * 1024)
@@ -1225,6 +1288,12 @@ def check_pdf(item: ItemInfo, probe: dict | None, cand: Candidate, size: int) ->
         return Check(False, f"only {pages} of about {expected} pages (preview or cover page)")
     if pages <= 2 and any(m in low for m in _PAYWALL_MARKERS):
         return Check(False, "a paywall or preview page")
+    if _PART_URL.search(cand.url):
+        return Check(False, "a preview, front matter or sample, not the whole work")
+    if _SUPPLEMENT_START.search(text[:300]):
+        return Check(False, "a supplement to the paper, not the paper")
+    if item.item_type == "book" and 0 < pages < 10:
+        return Check(False, f"only {pages} pages: not the book (a review, a list or a preview)")
     if len(text.strip()) < 200:
         # A scan without a text layer cannot be checked. Accept it only when
         # the address came from the item's own identifier.
@@ -1247,6 +1316,17 @@ def check_pdf(item: ItemInfo, probe: dict | None, cand: Candidate, size: int) ->
             meta_title = probe.get("meta_title") or ""
             if not (title_near_top(item.title, text, limit) or title_similarity(item.title, meta_title) >= 0.9):
                 return Check(False, "the title is not printed as such on its first page (another work with similar words)")
+            main = re.split(r"[:?.!]\s", item.title, maxsplit=1)[0]
+            if title_similarity(item.title, meta_title) < 0.9:
+                if item.item_type in BOOK_TYPES and not title_as_line(item.title, text, 4000):
+                    # A book's or chapter's title page prints the title on lines of its own; a
+                    # paper or a list that mentions the book has it inside a sentence or a reference.
+                    return Check(False, "the title appears only inside other text (a work that mentions it)")
+                if len(_fold(main).split()) <= 5 and not title_as_line(item.title, text, 3000):
+                    return Check(False, "its short title appears only inside other text (another work)")
+            if (item.first_author and item.item_type not in BOOK_TYPES
+                    and not author_near_top(item.first_author, text, probe.get("meta_author") or "")):
+                return Check(False, f"first author ({item.first_author}) not in its byline (another work citing them)")
     if item.first_author:
         author = _fold(item.first_author)
         hay = _haystack(text + " " + meta_text)
@@ -1322,6 +1402,20 @@ class ZoteroWriter:
         except Exception as e:
             self.ctx.info(f"Could not move {attachment_key} to the trash: {e}")
             return False
+
+    def clear_findings(self, key: str) -> int:
+        """Trash the "PDF to check" notes of an earlier finding: the PDF they were about is
+        replaced or gone, so they no longer say anything true."""
+        n = 0
+        try:
+            for child in self.zot.children(key) or []:
+                d = child.get("data", {})
+                if d.get("itemType") == "note" and _FINDING_NOTE.match(re.sub(r"<[^>]+>", "", d.get("note") or "")):
+                    ok, _detail = self._helpers.trash_item(self.zot, child)
+                    n += bool(ok)
+        except Exception as e:
+            self.ctx.info(f"Could not remove the old 'PDF to check' note of {key}: {e}")
+        return n
 
     def set_tags(self, key: str, add: Iterable[str] = (), remove: Iterable[str] = ()) -> None:
         add, remove = list(add), set(remove)
@@ -1613,6 +1707,7 @@ def select_items(
     state = _load_state()
     cutoff = _dt.datetime.now() - _dt.timedelta(days=(settings or Settings.load()).retry_days)
     chosen: list[ItemInfo] = []
+    forgotten: list[str] = []
     for raw in items:
         info = ItemInfo.from_zotero(raw)
         data = raw.get("data", raw)
@@ -1626,6 +1721,13 @@ def select_items(
             if keys:
                 skipped.append(ItemResult(info.key, info.label, "skipped", reason="already has a PDF or EPUB"))
             continue
+        entry = state.get(info.key) or {}
+        all_keys = {c.get("key") or c.get("data", {}).get("key") for c in children.get(info.key, [])}
+        if (entry.get("attachment_key") and entry.get("attached_url") and entry.get("status") == "attached"
+                and entry["attachment_key"] not in all_keys):
+            # The PDF this fetcher attached is gone: moved to the trash by hand as the wrong one.
+            # Its link is not tried again.
+            forgotten.append(info.key)
         if not info.title:
             skipped.append(ItemResult(info.key, info.label, "skipped", reason="no title"))
             continue
@@ -1641,9 +1743,33 @@ def select_items(
                 except ValueError:
                     pass
         chosen.append(info)
+    if forgotten:
+        _reject_removed_attachments(forgotten)
     if limit:
         chosen = chosen[:limit]
     return chosen, skipped
+
+
+def _reject_removed_attachments(keys: list[str]) -> None:
+    """Remember the links of PDFs this fetcher attached and someone then removed, so the same
+    wrong file is not attached again."""
+    with _STATE_LOCK:
+        state = _load_state()
+        for key in keys:
+            entry = state.get(key) or {}
+            url = entry.get("attached_url")
+            if not url:
+                continue
+            entry["rejected_urls"] = sorted(set(entry.get("rejected_urls") or []) | {url})
+            if not entry.get("bad_pdf"):
+                # Searched again at the next run. (A preprint kept while its published version is
+                # looked for keeps that schedule.)
+                entry["status"] = "wrong pdf removed"
+                entry["last_attempt"] = ""
+            entry.pop("attached_url", None)
+            entry.pop("attachment_key", None)
+            state[key] = entry
+        _save_state(state)
 
 
 @dataclass
@@ -1853,6 +1979,8 @@ def watch_downloads(keys: list[str], *, timeout: float = 900, folder: Path | Non
                 writer.set_tags(key, add=tags, remove=[TAG_NOT_FOUND, TAG_CHECK_PDF] + _old_version_tags(check.version))
                 for a in bad_pdf(key).get("attachments") or []:
                     writer.trash_child(key, a)
+                if bad_pdf(key) and hasattr(writer, "clear_findings"):
+                    writer.clear_findings(key)
                 clear_bad_pdf(key)
                 _save_item_state(key, {"last_attempt": _dt.datetime.now().isoformat(timespec="seconds"),
                                        "status": "attached", "blocked": []})
@@ -1974,6 +2102,8 @@ def run(
                         writer.set_tags(item.key, add=tags,
                                         remove=[TAG_NOT_FOUND, TAG_CHECK_PDF] + _old_version_tags(check.version))
                         replaced = [a for a in bad.get("attachments") or [] if writer.trash_child(item.key, a)]
+                        if bad and hasattr(writer, "clear_findings"):
+                            writer.clear_findings(item.key)
                     if bad:
                         clear_bad_pdf(item.key)
                     if check.version in ("preprint", "accepted") and _published_work(item):
@@ -2023,7 +2153,9 @@ def run(
             notify({"key": item.key, "label": item.label, "status": "error", "detail": res.reason})
         if not dry_run and (final or res.status != "not found"):
             _save_item_state(item.key, {"last_attempt": _dt.datetime.now().isoformat(timespec="seconds"),
-                                        "status": res.status, **({"blocked": []} if res.status == "attached" else {})})
+                                        "status": res.status,
+                                        **({"blocked": [], "attached_url": res.url,
+                                            "attachment_key": res.attachment_key} if res.status == "attached" else {})})
             _append_log(res)
         with log_lock:
             for line in lines:

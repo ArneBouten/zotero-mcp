@@ -861,9 +861,12 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
         if problem is not None:
             audit.attachment = problem
             audit.flags.append(f"attachment: {problem.describe()}")
-        elif (ff.TAG_CHECK_PDF in audit.tags and any((p.get("text") or "").strip() for p in pdfs)
+        elif (ff.TAG_CHECK_PDF in audit.tags
+              and (not pdfs or any((p.get("text") or "").strip() for p in pdfs))
               and "attachment not checked" not in " ".join(audit.flags)):
-            audit.attachment_ok = True      # an earlier run's finding no longer holds (or the PDF was replaced)
+            # An earlier run's finding no longer holds: the PDF was replaced, passes now, or is
+            # gone (moved to the trash by hand), so there is nothing left to check.
+            audit.attachment_ok = True
     return audit
 
 
@@ -946,7 +949,7 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
         _type_flags(audit, data)
         return audit
     audit.reference = f"{ref.source} (by {_BY.get(ref.by, ref.by)})"
-    if (problem := _kind_mismatch(info.item_type, ref)):
+    if (problem := _kind_mismatch(info.item_type, ref, info.title)):
         audit.flags.append(problem)
         _type_flags(audit, data)
         return audit
@@ -1326,15 +1329,28 @@ def _from_pdf_only(audit: ItemAudit, data: dict, info: ff.ItemInfo, reading: dic
             audit.changes.append(Change(name, old, new, "propose", [source], f"the {what} says otherwise"))
 
 
-def _kind_mismatch(item_type: str, ref: Record) -> str | None:
+#: A DOI with a part's suffix: a table, figure or supplement of a paper (".t001", ".s002", ".supp").
+_PART_DOI = re.compile(r"(\.(t|f|g|s|sd|tbl|fig)\d+|\.supp\w*|/(table|figure|fig|tbl)[-_]?\d+)$", re.I)
+_PART_TITLE = re.compile(r":\s*(?:table|figure|fig\.|supplementary\b.*)\s*\d*$", re.I)
+
+
+def _kind_mismatch(item_type: str, ref: Record, title: str = "") -> str | None:
     """A DOI that belongs to something else than the item: nothing is compared then."""
     kind = (ref.kind or "").lower()
     if (ref.doi or "").startswith("10.5860/choice"):
         return "the DOI is a CHOICE review of the book, not the book (check the DOI)"
-    if kind == "component" or re.search(r":\s*(?:table|figure|fig\.|supplementary\b.*)\s*\d*$", ref.title or "", re.I):
+    if kind == "component" or _PART_DOI.search(ref.doi or ""):
         return "the DOI points to a table, figure or supplement, not the work itself (check the DOI)"
+    if _PART_TITLE.search(ref.title or ""):
+        # Some publishers (BMJ) register the article itself under "<its title>: Table 1": the
+        # article's DOI then, not a table's.
+        own = _PART_TITLE.sub("", ref.title or "")
+        if not (title and title_match(title, own) >= 0.9):
+            return "the DOI points to a table, figure or supplement, not the work itself (check the DOI)"
     if item_type == "bookSection" and kind in ("book", "edited-book", "monograph", "reference-book"):
-        return "the DOI is the whole book's, not this chapter's (check the DOI)"
+        # Oxford Handbooks Online registers each chapter as a "book" under the chapter's title.
+        if not (title and title_match(title, ref.title or "") >= 0.9):
+            return "the DOI is the whole book's, not this chapter's (check the DOI)"
     if item_type == "journalArticle" and kind in ("book", "edited-book", "monograph", "book-chapter", "dataset"):
         return f"the DOI is registered as a {kind}, not a journal article (check the DOI or the item type)"
     return None
@@ -2270,7 +2286,8 @@ def run(
                         for old_note in writer.finding_notes(audit.key):
                             writer.trash(old_note)
                         ff.clear_bad_pdf(audit.key)
-                        log("    -> the attached PDF is right after all; tag fulltext/check-pdf and its note removed")
+                        log("    -> the earlier finding no longer holds (PDF right, replaced or removed); "
+                            "tag fulltext/check-pdf and its note removed")
                     except Exception as e:
                         log(f"    -> could not remove the check-pdf tag: {type(e).__name__}: {e}")
             notify(audit_event(audit, applied=writer is not None))

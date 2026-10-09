@@ -680,7 +680,7 @@ def test_a_copy_found_by_title_must_carry_the_title_itself_at_the_top():
     assert ff.check_pdf(item, {"pages": 17, "text": garbled}, web, 100_000).ok
     # A publisher's preview is never the paper.
     preview = ff.Candidate("https://api.pageplace.de/preview/DT0400/preview-978.pdf", "web search", None)
-    assert ff.check_pdf(item, {"pages": 17, "text": own}, preview, 100_000).reason == "a publisher's preview"
+    assert ff.check_pdf(item, {"pages": 17, "text": own}, preview, 100_000).reason.startswith("a preview")
     # Found by DOI: the usual check (the publisher's own copy).
     assert ff.check_pdf(item, {"pages": 17, "text": words}, ff.Candidate("https://pub.org/x.pdf", "Unpaywall", None,
                                                                          by_identifier=True), 100_000).ok
@@ -719,3 +719,136 @@ def test_a_scans_misread_title_still_counts():
             "concept of Flow by Karen Denise Kidd Thesis submitted to the Faculty ... " * 4)
     assert ff.title_near_top(item.title, scan)
     assert not ff.title_near_top(item.title, "Mastery motivation among students of the department of history " * 20)
+
+
+# --- wrong copies seen in the 09-10-2026 run (arne.59) -------------------------------------
+
+
+def _book(title, author, **data):
+    base = {"key": "BOOK0001", "data": {"key": "BOOK0001", "itemType": "book", "date": "1986", "title": title,
+            "creators": [{"creatorType": "author", "lastName": author}]}}
+    base["data"].update(data)
+    return ff.ItemInfo.from_zotero(base)
+
+
+WEB = ff.Candidate("https://somewhere.edu/readings/x.pdf", "web search", None)
+
+
+def test_a_title_only_cited_is_not_the_work():
+    item = _book("Social Foundations of Thought and Action: A Social Cognitive Theory", "Bandura")
+    chapter = ("SOCIAL COGNITIVE THEORY Albert Bandura Stanford University Bandura, A. (1989). Social cognitive "
+               "theory. In R. Vasta (Ed.), Annals of child development. Many theories ... see Bandura, A. (1986). "
+               "Social foundations of thought and action: A social cognitive theory. Englewood Cliffs ... " * 3)
+    assert not ff.title_near_top(item.title, chapter, 8000)
+    assert not ff.check_pdf(item, {"pages": 85, "text": chapter}, WEB, 900_000).ok
+    title_page = ("SOCIAL FOUNDATIONS\nOF THOUGHT AND ACTION\nA Social Cognitive Theory\nALBERT BANDURA\n"
+                  "Stanford University\nPRENTICE-HALL, Englewood Cliffs, New Jersey\n" + "Human agency ... " * 50)
+    assert ff.check_pdf(item, {"pages": 617, "text": title_page}, WEB, 9_000_000).ok
+
+
+def test_a_short_title_must_stand_as_a_title():
+    raw = {"key": "CHAP0001", "data": {"key": "CHAP0001", "itemType": "bookSection", "date": "2009",
+           "title": "Conscientiousness", "creators": [{"creatorType": "author", "lastName": "Roberts"}]}}
+    item = ff.ItemInfo.from_zotero(raw)
+    other = ("Developmental Psychology 2012\nWhat Is Conscientiousness and How Can It Be Assessed?\n"
+             "Brent W. Roberts Carl Lejuez\n" + "Conscientiousness is one of the five broad traits of personality. " * 30)
+    check = ff.check_pdf(item, {"pages": 17, "text": other}, WEB, 400_000)
+    assert not check.ok and "inside other text" in check.reason
+    own = "CHAPTER 25\nConscientiousness\nBrent W. Roberts, Joshua J. Jackson\nconscientiousness is ... " * 3
+    assert ff.check_pdf(item, {"pages": 17, "text": own}, WEB, 400_000).ok
+    raw["data"]["title"] = "The health belief model"
+    raw["data"]["creators"] = [{"creatorType": "author", "lastName": "Champion"}]
+    item = ff.ItemInfo.from_zotero(raw)
+    paper = ("Running head: HEALTH BELIEF MODEL AND BREAST SELF-EXAMINATION\nAn application of the health belief "
+             "model to the prediction of breast self-examination\nPaul Norman Kate Brain ... Champion (1984) ... " * 3)
+    assert not ff.check_pdf(item, {"pages": 23, "text": paper}, WEB, 400_000).ok
+
+
+def test_the_first_author_must_be_in_the_byline():
+    raw = {"key": "ART00001", "data": {"key": "ART00001", "itemType": "journalArticle", "date": "2003",
+           "title": "Development of play", "creators": [{"creatorType": "author", "lastName": "Pellegrini"}]}}
+    item = ff.ItemInfo.from_zotero(raw)
+    lillard = ("CHAPTER 11\nThe Development of Play\nANGELINE S. LILLARD\nINTRODUCTION 425 " + "play " * 700
+               + " as Pellegrini (2009) argued ...")
+    check = ff.check_pdf(item, {"pages": 44, "text": lillard}, WEB, 900_000)
+    assert not check.ok and "byline" in check.reason
+    own = "Development of play\nAnthony D. Pellegrini and Peter K. Smith\n" + "play " * 700
+    assert ff.check_pdf(item, {"pages": 20, "text": own}, WEB, 900_000).ok
+
+
+def test_parts_supplements_and_tiny_books_are_not_the_work():
+    item = _title_item()
+    own = ("Journal of Research in Science Teaching 31(8) Motivation and Strategy Use in Science: Individual "
+           "Differences and Classroom Effects Lynley Hicks Anderman and Allison J. Young ... " * 5)
+    doi = ff.Candidate("https://pub.org/x.pdf", "publisher", None, by_identifier=True)
+    assert ff.check_pdf(item, {"pages": 17, "text": own}, doi, 100_000).ok
+    for url in ("https://psycnet.apa.org/fulltext/2001-18027-000-FRM.pdf",
+                "https://sk.sagepub.com/book/mono/preview/planning-focus-groups.pdf",
+                "https://www.pearsonhighered.com/assets/preface/0/1/3/4/0134790545.pdf"):
+        part = ff.Candidate(url, "publisher", None, by_identifier=True)
+        assert not ff.check_pdf(item, {"pages": 17, "text": own}, part, 100_000).ok, url
+    supp = "Supplementary Online Content\n" + own
+    assert "supplement" in ff.check_pdf(item, {"pages": 33, "text": supp}, doi, 100_000).reason
+    book = _book("Designing and Conducting Mixed Methods Research", "Creswell")
+    review = "Designing and Conducting Mixed Methods Research : John W. Creswell ... book review " * 10
+    assert not ff.check_pdf(book, {"pages": 3, "text": review}, doi, 100_000).ok
+
+
+def test_an_items_url_field_is_checked_like_a_title_search(monkeypatch):
+    item = _book("Foundations of clinical research: applications to practice", "Portney")
+    item.url = "https://www.atsu.edu/policies/booklist.pdf"
+
+    class Page:
+        url, is_pdf, status = item.url, True, 200
+
+    class Http:
+        def fetch(self, url, **kw):
+            return Page()
+
+    cand, = ff.src_publisher(item, Http(), ff.Settings(), None)
+    assert cand.by_identifier is False
+
+
+def test_a_fetched_pdf_removed_by_hand_is_not_attached_again():
+    ff.state_dir().mkdir(parents=True, exist_ok=True)
+    ff._save_item_state("NOPE0001", {"status": "attached", "attached_url": "https://wrong.org/x.pdf",
+                                     "attachment_key": "GONE0001", "last_attempt": "2026-10-09T08:00:00"})
+    items, _ = ff.select_items(backend=_backend())
+    assert "NOPE0001" in [i.key for i in items]
+    entry = ff._load_state()["NOPE0001"]
+    assert entry["rejected_urls"] == ["https://wrong.org/x.pdf"] and entry["status"] == "wrong pdf removed"
+    assert "attachment_key" not in entry
+
+
+def test_replacing_a_wrong_pdf_clears_its_finding_note(tmp_path, monkeypatch):
+    good = good_pdf(tmp_path)
+
+    def source(item, http_, settings, budget):
+        if item.key == "ABCD1234":
+            yield ff.Candidate("https://pub.org/vor.pdf", "publisher", "published", by_identifier=True)
+
+    monkeypatch.setattr(ff, "SOURCES", {"open-access": [source]})
+    ff.mark_bad_pdf("ABCD1234", "OLDPDF01", "another work", want_published=False)
+
+    class Writer(FakeWriter):
+        cleared = []
+
+        def clear_findings(self, key):
+            self.cleared.append(key)
+            return 1
+
+    writer = Writer()
+    b = _backend()
+    b.children["ABCD1234"] = [{"key": "OLDPDF01", "data": {"key": "OLDPDF01", "itemType": "attachment",
+                                                            "linkMode": "imported_file",
+                                                            "contentType": "application/pdf"}}]
+    ff.run(keys=["ABCD1234"], steps=["open-access"], log=lambda m: None, settings=ff.Settings(host_delay=0),
+           http=FakeHttp({"https://pub.org/vor.pdf": (200, "application/pdf", good)}),
+           writer_factory=lambda: writer, backend=b)
+    assert writer.cleared == ["ABCD1234"] and ("ABCD1234", "OLDPDF01") in writer.trashed
+
+
+def test_an_affiliation_letter_on_the_name_still_counts_as_the_byline():
+    text = "When and why do people avoid unknown probabilities\nCatrin Rodea,*, Leda Cosmidesb\naMax Planck"
+    assert ff.author_near_top("Rode", text)
+    assert not ff.author_near_top("Cosmid", text) and not ff.author_near_top("Tooby", text)
