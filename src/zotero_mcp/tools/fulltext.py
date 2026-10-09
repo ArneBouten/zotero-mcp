@@ -109,9 +109,10 @@ def fetch_fulltext_status(run_id: str, *, ctx: Context) -> str:
 @mcp.tool(
     name="zotero_read_paper",
     description=(
-        "Find a paper's full text online and read it WITHOUT adding anything to the Zotero "
-        "library: for a paper the user is only curious about, one for someone else's project, "
-        "or one not (yet) worth keeping. Same search and checks as zotero_fetch_fulltext "
+        "Read the FULL TEXT of a paper that is not in the user's Zotero library, without adding "
+        "it. Use it whenever an answer leans on a paper found elsewhere (web search, Consensus, "
+        "Scite, PubMed, Scholar) of which you have only the abstract or a snippet, or when the "
+        "user asks to read a paper they do not want to keep. Same search and checks as zotero_fetch_fulltext "
         "(open access, the publisher via the university network, Google Scholar, a web search; "
         "each PDF checked to be this work), but the result is the paper's text. "
         "doi (best) or title (with author and year if known). save_to: optional folder to also "

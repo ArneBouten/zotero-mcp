@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.62] - 2026-10-09
+
+### Changed
+
+- `zotero_read_paper` says when to use it: whenever an answer leans on a paper found outside the library (web search, Consensus, Scite, PubMed, Scholar) of which only the abstract or a snippet was seen. Claude then reaches for the full text on its own instead of settling for abstracts.
+
 ## [0.13.2+arne.61] - 2026-10-09
 
 ### Added
