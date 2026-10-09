@@ -29,7 +29,7 @@ py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2 --no-fetch  # metadata onl
 | **Fetch PDF only** | PDFs, no metadata changes | Quick, when the metadata is fine |
 | **Fetch PDF in browser** | only the browser step, starting with the links an earlier run could not download | Papers an earlier run did not find |
 
-Each works on the selected papers (item menu) or a whole collection (collection menu). The scripts are in `zotero-actions/` (paste each into a new action in Zotero's Settings → Actions & Tags, type Script, with the item and collection menus checked). They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`.
+Each works on the selected papers (item menu) or a whole collection (collection menu). To add all four at once: Zotero → Settings → Actions & Tags → Import, and choose `zotero-actions/zotero-mcp-actions.yml` (importing it again later updates them). The separate scripts are in `zotero-actions/` too. They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`.
 
 **Automatically for new items:** with
 
