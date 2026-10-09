@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.52] - 2026-10-09
+
+### Added
+
+- **Two computers**: `zotero-mcp share-state FOLDER` keeps the record of the checks (what was checked when, searches in vain, rejected suggestions, learned decisions, the citation graph, free-tier counters) in a folder both computers sync, such as OneDrive (`"state_dir"` in config.json). Each computer then skips what the other already checked. Record files are written in one step, so a synced folder never holds half a file.
+
+### Changed
+
+- The import action runs on the computer where a paper is added, laptop or PC, and skips papers that arrive there by sync from the other one, so a paper is checked once. The removed monthly action is no longer in `zotero-mcp-actions.yml`.
+
 ## [0.13.2+arne.51] - 2026-10-09
 
 ### Changed

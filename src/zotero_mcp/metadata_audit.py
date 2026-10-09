@@ -61,7 +61,7 @@ AUDITED_TYPES = {"journalArticle", "conferencePaper", "preprint", "book", "bookS
 
 
 def meta_dir() -> Path:
-    return ff.config_dir() / "metadata"
+    return ff.shared_dir() / "metadata"
 
 
 # ---------------------------------------------------------------------------
@@ -1585,8 +1585,7 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     try:
-        meta_dir().mkdir(parents=True, exist_ok=True)
-        (meta_dir() / "state.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
+        ff.write_json(meta_dir() / "state.json", state)
     except OSError:
         pass
 

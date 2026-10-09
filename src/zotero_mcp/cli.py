@@ -965,6 +965,13 @@ def main():
                                  help="Then update the search index for new and changed items (as at Claude "
                                       "Desktop's start; skipped while another update runs)")
 
+    share_parser = subparsers.add_parser(
+        "share-state",
+        help="Keep the records of the checks in a folder several computers sync (OneDrive), so each "
+             "knows what the others checked; run it on each computer with the same folder",
+    )
+    share_parser.add_argument("folder", help="The shared folder, e.g. your OneDrive's zotero-mcp\\state")
+
     cit_parser = subparsers.add_parser(
         "citations",
         help="The library's citation graph from OpenAlex: add papers to it, or ask what cites what",
@@ -1610,6 +1617,15 @@ def main():
                 print(f"No progress window ({e}); showing the progress here instead.")
         try:
             maintenance.run(fetch=not args.no_fetch, **kwargs)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    elif args.command == "share-state":
+        from zotero_mcp import shared_state
+
+        try:
+            shared_state.share(args.folder)
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)

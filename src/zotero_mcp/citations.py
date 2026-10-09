@@ -38,9 +38,16 @@ _SKIP_TYPES = {"attachment", "note", "annotation"}
 
 
 def _path() -> Path:
+    from zotero_mcp.fulltext_fetch import shared_dir
+
+    return shared_dir() / "citations.json"
+
+
+def _local(name: str) -> Path:
+    """Lock files stay on this computer: a synced lock would hold up the other one."""
     from zotero_mcp.fulltext_fetch import config_dir
 
-    return config_dir() / "citations.json"
+    return config_dir() / name
 
 
 def _empty() -> dict:
@@ -63,7 +70,7 @@ def load() -> dict:
 def _locked(name: str = "citations.lock", wait: float = 20.0) -> Iterator[bool]:
     """A lock file beside the store, so the import action and Claude do not write at once.
     A lock older than two minutes is left over from a crash and taken over."""
-    lock = _path().with_name(name)
+    lock = _local(name)
     lock.parent.mkdir(parents=True, exist_ok=True)
     end = time.monotonic() + wait
     fd = None
@@ -596,7 +603,7 @@ def overview(*, keys: list[str] | None = None, collection: str | None = None, ba
 
 
 def _background_running() -> bool:
-    lock = _path().with_name("citations-update.lock")
+    lock = _local("citations-update.lock")
     try:
         return lock.exists() and time.time() - lock.stat().st_mtime < 3600
     except OSError:
@@ -623,7 +630,7 @@ def start_background() -> bool:
 
 
 def _main() -> int:
-    lock = _path().with_name("citations-update.lock")
+    lock = _local("citations-update.lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text(str(os.getpid()), encoding="utf-8")
     from zotero_mcp.cli import setup_zotero_environment

@@ -57,6 +57,20 @@ If every paper you chose is unchanged, a small window says when it was last chec
 
 **At Claude Desktop's start instead** (older option, without the import action): with `"maintenance": {"new_items": true}` in config.json, every start first maintains the items added since the last start, then updates the index. Add `"fetch": false` for metadata only.
 
+## Two computers
+
+Everything works the same on two computers (a PC and a laptop) that sync the same Zotero library: the same right-click actions, and new papers checked on import on whichever computer you add them. What the checks change is in Zotero and syncs. The record of the checks (which papers were checked when, searches in vain, rejected suggestions, what was learned from your decisions, the citation graph, the free-tier counters) is kept in a folder both computers sync:
+
+```powershell
+py -3.12 -m zotero_mcp.cli share-state "$env:USERPROFILE\OneDrive - UGent\Academic\Software\zotero-mcp\state"
+```
+
+Run it once on each computer with the same folder. The first copies its records there; the next uses what is there. It sets `"state_dir"` in config.json (with a backup); the old records stay in `.config\zotero-mcp` as a backup. The search index, keys, the fetcher's Chrome profile and lock files stay on each computer.
+
+- **New papers on import** are checked on the computer where you add them, laptop or PC. When the paper then arrives on the other computer by sync, that one leaves it alone (the action skips synced items), so a paper is never checked twice.
+- Avoid running a check of the same papers on both computers at the same moment: OneDrive would keep a second copy of a record file, and one computer's record of that run would be lost (the papers are then simply checked again later).
+- Free allowances (SerpApi, Tavily, ZenRows) are counted together.
+
 ## Duplicates
 
 **Tools → Merge certain duplicates** merges papers that are in My Library more than once and certainly the same work: the same DOI (or, for books, the same ISBN), the same item type, and titles that agree (a missing subtitle is fine). It first shows what it will merge, with **Merge** and **Cancel**.

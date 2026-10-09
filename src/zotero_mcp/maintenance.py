@@ -33,9 +33,9 @@ from pathlib import Path
 
 
 def _state_path() -> Path:
-    from zotero_mcp.fulltext_fetch import config_dir
+    from zotero_mcp.fulltext_fetch import shared_dir
 
-    return config_dir() / "maintenance.json"
+    return shared_dir() / "maintenance.json"
 
 
 def _load() -> dict:
@@ -47,8 +47,9 @@ def _load() -> dict:
 
 def _save(state: dict) -> None:
     try:
-        _state_path().parent.mkdir(parents=True, exist_ok=True)
-        _state_path().write_text(json.dumps(state, indent=1), encoding="utf-8")
+        from zotero_mcp.fulltext_fetch import write_json
+
+        write_json(_state_path(), state)
     except OSError:
         pass
 

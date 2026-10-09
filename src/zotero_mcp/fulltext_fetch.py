@@ -118,8 +118,36 @@ def config_dir() -> Path:
     return Path.home() / ".config" / "zotero-mcp"
 
 
+def shared_dir() -> Path:
+    """Where the records of the checks live (what was checked when, searches in vain, rejected
+    suggestions, the citation graph, the free-tier counters). By default beside the config; with
+    ``"state_dir"`` in config.json (or ``ZOTERO_MCP_STATE_DIR``) a folder that several computers
+    sync, such as one in OneDrive, so each knows what the others did. ``~`` and ``%VAR%`` work."""
+    value = os.environ.get("ZOTERO_MCP_STATE_DIR")
+    if not value:
+        try:
+            value = json.loads((config_dir() / "config.json").read_text(encoding="utf-8")).get("state_dir")
+        except Exception:
+            value = None
+    if value:
+        value = os.path.expandvars(str(value))
+        if value == "~" or value.startswith(("~/", "~\\")):
+            return Path.home() / value[2:]
+        return Path(value)
+    return config_dir()
+
+
+def write_json(path: Path, data, indent: int | None = 1) -> None:
+    """Write a JSON file in one step (a temporary file, then a rename), so a synced folder never
+    holds half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, indent=indent, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def state_dir() -> Path:
-    return config_dir() / "fulltext"
+    return shared_dir() / "fulltext"
 
 
 # ---------------------------------------------------------------------------
@@ -260,8 +288,7 @@ class Budget:
             period = self._period(daily)
             bucket[period] = int(bucket.get(period, 0)) + cost
             try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+                write_json(self.path, self.data, indent=2)
             except OSError:
                 pass
 
@@ -1460,8 +1487,7 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     try:
-        state_dir().mkdir(parents=True, exist_ok=True)
-        (state_dir() / "state.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
+        write_json(state_dir() / "state.json", state)
     except OSError:
         pass
 
@@ -1964,7 +1990,7 @@ def scholar_search_url(item: ItemInfo) -> str:
 
 
 def _run_paths(run_id: str) -> dict[str, Path]:
-    base = state_dir() / "runs" / f"bg-{run_id}"
+    base = config_dir() / "fulltext" / "runs" / f"bg-{run_id}"     # this computer's own process
     return {"log": base.with_suffix(".log"), "report": base.with_suffix(".md"), "done": base.with_suffix(".done")}
 
 
