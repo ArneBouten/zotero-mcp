@@ -11,9 +11,13 @@
 
 The search index and the passage labels follow at the next index update.
 
+``fetch=False`` keeps it to step 1 (metadata only: no PDFs downloaded, wrong PDFs
+are tagged but not replaced).
+
 ``new=True`` takes the items added since the last such run (the first run only
 remembers the time); this is what runs before the index update when Claude
-Desktop starts, if ``"maintenance": {"new_items": true}`` is in config.json.
+Desktop starts, if ``"maintenance": {"new_items": true}`` is in config.json
+(``"fetch": false`` there for metadata only).
 """
 
 from __future__ import annotations
@@ -65,20 +69,33 @@ def new_item_keys(backend, since: str | None) -> list[str]:
     return [k for _a, k in sorted(out)]
 
 
-def config_new_items(config_path: str | Path | None = None) -> bool:
-    """Whether config.json asks for new items to be maintained at startup."""
+def _config(config_path: str | Path | None = None) -> dict:
     try:
         path = Path(config_path) if config_path else Path.home() / ".config" / "zotero-mcp" / "config.json"
-        cfg = json.loads(path.read_text(encoding="utf-8"))
-        return bool((cfg.get("maintenance") or {}).get("new_items"))
+        return json.loads(path.read_text(encoding="utf-8")).get("maintenance") or {}
     except Exception:
-        return False
+        return {}
+
+
+def config_new_items(config_path: str | Path | None = None) -> bool:
+    """Whether config.json asks for new items to be maintained at startup."""
+    return bool(_config(config_path).get("new_items"))
+
+
+def config_fetch(config_path: str | Path | None = None) -> bool:
+    """Whether the startup run fetches PDFs too (``"fetch": false`` keeps it to metadata)."""
+    return _config(config_path).get("fetch", True) is not False
+
+
+def stages(fetch: bool) -> list[str]:
+    return ["Metadata", "PDFs", "Metadata again"] if fetch else ["Metadata"]
 
 
 def run(*, keys: list[str] | None = None, collection: str | None = None, new: bool = False, since: str | None = None,
-        apply: bool = True, fetch: bool = True, window: bool = False, log: Callable[[str], None] = print,
-        backend=None, audit_run=None, fetch_run=None) -> dict:
-    """Audit, fetch, audit again. Returns a summary."""
+        apply: bool = True, fetch: bool = True, log: Callable[[str], None] = print,
+        progress: Callable[[dict], None] | None = None, backend=None, audit_run=None, fetch_run=None) -> dict:
+    """Audit, fetch, audit again. Returns a summary. ``progress`` receives the audit's and the
+    fetcher's events and {"status": "stage", "detail": name, "index": i} at each step."""
     from zotero_mcp import fulltext_fetch as ff
     from zotero_mcp import metadata_audit as ma
 
@@ -88,6 +105,13 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         backend = library.get_library_backend()
     audit_run = audit_run or ma.run
     fetch_run = fetch_run or ff.run
+    notify = progress or (lambda event: None)
+    names = stages(fetch)
+    n = len(names)
+
+    def stage(i: int) -> None:
+        notify({"key": "", "status": "stage", "detail": names[i], "index": i})
+
     state = _load()
     now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     if new or since:
@@ -95,8 +119,8 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         if not start:
             state["last_new_items"] = now
             _save(state)
-            log("First run: from now on, items added to Zotero are checked and fetched here. "
-                "(For earlier items: zotero-mcp maintain --since YYYY-MM-DD.)")
+            log("First run: from now on, items added to Zotero are checked"
+                f"{' and fetched' if fetch else ''} here. (For earlier items: zotero-mcp maintain --since YYYY-MM-DD.)")
             return {"items": 0}
         keys = new_item_keys(backend, start)
         if not keys:
@@ -107,35 +131,37 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         log(f"{len(keys)} item(s) added since {start[:16].replace('T', ' ')}.")
     summary: dict = {}
 
-    log("1/3 Metadata ...")
+    log(f"1/{n} Metadata ...")
+    stage(0)
     # The replacements for wrong PDFs are fetched in step 2, with the rest.
-    report = audit_run(keys=keys, collection=collection, apply=apply, log=log, fetch_replacements=False)
+    report = audit_run(keys=keys, collection=collection, apply=apply, log=log, fetch_replacements=False,
+                       progress=progress)
     audits = getattr(report, "audits", []) or []
     summary["audit"] = report.totals() if hasattr(report, "totals") else {}
+    if getattr(report, "report_path", ""):
+        notify({"key": "", "status": "done", "detail": report.report_path})
     keys = keys or [a.key for a in audits]
     unknown = [a.key for a in audits if any("no registry record" in f for f in a.flags)]
 
     attached: set[str] = set()
     if fetch and keys:
         log("2/3 Full text for the items without a PDF ...")
-        kwargs = dict(keys=keys, log=log, dry_run=not apply)
-        if window:
-            from zotero_mcp import fulltext_window
-
-            fulltext_window.run_window(kwargs)
-            attached = {k for k in keys if not ff.select_items(keys=[k], backend=backend)[0]}
-        else:
-            fetched = fetch_run(**kwargs)
-            attached = {r.key for r in getattr(fetched, "results", []) if r.status == "attached"}
+        stage(1)
+        fetched = fetch_run(keys=keys, log=log, dry_run=not apply, progress=progress)
+        attached = {r.key for r in getattr(fetched, "results", []) if r.status == "attached"}
         summary["fetched"] = len(attached)
 
-    again = [k for k in unknown if k in attached]
-    if again:
-        log(f"3/3 Metadata again for {len(again)} item(s) no registry knew, now with their PDF ...")
-        report2 = audit_run(keys=again, apply=apply, log=log)
-        summary["audit_again"] = report2.totals() if hasattr(report2, "totals") else {}
-    else:
-        log("3/3 Nothing to check again.")
+    if fetch:
+        again = [k for k in unknown if k in attached]
+        stage(2)
+        if again:
+            log(f"3/3 Metadata again for {len(again)} item(s) no registry knew, now with their PDF ...")
+            report2 = audit_run(keys=again, apply=apply, log=log, progress=progress)
+            summary["audit_again"] = report2.totals() if hasattr(report2, "totals") else {}
+            if getattr(report2, "report_path", ""):
+                notify({"key": "", "status": "done", "detail": report2.report_path})
+        else:
+            log("3/3 Nothing to check again.")
     if new or since:
         state["last_new_items"] = now
         _save(state)

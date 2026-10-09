@@ -1,10 +1,13 @@
-"""A progress window for ``fetch-fulltext``, like Zotero's own "Find Full Text".
+"""A progress window for ``fetch-fulltext`` and ``maintain``, like Zotero's own "Find Full Text".
 
-Each paper is a row with its status (searching, attached, no file found ...).
-As soon as a paper is not found, a button offers the browser step for the
-papers not found so far, and the window stays open at the end with a summary,
-the same button and the run's report. Double-clicking a paper selects it in
-Zotero. The terminal keeps the detailed log.
+Each paper is a row. For ``fetch-fulltext`` the row shows its full-text status
+(searching, attached, no file found ...); for ``maintain`` also its metadata
+(filled, corrected, to review, wrong PDF ...), with the steps (metadata, PDFs,
+metadata again) above the list. As soon as a paper is not found, a button
+offers the browser step for the papers not found so far; papers behind a bot
+check get a button that opens them in the user's own browser. The window stays
+open at the end with a summary, those buttons and the run's reports.
+Double-clicking a paper selects it in Zotero. The terminal keeps the detailed log.
 """
 
 from __future__ import annotations
@@ -20,49 +23,88 @@ STATUS_TEXT = {
     "searching": "Searching…",
     "attached": "✓ Attached",
     "found": "✓ Found",
-    "not found": "✗ No file found",
-    "waiting for browser": "… Not found yet; the browser step follows",
-    "browser": "Searching with the browser…",
+    "not found": "✗ Not found",
+    "waiting for browser": "… Browser next",
+    "browser": "Searching (browser)…",
     "error": "✗ Error",
     "skipped": "– Skipped",
-    "needs your browser": "⚠ Bot check: open it in your own browser",
-    "waiting for your download": "… Waiting for your download (save the PDF to Downloads)",
-    "no download": "✗ No download found",
+    "needs your browser": "⚠ Bot check",
+    "waiting for your download": "… Waiting for your download",
+    "no download": "✗ No download",
 }
 FINISHED = {"attached", "found", "not found", "error", "skipped", "needs your browser", "no download"}
+
+META_TEXT = {"waiting": "Waiting", "checking": "Checking…"}
+META_ICON = {"ok": "✓", "updated": "✎", "review": "⚑", "wrong pdf": "⚠", "no record": "?", "not checked": "–",
+             "retracted": "⚠", "error": "✗", "pdf replaced": "✓"}
+META_PENDING = {"waiting", "checking"}
+
+#: Row colour: the most pressing of the row's columns wins.
+_SEVERITY = {"bad": 4, "warn": 3, "busy": 2, "ok": 1}
+_META_TONE = {"error": "bad", "retracted": "bad", "wrong pdf": "warn", "review": "warn", "no record": "warn",
+              "updated": "ok", "ok": "ok", "pdf replaced": "ok"}
+_FETCH_TONE = {"not found": "bad", "error": "bad", "no download": "bad", "needs your browser": "warn",
+               "waiting for your download": "warn", "attached": "ok", "found": "ok"}
+
+TITLES = {"fetch": "Find Full Text", "maintain": "Check & complete", "metadata": "Check metadata"}
 
 
 class Progress:
     """The window's bookkeeping, separate from tkinter so it can be tested."""
 
-    def __init__(self) -> None:
+    def __init__(self, stages: list[str] | None = None) -> None:
         self.order: list[str] = []
         self.labels: dict[str, str] = {}
         self.status: dict[str, str] = {}
         self.detail: dict[str, str] = {}
+        self.meta: dict[str, str] = {}
+        self.meta_detail: dict[str, str] = {}
+        self.meta_changed: set[str] = set()
         self.browser_tried: set[str] = set()
         self.active_runs = 0
         self.browser_busy = False
         self.reports: list[str] = []
         self.own_links: dict[str, str] = {}
+        self.stages = list(stages or [])
+        self.stage_index = -1
+        self.stage_keys: set[str] = set()
+        self.main_done = not self.stages
 
     def apply(self, event: dict) -> str | None:
-        """Take one event from the fetcher; returns the paper's key when its row changed."""
+        """Take one event from the run; returns the paper's key when its row changed."""
         key = event.get("key") or ""
+        status = event.get("status", "")
         if not key:
-            if event.get("status") == "done" and event.get("detail"):
+            if status == "done" and event.get("detail") and event["detail"] not in self.reports:
                 self.reports.append(event["detail"])
+            elif status == "stage":
+                self.stage_index = int(event.get("index", self.stage_index + 1))
+                self.stage_keys = set()
             return None
-        if key not in self.status:
+        if key not in self.labels:
             self.order.append(key)
         self.labels[key] = event.get("label") or self.labels.get(key, key)
-        self.status[key] = event.get("status", "")
+        if status == "waiting":
+            self.stage_keys.add(key)
+        if event.get("phase") == "metadata":
+            self.meta[key] = status
+            self.meta_detail[key] = event.get("detail", "")
+            if event.get("changed"):
+                self.meta_changed.add(key)
+            return key
+        self.status[key] = status
         self.detail[key] = event.get("detail", "")
-        if self.status[key] == "browser":
+        if status in ("attached", "found") and self.meta.get(key) == "wrong pdf":
+            # The right PDF was found: it replaced the wrong one (in Zotero's trash).
+            self.meta[key] = "pdf replaced"
+            self.meta_detail[key] = "wrong PDF replaced"
+        if status == "browser":
             self.browser_tried.add(key)     # searched with the browser: not offered again
-        if self.status[key] == "needs your browser":
+        if status == "needs your browser":
             self.own_links[key] = self.detail[key]
         return key
+
+    # -- the buttons ---------------------------------------------------------
 
     def for_own_browser(self) -> list[str]:
         return [k for k in self.order if self.status.get(k) == "needs your browser" and k in self.own_links]
@@ -76,17 +118,43 @@ class Progress:
         text = f"Search {n} not found with the browser" if n else "Search not-found papers with the browser"
         return bool(n) and not self.browser_busy, text
 
+    # -- counting --------------------------------------------------------------
+
     def counts(self) -> dict[str, int]:
+        """Full-text statuses (papers the fetcher has not seen yet are not counted)."""
         c: dict[str, int] = {}
         for k in self.order:
-            s = self.status.get(k, "")
+            if k in self.status:
+                s = self.status[k]
+                c[s] = c.get(s, 0) + 1
+        return c
+
+    def meta_counts(self) -> dict[str, int]:
+        c: dict[str, int] = {}
+        for s in self.meta.values():
             c[s] = c.get(s, 0) + 1
         return c
 
+    def _fetch_progress(self) -> tuple[int, int]:
+        c = self.counts()
+        total = sum(c.values()) - c.get("skipped", 0)
+        finished = sum(c.get(s, 0) for s in FINISHED) - c.get("skipped", 0)
+        return finished, total
+
+    def _stage_progress(self) -> tuple[int, int]:
+        keys = self.stage_keys
+        if self._stage_is_metadata():
+            done = sum(1 for k in keys if self.meta.get(k) not in META_PENDING)
+        else:
+            done = sum(1 for k in keys if self.status.get(k) in FINISHED)
+        return done, len(keys)
+
+    def _stage_is_metadata(self) -> bool:
+        return 0 <= self.stage_index < len(self.stages) and self.stages[self.stage_index].startswith("Metadata")
+
     def summary(self) -> str:
         c = self.counts()
-        total = len(self.order) - c.get("skipped", 0)
-        finished = sum(c.get(s, 0) for s in FINISHED) - c.get("skipped", 0)
+        finished, total = self._fetch_progress()
         attached = c.get("attached", 0) + c.get("found", 0)
         parts = [f"{attached} attached", f"{c.get('not found', 0) + c.get('no download', 0)} not found"]
         if c.get("needs your browser"):
@@ -99,25 +167,167 @@ class Progress:
         return f"{head}: " + ", ".join(parts) + "."
 
     def headline(self) -> str:
-        """The line under the window's title; the counts are in the coloured labels beside it."""
-        c = self.counts()
-        total = len(self.order) - c.get("skipped", 0)
-        finished = sum(c.get(s, 0) for s in FINISHED) - c.get("skipped", 0)
+        """The short line under the title: what is running and how far, or "Done"."""
+        if self.stages and not self.main_done and self.stage_index >= 0:
+            done, total = self._stage_progress()
+            what = "Checking metadata" if self._stage_is_metadata() else "Fetching PDFs"
+            return f"{what} · {done} of {total}"
+        finished, total = self._fetch_progress()
+        n = len(self.order) if self.stages else total
         if self.active_runs:
-            text = f"Searching… {finished} of {total} paper{'s' if total != 1 else ''} done"
-        else:
-            text = f"Done: {total} paper{'s' if total != 1 else ''}"
-        if c.get("error"):
-            text += f", {c['error']} with an error"
-        if c.get("skipped"):
-            text += f" ({c['skipped']} skipped: already a PDF, or no title)"
-        return text + ("" if self.active_runs else ".")
+            return f"Searching · {finished} of {total}"
+        return f"Done · {n} paper{'s' if n != 1 else ''}"
 
     def fraction(self) -> float:
-        c = self.counts()
-        total = len(self.order) - c.get("skipped", 0)
-        finished = sum(c.get(s, 0) for s in FINISHED) - c.get("skipped", 0)
+        if self.stages and not self.main_done and self.stage_index >= 0:
+            done, total = self._stage_progress()
+            within = done / total if total else 0.0
+            return min(1.0, (self.stage_index + within) / len(self.stages))
+        if self.stages and not self.active_runs:
+            return 1.0
+        finished, total = self._fetch_progress()
         return finished / total if total else 1.0
+
+    def _keys(self, test: Callable[[str], bool]) -> list[str]:
+        return [k for k in self.order if test(k)]
+
+    def chip_groups(self) -> list[tuple[str, list[tuple[str, str, list[str], str]]]]:
+        """The coloured counts at the top, as two groups (metadata, PDFs): (style, text, the papers
+        it counts, what it means, for the tooltip); only counts above zero."""
+        meta = self.meta.get
+        status = self.status.get
+        wrong = self._keys(lambda k: meta(k) == "wrong pdf")
+        groups = []
+        if self.stages:
+            chips = [
+                ("ChipInfo", "✎ {} fixed", self._keys(lambda k: k in self.meta_changed),
+                 "Empty fields filled in, or errors corrected that two sources agree on. A note on the paper "
+                 "lists the changes."),
+                ("ChipReview", "⚑ {} to review", self._keys(lambda k: meta(k) == "review"),
+                 "Changes only one source suggests: not made. See 'To do'."),
+                ("ChipBad", "⚠ {} retracted", self._keys(lambda k: meta(k) == "retracted"),
+                 "Retracted by the journal (tag: retracted)."),
+            ]
+            groups.append(("Metadata", chips))
+        pdf_chips = [("ChipWarn", "⚠ {} wrong PDF", wrong,
+                      "Another paper, a manuscript, a preprint or a proof is attached. Tag: fulltext/check-pdf.")]
+        if self.stages != ["Metadata"]:
+            pdf_chips = [
+                ("ChipOk", "✓ {} attached", self._keys(lambda k: status(k) in ("attached", "found")),
+                 "PDFs found and attached."),
+            ] + pdf_chips + [
+                ("ChipWarn", "⚠ {} bot check", self._keys(lambda k: status(k) in ("needs your browser",
+                                                                                   "waiting for your download")),
+                 "Only your own browser gets past this site's check. See 'To do'."),
+                ("ChipBad", "✗ {} not found", self._keys(lambda k: status(k) in ("not found", "no download")),
+                 "No copy found (tag: fulltext/not-found)."),
+            ]
+        groups.append(("PDFs", pdf_chips))
+        return [(name, [(st, text.format(len(keys)), keys, tip) for st, text, keys, tip in chips if keys])
+                for name, chips in groups if any(c[2] for c in chips)]
+
+    def chips(self) -> list[tuple[str, str]]:
+        """(style, text) of every count shown, in order."""
+        return [(style, text) for _name, chips in self.chip_groups() for style, text, _keys, _tip in chips]
+
+    def todo(self) -> list[tuple[str, str, str | None, str]]:
+        """What is left for the user: (tone, short text, the button's action or None, what to do,
+        for the tooltip). Empty when there is nothing."""
+        meta = self.meta.get
+        status = self.status.get
+        out: list[tuple[str, str, str | None, str]] = []
+        own = self._keys(lambda k: status(k) == "needs your browser")
+        if own:
+            out.append(("warn", f"⚠ {len(own)} behind a bot check", "own",
+                        "Opens them in your own browser. Download the PDF there; it is attached automatically."))
+        waiting = self._keys(lambda k: status(k) == "waiting for your download")
+        if waiting:
+            out.append(("busy", f"… Waiting for your download ({len(waiting)})", None,
+                        "Save the PDF to your Downloads folder and keep this window open."))
+        browser = self.not_found_for_browser()
+        if browser:
+            out.append(("bad", f"✗ {len(browser)} not found", "browser",
+                        "Tries ResearchGate, Academia.edu and your publisher logins in the fetcher's Chrome window."))
+        review = self._keys(lambda k: meta(k) == "review")
+        if review:
+            out.append(("review", f"⚑ {len(review)} with changes to review  ⓘ", None,
+                        "In Zotero: saved search 'Metadata to review'. Read the note, then tag the paper "
+                        "metadata/accept or metadata/reject; the next check applies it."))
+        wrong = self._keys(lambda k: meta(k) == "wrong pdf")
+        if wrong and not self.active_runs:
+            text = (f"⚠ {len(wrong)} wrong PDF, right version not found  ⓘ" if self.stages != ["Metadata"]
+                    else f"⚠ {len(wrong)} wrong PDF  ⓘ")
+            out.append(("warn", text, None,
+                        "A note on the paper says what is wrong (tag: fulltext/check-pdf). "
+                        + ("'Check & complete' looks for the right one." if self.stages == ["Metadata"]
+                           else "It stays attached until the right one is found.")))
+        errors = self._keys(lambda k: meta(k) == "error" or status(k) == "error")
+        if errors:
+            out.append(("bad", f"✗ {len(errors)} error{'s' if len(errors) != 1 else ''}", "report",
+                        "The report has the details."))
+        return out
+
+    # -- a row -------------------------------------------------------------------
+
+    def meta_text(self, key: str) -> str:
+        status = self.meta.get(key)
+        if status is None:
+            return ""
+        if status in META_TEXT:
+            return META_TEXT[status]
+        detail = self.meta_detail.get(key, "") or status
+        return f"{META_ICON.get(status, '')} {detail[:1].upper()}{detail[1:]}".strip()
+
+    def fetch_text(self, key: str) -> str:
+        status = self.status.get(key)
+        if status is None:
+            return ""
+        detail = self.detail.get(key, "")
+        if status == "skipped":
+            return "– Has a PDF" if "already" in detail else f"– {detail[:1].upper()}{detail[1:]}"
+        text = STATUS_TEXT.get(status, status)
+        if detail and status in ("attached", "found"):
+            text += " · " + detail.replace(", published version", "").replace("from your download", "your download")
+        return text
+
+    def tone(self, key: str) -> str:
+        tones = []
+        if key in self.meta:
+            tones.append(_META_TONE.get(self.meta[key], "busy"))
+        status = self.status.get(key)
+        if status is not None and status != "skipped":
+            tones.append(_FETCH_TONE.get(status, "busy"))
+        if not tones:
+            return "ok" if status == "skipped" else "busy"
+        return max(tones, key=lambda t: _SEVERITY[t])
+
+
+class _Tooltip:
+    """A small explanation that appears while the mouse is over a widget."""
+
+    def __init__(self, widget, text: str) -> None:
+        self.widget, self.text, self.tip = widget, text, None
+        widget.bind("<Enter>", self.show, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<Destroy>", self.hide, add="+")
+
+    def show(self, _event=None) -> None:
+        import tkinter as tk
+
+        if self.tip is not None:
+            return
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(self.tip, text=self.text, background="#1f2937", foreground="#ffffff", justify="left",
+                 wraplength=320, padx=10, pady=6).pack()
+
+    def hide(self, _event=None) -> None:
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
 
 
 def _style(root, ttk) -> dict:
@@ -150,10 +360,19 @@ def _style(root, ttk) -> dict:
     style.configure("Title.TLabel", background=ui["bg"], foreground=ui["text"], font=(fam, 15, "bold"))
     style.configure("Muted.TLabel", background=ui["bg"], foreground=ui["muted"])
     style.configure("Hint.TLabel", background=ui["bg"], foreground=ui["muted"], font=(fam, 9))
+    style.configure("StepDone.TLabel", background=ui["bg"], foreground=ui["ok"], font=(fam, 10, "bold"))
+    style.configure("StepNow.TLabel", background=ui["bg"], foreground=ui["accent"], font=(fam, 10, "bold"))
+    style.configure("StepTodo.TLabel", background=ui["bg"], foreground="#9ca3af", font=(fam, 10))
     for name, colour, tint in (("ChipOk", ui["ok"], "#dcfce7"), ("ChipWarn", ui["warn"], "#fef3c7"),
-                               ("ChipBad", ui["bad"], "#fee2e2")):
+                               ("ChipBad", ui["bad"], "#fee2e2"), ("ChipInfo", ui["accent_dark"], "#dbeafe"),
+                               ("ChipReview", "#7e22ce", "#f3e8ff")):
         style.configure(f"{name}.TLabel", background=tint, foreground=colour, padding=(10, 3),
                         font=(fam, 9, "bold"))
+    style.configure("Panel.TFrame", background=ui["card"])
+    style.configure("PanelTitle.TLabel", background=ui["card"], foreground=ui["text"], font=(fam, 10, "bold"))
+    for tone, colour in (("Review", "#7e22ce"), ("Warn", ui["warn"]), ("Bad", ui["bad"]), ("Busy", ui["muted"]),
+                         ("Ok", ui["ok"])):
+        style.configure(f"Todo{tone}.TLabel", background=ui["card"], foreground=colour)
     style.configure("Papers.Treeview", background=ui["card"], fieldbackground=ui["card"], foreground=ui["text"],
                     rowheight=28, borderwidth=0, relief="flat")
     style.map("Papers.Treeview", background=[("selected", ui["select"])], foreground=[("selected", ui["text"])])
@@ -176,27 +395,60 @@ def _style(root, ttk) -> dict:
                     font=(fam, 10, "bold"))
     style.map("Accent.TButton", background=[("active", ui["accent_dark"])],
               lightcolor=[("active", ui["accent_dark"])], darkcolor=[("active", ui["accent_dark"])])
+    for name in ("Soft", "SmallAccent"):
+        style.configure(f"{name}.TButton", padding=(10, 2))
+    style.configure("Soft.TButton", background="#f3f4f6", lightcolor="#f3f4f6", darkcolor="#f3f4f6",
+                    bordercolor="#e5e7eb", focuscolor="#f3f4f6")
+    style.map("Soft.TButton", background=[("disabled", ui["card"]), ("active", "#e5e7eb")],
+              lightcolor=[("active", "#e5e7eb")], darkcolor=[("active", "#e5e7eb")],
+              foreground=[("disabled", "#9ca3af")])
+    style.configure("SmallAccent.TButton", background=ui["accent"], foreground="#ffffff", bordercolor=ui["accent"],
+                    lightcolor=ui["accent"], darkcolor=ui["accent"], focuscolor=ui["accent"], font=(fam, 10, "bold"))
+    style.map("SmallAccent.TButton", background=[("active", ui["accent_dark"])],
+              lightcolor=[("active", ui["accent_dark"])], darkcolor=[("active", ui["accent_dark"])])
     style.configure("Vertical.TScrollbar", background="#e5e7eb", troughcolor=ui["card"], bordercolor=ui["card"],
                     arrowcolor=ui["muted"], lightcolor="#e5e7eb", darkcolor="#e5e7eb", gripcount=0)
     return ui
 
 
-def run_window(run_kwargs: dict, run: Callable[..., object] | None = None) -> None:
-    """Run the fetch in a background thread and show its progress until the window is closed."""
+def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mode: str = "fetch",
+               fetch: Callable[..., object] | None = None) -> None:
+    """Run in a background thread and show the progress until the window is closed.
+
+    ``mode``: "fetch" (``fulltext_fetch.run``), "maintain" (metadata, PDFs, metadata
+    again: ``maintenance.run``) or "metadata" (``maintenance.run`` without fetching).
+    ``fetch`` is what the browser button runs (``fulltext_fetch.run``).
+    """
     import tkinter as tk
     from tkinter import messagebox, ttk
 
-    if run is None:
-        from zotero_mcp.fulltext_fetch import run as run
+    from zotero_mcp import maintenance
 
-    prog = Progress()
+    if run is None:
+        if mode == "fetch":
+            from zotero_mcp.fulltext_fetch import run as run
+        else:
+            run = maintenance.run
+    if fetch is None:
+        if mode == "fetch":
+            fetch = run
+        else:
+            from zotero_mcp.fulltext_fetch import run as fetch
+    if mode != "fetch":
+        run_kwargs = dict(run_kwargs, fetch=mode == "maintain")
+    with_pdfs = mode != "metadata"
+    with_meta = mode != "fetch"
+
+    prog = Progress(maintenance.stages(mode == "maintain") if with_meta else None)
     events: queue.Queue = queue.Queue()
-    main_uses_browser = "browser" in (run_kwargs.get("steps") or [])
+    main_uses_browser = mode == "fetch" and "browser" in (run_kwargs.get("steps") or [])
+    dry_run = bool(run_kwargs.get("dry_run", not run_kwargs.get("apply", True)))
 
     root = tk.Tk()
-    root.title("Find Full Text — zotero-mcp")
-    root.geometry("940x500")
-    root.minsize(560, 320)
+    title = TITLES.get(mode, TITLES["fetch"])
+    root.title(f"{title} — zotero-mcp")
+    root.geometry("1040x600" if with_meta and with_pdfs else "940x560")
+    root.minsize(600, 340)
     ui = _style(root, ttk)
     root.configure(background=ui["bg"])
 
@@ -204,36 +456,48 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None) -> No
     frame.pack(fill="both", expand=True)
     top = ttk.Frame(frame, style="App.TFrame")
     top.pack(fill="x")
-    titles = ttk.Frame(top, style="App.TFrame")
-    titles.pack(side="left", fill="x", expand=True)
-    ttk.Label(titles, text="Find Full Text", style="Title.TLabel").pack(anchor="w")
-    head = ttk.Label(titles, text="Searching…", style="Muted.TLabel")
-    head.pack(anchor="w", pady=(2, 0))
-    chips_box = ttk.Frame(top, style="App.TFrame")
-    chips_box.pack(side="right", anchor="s")
-    chips = {}
-    for col, (name, style) in enumerate((("attached", "ChipOk"), ("own", "ChipWarn"), ("not found", "ChipBad"))):
-        chips[name] = ttk.Label(chips_box, text="", style=f"{style}.TLabel")
-        chips[name].grid(row=0, column=col, padx=(6, 0))
-        chips[name].grid_remove()
+    ttk.Label(top, text=title, style="Title.TLabel").pack(side="left")
+    head = ttk.Label(top, text="Starting…", style="Muted.TLabel")
+    head.pack(side="right", anchor="s", pady=(0, 3))
+    steps_box = ttk.Frame(frame, style="App.TFrame")
+    step_labels: list = []
+    if len(prog.stages) > 1:
+        steps_box.pack(anchor="w", pady=(4, 0))
+        for i, name in enumerate(prog.stages):
+            if i:
+                ttk.Label(steps_box, text="›", style="StepTodo.TLabel").pack(side="left", padx=8)
+            lab = ttk.Label(steps_box, text=f"{i + 1}  {name}", style="StepTodo.TLabel")
+            lab.pack(side="left")
+            step_labels.append(lab)
+    # The counts; hover for what one means, click to select its papers.
+    chips_box = ttk.Frame(frame, style="App.TFrame")
+    chips_box.pack(fill="x", pady=(10, 0))
+    chip_widgets: list = []
+    shown_chips: list = [None]
     bar = ttk.Progressbar(frame, mode="determinate", maximum=1000, style="Thin.Horizontal.TProgressbar")
     bar.pack(fill="x", pady=(10, 12))
 
-    # The buttons and the hint first, at the bottom: a small window shrinks the list, never hides them.
+    # At the bottom first, so a small window shrinks the list, never these: the buttons, and
+    # "To do" (what is left for you, each with its button), shown only when there is something.
     buttons = ttk.Frame(frame, style="App.TFrame")
-    hint = ttk.Label(frame, text="Double-click a paper to show it in Zotero. Papers behind a bot check open in "
-                                 "your own browser: save the PDF to Downloads and it is attached.",
-                     style="Hint.TLabel", wraplength=860, justify="left")
-    hint.pack(side="bottom", anchor="w", fill="x", pady=(10, 0))
     buttons.pack(side="bottom", fill="x", pady=(12, 0))
-    hint.bind("<Configure>", lambda e: hint.configure(wraplength=max(300, e.width - 10)))
+    todo_card = ttk.Frame(frame, style="Card.TFrame", padding=1)
+    todo_inner = ttk.Frame(todo_card, style="Panel.TFrame", padding=(12, 8, 10, 8))
+    todo_inner.pack(fill="both", expand=True)
+    ttk.Label(todo_inner, text="To do", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 2))
+    todo_rows: list = []
+    shown_todo: list = [None]
+
     holder = ttk.Frame(frame, style="Card.TFrame", padding=1)
     holder.pack(fill="both", expand=True)
-    tree = ttk.Treeview(holder, columns=("item", "status"), show="headings", height=8, style="Papers.Treeview")
-    tree.heading("item", text="Paper", anchor="w")
-    tree.heading("status", text="Full text", anchor="w")
-    tree.column("item", width=500, anchor="w", stretch=True)
-    tree.column("status", width=380, anchor="w", stretch=True)
+    columns = ["item"] + (["meta"] if with_meta else []) + (["status"] if with_pdfs else [])
+    tree = ttk.Treeview(holder, columns=columns, show="headings", height=8, style="Papers.Treeview")
+    widths = {"item": 420 if len(columns) == 3 else 520, "meta": 250 if with_pdfs else 360,
+              "status": 300 if with_meta else 360}
+    for col, text in (("item", "Paper"), ("meta", "Metadata"), ("status", "Full text")):
+        if col in columns:
+            tree.heading(col, text=text, anchor="w")
+            tree.column(col, width=widths[col], anchor="w", stretch=True)
     tree.tag_configure("ok", foreground=ui["ok"])
     tree.tag_configure("bad", foreground=ui["bad"])
     tree.tag_configure("warn", foreground=ui["warn"])
@@ -252,19 +516,19 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None) -> No
     tree.configure(yscrollcommand=on_scroll)
     tree.pack(side="left", fill="both", expand=True)
 
-    def start(kwargs: dict, uses_browser: bool) -> None:
+    def start(target: Callable[..., object], kwargs: dict, uses_browser: bool, main: bool = False) -> None:
         prog.active_runs += 1
         if uses_browser:
             prog.browser_busy = True
 
         def work() -> None:
             try:
-                run(progress=events.put, **kwargs)
+                target(progress=events.put, **kwargs)
             except Exception as e:  # shown in the window and the terminal
                 print(f"Error: {type(e).__name__}: {e}", file=sys.stderr)
                 events.put({"key": "", "status": "failed", "detail": f"{type(e).__name__}: {e}"})
             finally:
-                events.put({"key": "", "status": "run finished", "browser": uses_browser})
+                events.put({"key": "", "status": "run finished", "browser": uses_browser, "main": main})
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -276,18 +540,20 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None) -> No
         for k in keys:
             prog.apply({"key": k, "label": prog.labels.get(k, k), "status": "waiting for browser", "detail": ""})
             redraw(k)
-        kwargs = {k: v for k, v in run_kwargs.items() if k not in ("collection", "limit")}
-        kwargs.update(keys=keys, steps=["browser"], retry=True, workers=1)
-        start(kwargs, True)
+        kwargs = dict(keys=keys, steps=["browser"], retry=True, workers=1, dry_run=dry_run)
+        if run_kwargs.get("save_dir"):
+            kwargs["save_dir"] = run_kwargs["save_dir"]
+        start(fetch, kwargs, True)
         refresh()
 
     def on_own_browser() -> None:
         keys = prog.for_own_browser()[:5]
         if not keys:
             return
+        import time
         import webbrowser
 
-        started = __import__("time").time() - 5
+        started = time.time() - 5
         for k in keys:
             webbrowser.open(prog.own_links[k])
             prog.apply({"key": k, "label": prog.labels.get(k, k), "status": "waiting for your download",
@@ -315,16 +581,16 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None) -> No
         refresh()
 
     def on_report() -> None:
-        if prog.reports:
+        for path in prog.reports[-2:]:      # the metadata report and the fetch report
             try:
-                os.startfile(prog.reports[-1])  # type: ignore[attr-defined]  # Windows
+                os.startfile(path)  # type: ignore[attr-defined]  # Windows
             except Exception:
-                messagebox.showinfo("Report", prog.reports[-1])
+                messagebox.showinfo("Report", path)
 
     def on_close() -> None:
         if prog.active_runs and not messagebox.askyesno(
-                "Still searching", "A search is still running. Stop it and close? "
-                                   "Papers already attached stay attached."):
+                "Still running", "A check or search is still running. Stop it and close? "
+                                 "What is done so far stays done."):
             return
         root.destroy()
 
@@ -336,59 +602,86 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None) -> No
             except Exception:
                 pass
 
-    own_btn = ttk.Button(buttons, text="Open in my own browser", command=on_own_browser, style="Accent.TButton")
-    own_btn.pack(side="left")
-    browser_btn = ttk.Button(buttons, text="Search not-found papers with the browser", command=on_browser)
-    browser_btn.pack(side="left", padx=(8, 0))
     ttk.Button(buttons, text="Close", command=on_close).pack(side="right")
     report_btn = ttk.Button(buttons, text="Show report", command=on_report)
     report_btn.pack(side="right", padx=(0, 8))
     tree.bind("<Double-1>", on_open)
     root.protocol("WM_DELETE_WINDOW", on_close)
 
+    def select(keys: list[str]) -> None:
+        keys = [k for k in keys if tree.exists(k)]
+        if keys:
+            tree.selection_set(keys)
+            tree.see(keys[0])
+
     def redraw(key: str) -> None:
-        status = prog.status.get(key, "")
-        text = STATUS_TEXT.get(status, status)
-        if prog.detail.get(key) and status in ("attached", "found"):
-            text += f" ({prog.detail[key]})"
-        tag = "ok" if status in ("attached", "found") else \
-            "bad" if status in ("not found", "error", "no download") else \
-            "warn" if status in ("needs your browser", "waiting for your download") else "busy"
-        values = (prog.labels.get(key, key), text)
+        values = [prog.labels.get(key, key)]
+        if with_meta:
+            values.append(prog.meta_text(key))
+        if with_pdfs:
+            values.append(prog.fetch_text(key))
+        tone = prog.tone(key)
         if tree.exists(key):
             stripe = "stripe" in tree.item(key, "tags")
-            tree.item(key, values=values, tags=(tag, "stripe") if stripe else (tag,))
+            tree.item(key, values=values, tags=(tone, "stripe") if stripe else (tone,))
         else:
             stripe = len(tree.get_children()) % 2 == 1
-            tree.insert("", "end", iid=key, values=values, tags=(tag, "stripe") if stripe else (tag,))
-        if status in ("searching", "browser"):
+            tree.insert("", "end", iid=key, values=values, tags=(tone, "stripe") if stripe else (tone,))
+        if prog.status.get(key) in ("searching", "browser") or prog.meta.get(key) == "checking":
             tree.see(key)
 
     def refresh() -> None:
         head.configure(text=prog.headline())
         bar.configure(value=int(prog.fraction() * 1000))
-        enabled, text = prog.browser_button()
-        browser_btn.configure(text=text, state="normal" if enabled else "disabled")
-        report_btn.configure(state="normal" if prog.reports else "disabled")
-        own = prog.for_own_browser()
-        own_btn.configure(text=f"Open {min(len(own), 5)} in my own browser" if own else "Open in my own browser",
-                          state="normal" if own else "disabled")
-        if own:
-            own_btn.pack(side="left", before=browser_btn, padx=(0, 8))
-        else:
-            own_btn.pack_forget()
-        c = prog.counts()
-        for name, n, word in (("attached", c.get("attached", 0) + c.get("found", 0), "✓ {} attached"),
-                              ("own", c.get("needs your browser", 0) + c.get("waiting for your download", 0),
-                               "⚠ {} for your browser"),
-                              ("not found", c.get("not found", 0) + c.get("no download", 0), "✗ {} not found")):
-            if n:
-                chips[name].configure(text=word.format(n))
-                chips[name].grid()
+        finished = prog.active_runs == 0
+        bar.configure(style="Done.Thin.Horizontal.TProgressbar" if finished else "Thin.Horizontal.TProgressbar")
+        for i, lab in enumerate(step_labels):
+            if i < prog.stage_index or (prog.main_done and i <= prog.stage_index):
+                lab.configure(text=f"✓  {prog.stages[i]}", style="StepDone.TLabel")
+            elif i == prog.stage_index:
+                lab.configure(text=f"{i + 1}  {prog.stages[i]}", style="StepNow.TLabel")
             else:
-                chips[name].grid_remove()
-        done = prog.active_runs == 0
-        bar.configure(style="Done.Thin.Horizontal.TProgressbar" if done else "Thin.Horizontal.TProgressbar")
+                lab.configure(text=f"{i + 1}  {prog.stages[i]}", style="StepTodo.TLabel")
+        groups = prog.chip_groups()
+        if groups != shown_chips[0]:
+            shown_chips[0] = groups
+            for w in chip_widgets:
+                w.destroy()
+            chip_widgets.clear()
+            for g, (_name, chips) in enumerate(groups):
+                for c, (style, text, keys, explanation) in enumerate(chips):
+                    chip = ttk.Label(chips_box, text=text, style=f"{style}.TLabel", cursor="hand2")
+                    chip.pack(side="left", padx=(16 if g and not c else 0, 6))   # a gap between metadata and PDFs
+                    chip.bind("<Button-1>", lambda _e, ks=keys: select(ks))
+                    _Tooltip(chip, explanation + " Click to select these papers.")
+                    chip_widgets.append(chip)
+        items = prog.todo()
+        state = (items, prog.browser_busy)
+        if state != shown_todo[0]:
+            shown_todo[0] = state
+            for w in todo_rows:
+                w.destroy()
+            todo_rows.clear()
+            for tone, text, action, explanation in items:
+                row = ttk.Frame(todo_inner, style="Panel.TFrame")
+                row.pack(fill="x", pady=(3, 0), ipady=1)
+                lab = ttk.Label(row, text=text, style=f"Todo{tone.capitalize()}.TLabel")
+                lab.pack(side="left")
+                _Tooltip(lab, explanation)
+                if action == "own":
+                    n = min(len(prog.for_own_browser()), 5)
+                    ttk.Button(row, text=f"Open {n} in my browser", command=on_own_browser,
+                               style="SmallAccent.TButton").pack(side="right")
+                elif action == "browser":
+                    ttk.Button(row, text="Search with browser", command=on_browser, style="Soft.TButton",
+                               state="disabled" if prog.browser_busy else "normal").pack(side="right")
+                elif action == "report":
+                    ttk.Button(row, text="Show report", command=on_report, style="Soft.TButton").pack(side="right")
+                todo_rows.append(row)
+            if items:
+                todo_card.pack(side="bottom", fill="x", pady=(12, 0), before=holder)
+            else:
+                todo_card.pack_forget()
 
     def poll() -> None:
         finished_now = False
@@ -399,10 +692,12 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None) -> No
                     prog.active_runs -= 1
                     if event.get("browser"):
                         prog.browser_busy = False
+                    if event.get("main"):
+                        prog.main_done = True
                     finished_now = prog.active_runs == 0
                     continue
                 if event.get("status") == "failed":
-                    messagebox.showerror("Find full text", event.get("detail", ""))
+                    messagebox.showerror(title, event.get("detail", ""))
                     continue
                 key = prog.apply(event)
                 if key:
@@ -411,7 +706,7 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None) -> No
             pass
         refresh()
         if finished_now:
-            # The end: bring the window forward with the summary and the browser button.
+            # The end: bring the window forward with the summary and the buttons.
             root.deiconify()
             root.lift()
             root.attributes("-topmost", True)
@@ -419,6 +714,6 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None) -> No
             root.bell()
         root.after(200, poll)
 
-    start(dict(run_kwargs), main_uses_browser)
+    start(run, dict(run_kwargs), main_uses_browser, main=True)
     root.after(200, poll)
     root.mainloop()

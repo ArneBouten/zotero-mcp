@@ -1838,6 +1838,50 @@ class AuditReport:
         return "\n".join(lines)
 
 
+_PDF_PROBLEM = {"another work": "the PDF is another paper", "manuscript": "the PDF is the accepted manuscript",
+                "preprint": "the PDF is a preprint", "proof": "the PDF is a proof",
+                "whole book": "the whole book is attached"}
+
+
+def audit_event(audit: ItemAudit, applied: bool) -> dict:
+    """An item's outcome for the progress window: a status (ok, updated, review, wrong pdf,
+    no record, not checked, retracted, error) and a line saying what was found or done."""
+    fills, fixes, props = (len(audit.by_kind(k)) for k in ("fill", "correct", "propose"))
+    no_record = any("no registry record" in f for f in audit.flags)
+    not_checked = any(f.startswith(NOT_CHECKED) for f in audit.flags)
+    parts = []
+    if fills:
+        parts.append(f"{fills} filled" if applied else f"{fills} to fill")
+    if fixes:
+        parts.append(f"{fixes} corrected" if applied else f"{fixes} to correct")
+    if props:
+        parts.append(f"{props} to review")
+    if audit.attachment is not None:
+        parts.append(_PDF_PROBLEM.get(getattr(audit.attachment, "kind", ""), "the PDF needs a check"))
+    if audit.retracted:
+        parts.append("retracted")
+    if no_record and not (fills or fixes or props):
+        parts.append("no registry knows it")
+    if audit.error:
+        status, parts = "error", [audit.error[:120]]
+    elif not_checked:
+        status, parts = "not checked", ["not checked: a registry did not answer"]
+    elif audit.retracted:
+        status = "retracted"
+    elif audit.attachment is not None:
+        status = "wrong pdf"
+    elif props:
+        status = "review"
+    elif fills or fixes:
+        status = "updated"
+    elif no_record:
+        status = "no record"
+    else:
+        status, parts = "ok", ["OK"]
+    return {"key": audit.key, "label": audit.label, "phase": "metadata", "status": status,
+            "detail": ", ".join(parts), "changed": bool(fills or fixes) and status != "error"}
+
+
 def run(
     *,
     keys: list[str] | None = None,
@@ -1858,7 +1902,10 @@ def run(
     pdfs: Callable[[str], list[dict]] | None = None,
     fetch: Callable[..., Any] | None = None,
     fetch_replacements: bool = True,
+    progress: Callable[[dict], None] | None = None,
 ) -> AuditReport:
+    """Audit the items. ``progress`` receives an event per item ({"key", "label", "phase":
+    "metadata", "status", "detail"}), for the progress window."""
     from zotero_mcp import library as _library
 
     settings = settings or ff.Settings.load()
@@ -1908,7 +1955,14 @@ def run(
     log(f"{len(items)} item(s) to check{'' if apply else ' (report only)'}"
         f"{', with their PDFs' if ctx.pdfs is not None else ''}.")
 
+    notify = progress or (lambda event: None)
+    for raw in items:
+        info = ff.ItemInfo.from_zotero(raw)
+        notify({"key": info.key, "label": info.label, "phase": "metadata", "status": "waiting", "detail": ""})
+
     def one(raw):
+        info = ff.ItemInfo.from_zotero(raw)
+        notify({"key": info.key, "label": info.label, "phase": "metadata", "status": "checking", "detail": ""})
         try:
             return audit_item(raw, ctx)
         except Exception as e:
@@ -1931,6 +1985,7 @@ def run(
                 if audit.attachment is not None and not audit.error:
                     if _fix_attachment(writer, audit, log, pdfs=ctx.pdfs):
                         to_fetch.append(audit.key)
+            notify(audit_event(audit, applied=writer is not None))
             state.setdefault(audit.key, {})["last_audit"] = _dt.datetime.now().isoformat(timespec="seconds")
             if n % 50 == 0:
                 _save_state(state)

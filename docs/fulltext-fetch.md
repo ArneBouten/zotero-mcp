@@ -54,7 +54,7 @@ zotero-mcp fetch-fulltext --retry --steps browser   # only the browser, for what
 ```
 
 A run without the browser remembers the links that refused a plain download,
-so a later browser-only run (the "with browser" action in Zotero, or the
+so a later browser-only run (the "Fetch PDF in browser" action in Zotero, or the
 window's button) starts with them.
 
 ### Bot checks only your own browser passes
@@ -128,7 +128,10 @@ lists every paper with its status, like Zotero's own Find Full Text: searching,
 attached (and from where), no file found. As soon as one paper is not found, a
 button offers the browser step for the papers not found so far; it stays there
 at the end, with a summary and the run's report. Papers behind a bot check get
-a second button that opens them in your own browser (see above). Double-clicking a paper shows
+a button that opens them in your own browser (see above). Both buttons sit in a
+"To do" panel that appears when something is left for you. Coloured counts
+above the list explain themselves when you hover over them; a click selects
+those papers. Double-clicking a paper shows
 it in Zotero. The terminal opens minimised and keeps the details.
 
 ## Keys and limits

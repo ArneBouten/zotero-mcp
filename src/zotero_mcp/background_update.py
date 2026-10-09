@@ -92,8 +92,9 @@ def _maintain_new_items() -> None:
 
         if not maintenance.config_new_items(_config_path()):
             return
-        sys.stderr.write("Maintaining new items (metadata, then PDFs)...\n")
-        maintenance.run(new=True, log=lambda m: sys.stderr.write(m + "\n"))
+        fetch = maintenance.config_fetch(_config_path())
+        sys.stderr.write(f"Maintaining new items ({'metadata, then PDFs' if fetch else 'metadata'})...\n")
+        maintenance.run(new=True, fetch=fetch, log=lambda m: sys.stderr.write(m + "\n"))
     except Exception as e:  # never in the way of the index update
         sys.stderr.write(f"Warning: maintaining new items failed: {e}\n")
 

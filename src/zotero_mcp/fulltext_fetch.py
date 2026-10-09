@@ -1768,7 +1768,7 @@ def run(
     for line in describe_setup(settings, budget, steps):
         log(line)
     log(f"{len(items)} item(s) to fetch{' (dry run)' if dry_run else ''}"
-        f"{f', {min(workers, len(items))} at a time' if workers > 1 and len(items) > 1 else ''}.")
+        f"{f', {min(workers, len(items))} at a time' if workers > 1 and len(items) > 1 and steps != ['browser'] else ''}.")
     notify = progress or (lambda event: None)
     for r in results:
         notify({"key": r.key, "label": r.label, "status": "skipped", "detail": r.reason})
@@ -1872,7 +1872,8 @@ def run(
         numbered = list(enumerate(items, 1))
         if first_steps:
             final = not browser_later
-            if workers > 1 and len(items) > 1:
+            # One Chrome window: the browser step takes one paper at a time.
+            if workers > 1 and len(items) > 1 and "browser" not in first_steps:
                 with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
                     futures = {pool.submit(one, i, item, first_steps, workdir, final): item for i, item in numbered}
                     for fut in futures:

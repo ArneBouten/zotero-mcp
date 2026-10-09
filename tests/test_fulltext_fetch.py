@@ -587,7 +587,9 @@ def test_the_window_offers_papers_behind_a_bot_check_to_the_users_own_browser():
     p.apply({"key": "B", "label": "B", "status": "not found", "detail": ""})
     assert p.for_own_browser() == ["A"] and p.own_links["A"] == "https://pub.org/a"
     assert p.summary() == "Done: 0 attached, 1 not found, 1 for your own browser."
-    assert p.headline() == "Done: 2 papers."
+    assert [t[2] for t in p.todo()] == ["own", "browser"]
+    assert p.chips() == [("ChipWarn", "⚠ 1 bot check"), ("ChipBad", "✗ 1 not found")]
+    assert p.headline() == "Done · 2 papers"
     p.apply({"key": "A", "label": "A", "status": "waiting for your download", "detail": "https://pub.org/a"})
     assert p.for_own_browser() == [] and p.fraction() == 0.5
     p.apply({"key": "A", "label": "A", "status": "attached", "detail": "from your download"})

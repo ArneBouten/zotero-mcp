@@ -944,7 +944,8 @@ def main():
     maintain_parser.add_argument("--since", help="The items added since this date (YYYY-MM-DD)")
     maintain_parser.add_argument("--report-only", action="store_true", help="Change nothing; report only")
     maintain_parser.add_argument("--no-fetch", action="store_true", help="Metadata only, no PDF fetching")
-    maintain_parser.add_argument("--window", action="store_true", help="Show the fetch progress window")
+    maintain_parser.add_argument("--window", action="store_true",
+                                 help="Show a progress window (the steps, each paper's metadata and PDF)")
 
     compare_parser = subparsers.add_parser(
         "compare-gemini",
@@ -1524,10 +1525,18 @@ def main():
         if not (keys or args.collection or args.new or args.since):
             print("Choose what to maintain: --items, --collection, --new or --since YYYY-MM-DD.")
             sys.exit(1)
+        kwargs = dict(keys=keys, collection=args.collection, new=args.new,
+                      since=f"{args.since}T00:00:00" if args.since else None, apply=not args.report_only)
+        if args.window:
+            try:
+                from zotero_mcp import fulltext_window
+
+                fulltext_window.run_window(kwargs, mode="metadata" if args.no_fetch else "maintain")
+                return
+            except ImportError as e:
+                print(f"No progress window ({e}); showing the progress here instead.")
         try:
-            maintenance.run(keys=keys, collection=args.collection, new=args.new,
-                            since=f"{args.since}T00:00:00" if args.since else None, apply=not args.report_only,
-                            fetch=not args.no_fetch, window=args.window)
+            maintenance.run(fetch=not args.no_fetch, **kwargs)
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)

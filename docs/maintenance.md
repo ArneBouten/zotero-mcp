@@ -13,9 +13,23 @@ py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2
 py -3.12 -m zotero_mcp.cli maintain --collection COLLKEY --window
 py -3.12 -m zotero_mcp.cli maintain --since 2026-10-01      # items added since then
 py -3.12 -m zotero_mcp.cli maintain --collection COLLKEY --report-only
+py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2 --no-fetch  # metadata only
 ```
 
-**In Zotero:** the right-click action "Check metadata and fetch PDFs" does this for the selected papers or a collection (`zotero-actions/Check metadata and fetch PDFs (Actions & Tags).js`, which starts `~/.config/zotero-mcp/zotero-maintain.ps1`).
+**Metadata only** (`--no-fetch`) is step 1: no PDFs are downloaded, for instance when Zotero's file storage is nearly full. The attached PDFs are still checked; a wrong one gets its tag and note but is not replaced, and a stray PDF still moves to the item it belongs to. Gemini still reads attached PDFs where it is needed.
+
+**The progress window** (`--window`) shows the steps (Metadata › PDFs › Metadata again) and every paper with its metadata (✎ filled or corrected, ⚑ to review, ⚠ wrong PDF, ✓ OK) and its full text. Coloured counts sit above the list: hover over one for what it means, click it to select its papers. When something is left for you, a **To do** panel lists it, each with its button where there is one (open papers behind a bot check in your own browser, search the ones not found with the browser); hover over an ⓘ for what to do. Double-click a paper to open it in Zotero.
+
+## The right-click actions in Zotero
+
+| Action | What it runs | When |
+|---|---|---|
+| **Check & complete** | metadata → PDFs → metadata again | The default |
+| **Check metadata only** | metadata, no PDF downloads | When you want no new PDFs |
+| **Fetch PDF only** | PDFs, no metadata changes | Quick, when the metadata is fine |
+| **Fetch PDF in browser** | only the browser step, starting with the links an earlier run could not download | Papers an earlier run did not find |
+
+Each works on the selected papers (item menu) or a whole collection (collection menu). The scripts are in `zotero-actions/` (paste each into a new action in Zotero's Settings → Actions & Tags, type Script, with the item and collection menus checked). They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`.
 
 **Automatically for new items:** with
 
@@ -23,7 +37,7 @@ py -3.12 -m zotero_mcp.cli maintain --collection COLLKEY --report-only
 "maintenance": {"new_items": true}
 ```
 
-in config.json, every start of Claude Desktop first maintains the items added since the last start, then updates the index. The first start only remembers the time.
+in config.json, every start of Claude Desktop first maintains the items added since the last start, then updates the index. The first start only remembers the time. Add `"fetch": false` for metadata only.
 
 ## The attached PDF
 

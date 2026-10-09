@@ -155,7 +155,7 @@ def test_maintenance_audits_fetches_and_checks_again_what_no_registry_knew(tmp_p
         audits = [SimpleNamespace(key=k, flags=["no registry record found"] if k == "NEW2" else []) for k in keys]
         return SimpleNamespace(audits=audits, totals=lambda: {"items": len(audits)})
 
-    def fetch_run(keys=None, log=None, dry_run=False):
+    def fetch_run(keys=None, log=None, dry_run=False, **kw):
         calls.append(("fetch", list(keys)))
         return SimpleNamespace(results=[SimpleNamespace(key="NEW2", status="attached")])
 
@@ -166,3 +166,100 @@ def test_maintenance_audits_fetches_and_checks_again_what_no_registry_knew(tmp_p
                           fetch_run=fetch_run, log=logs.append)
     assert calls == [("audit", ["NEW1", "NEW2"]), ("fetch", ["NEW1", "NEW2"]), ("audit", ["NEW2"])]
     assert out["items"] == 2 and out["fetched"] == 1
+
+
+def test_audit_events_say_what_was_found_or_done():
+    a = ma.ItemAudit("K1", "Moreno (2016)", "journalArticle")
+    assert ma.audit_event(a, applied=True)["status"] == "ok"
+    a.changes = [ma.Change("issue", "", "1", "fill", ["Crossref"]), ma.Change("pages", "1", "67-79", "correct",
+                                                                               ["Crossref", "OpenAlex"])]
+    ev = ma.audit_event(a, applied=True)
+    assert (ev["status"], ev["detail"], ev["phase"]) == ("updated", "1 filled, 1 corrected", "metadata")
+    assert ma.audit_event(a, applied=False)["detail"] == "1 to fill, 1 to correct"
+    a.changes.append(ma.Change("volume", "15", "16", "propose", ["OpenAlex"]))
+    assert ma.audit_event(a, applied=True)["status"] == "review"
+    a.attachment = ac.Problem("manuscript", "ATT2", "/m.pdf", "it says ...")
+    ev = ma.audit_event(a, applied=True)
+    assert ev["status"] == "wrong pdf" and ev["detail"].endswith("the PDF is the accepted manuscript")
+    b = ma.ItemAudit("K2", "X (2020)", "journalArticle", flags=["no registry record found"])
+    assert ma.audit_event(b, applied=True) == {"key": "K2", "label": "X (2020)", "phase": "metadata",
+                                               "status": "no record", "detail": "no registry knows it",
+                                               "changed": False}
+
+
+def test_maintenance_reports_its_steps_and_can_leave_out_the_pdfs(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from zotero_mcp import maintenance
+
+    monkeypatch.setattr(maintenance, "_state_path", lambda: tmp_path / "maintenance.json")
+    events, fetched = [], []
+
+    def audit_run(keys=None, progress=None, **kw):
+        for k in keys:
+            progress({"key": k, "label": k, "phase": "metadata", "status": "ok", "detail": "OK"})
+        return SimpleNamespace(audits=[SimpleNamespace(key=k, flags=[]) for k in keys], totals=lambda: {},
+                               report_path="/r/audit.md")
+
+    def fetch_run(keys=None, progress=None, **kw):
+        fetched.append(keys)
+        return SimpleNamespace(results=[])
+
+    maintenance.run(keys=["A", "B"], backend=object(), audit_run=audit_run, fetch_run=fetch_run,
+                    progress=events.append, log=lambda m: None)
+    stages = [e["detail"] for e in events if e["status"] == "stage"]
+    assert stages == ["Metadata", "PDFs", "Metadata again"] and fetched == [["A", "B"]]
+    assert {"key": "", "status": "done", "detail": "/r/audit.md"} in events
+
+    events.clear()
+    fetched.clear()
+    maintenance.run(keys=["A"], fetch=False, backend=object(), audit_run=audit_run, fetch_run=fetch_run,
+                    progress=events.append, log=lambda m: None)
+    assert [e["detail"] for e in events if e["status"] == "stage"] == ["Metadata"] and fetched == []
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"maintenance": {"new_items": true, "fetch": false}}', encoding="utf-8")
+    assert maintenance.config_new_items(cfg) and not maintenance.config_fetch(cfg)
+    cfg.write_text('{"maintenance": {"new_items": true}}', encoding="utf-8")
+    assert maintenance.config_fetch(cfg)
+
+
+def test_the_check_and_complete_window_follows_the_steps():
+    from zotero_mcp.fulltext_window import Progress
+
+    p = Progress(["Metadata", "PDFs", "Metadata again"])
+    p.active_runs = 1
+    p.apply({"key": "", "status": "stage", "detail": "Metadata", "index": 0})
+    for k in ("A", "B"):
+        p.apply({"key": k, "label": k, "phase": "metadata", "status": "waiting", "detail": ""})
+    p.apply({"key": "A", "label": "A", "phase": "metadata", "status": "updated", "detail": "2 filled",
+             "changed": True})
+    assert p.todo() == []
+    assert p.headline() == "Checking metadata · 1 of 2"
+    assert abs(p.fraction() - 1 / 6) < 1e-9
+    assert p.meta_text("A") == "✎ 2 filled" and p.meta_text("B") == "Waiting" and p.fetch_text("A") == ""
+    p.apply({"key": "B", "label": "B", "phase": "metadata", "status": "review", "detail": "1 to review"})
+
+    p.apply({"key": "", "status": "stage", "detail": "PDFs", "index": 1})
+    p.apply({"key": "A", "label": "A", "status": "skipped", "detail": "already has a PDF or EPUB"})
+    p.apply({"key": "B", "label": "B", "status": "waiting", "detail": ""})
+    p.apply({"key": "B", "label": "B", "status": "attached", "detail": "Unpaywall, published version"})
+    assert p.headline() == "Fetching PDFs · 1 of 1"
+    assert p.fetch_text("A") == "– Has a PDF" and p.fetch_text("B") == "✓ Attached · Unpaywall"
+    assert p.tone("A") == "ok" and p.tone("B") == "warn"       # attached, but a proposal to review
+    assert p.chips() == [("ChipInfo", "✎ 1 fixed"), ("ChipReview", "⚑ 1 to review"), ("ChipOk", "✓ 1 attached")]
+    assert [(name, [c[2] for c in chips]) for name, chips in p.chip_groups()] == [
+        ("Metadata", [["A"], ["B"]]), ("PDFs", [["B"]])]
+    assert [(t[0], t[2]) for t in p.todo()] == [("review", None)]
+    assert "saved search 'Metadata to review'" in p.todo()[0][3]
+
+    # A wrong PDF that the fetcher replaced.
+    p.apply({"key": "C", "label": "C", "phase": "metadata", "status": "wrong pdf", "detail": "the PDF is a proof"})
+    p.apply({"key": "C", "label": "C", "status": "attached", "detail": "Crossref, published version"})
+    assert p.meta_text("C") == "✓ Wrong PDF replaced" and p.tone("C") == "ok"
+    p.apply({"key": "", "status": "stage", "detail": "Metadata again", "index": 2})
+    p.active_runs, p.main_done = 0, True
+    assert p.headline() == "Done · 3 papers" and p.fraction() == 1.0
+    p.apply({"key": "D", "label": "D", "status": "not found", "detail": ""})
+    assert [(t[1], t[2]) for t in p.todo()] == [("✗ 1 not found", "browser"),
+                                                 ("⚑ 1 with changes to review  ⓘ", None)]

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.36] - 2026-10-09
+
+### Added
+
+- **Progress window for `maintain`** (`--window`, used by the right-click actions): the steps (1 Metadata › 2 PDFs › 3 Metadata again) and every paper with its metadata (filled, corrected, to review, wrong PDF, OK) and its full text. Before, the metadata steps only showed in the terminal.
+- Both progress windows are quieter: short statuses, coloured counts that explain themselves on hover and select their papers on click, and a **To do** panel (only when something is left for you) with the button for each task next to it.
+- **Metadata only**: `maintain --no-fetch` and the right-click action "Check metadata only": no PDFs downloaded; wrong PDFs are tagged, not replaced. `"maintenance": {"new_items": true, "fetch": false}` does the same for new items at startup.
+- Four right-click actions with clearer names: **Check & complete**, **Check metadata only**, **Fetch PDF only**, **Fetch PDF in browser** (scripts in `zotero-actions/`).
+
+### Fixed
+
+- A browser-only run searched several papers at once in the one Chrome window; it now takes one at a time.
+
 ## [0.13.2+arne.35] - 2026-10-09
 
 ### Added
