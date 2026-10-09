@@ -2338,6 +2338,17 @@ def _bg_main(run_id: str, raw: str) -> int:
             from zotero_mcp.cli import setup_zotero_environment
 
             setup_zotero_environment()
+            if opts.get("mode") == "read":
+                # Look a paper up and read it; nothing goes to Zotero.
+                from zotero_mcp import read_online
+
+                reading = read_online.read(doi=opts.get("doi") or "", title=opts.get("title") or "",
+                                           author=opts.get("author") or "", year=opts.get("year") or "",
+                                           save_to=opts.get("save_to") or "", steps=opts.get("steps"), log=log)
+                paths["report"].write_text(reading.markdown(int(opts.get("max_chars") or 60_000)),
+                                           encoding="utf-8")
+                paths["done"].write_text("ok", encoding="utf-8")
+                return 0
             report = run(keys=opts.get("keys"), collection=opts.get("collection"), limit=opts.get("limit"),
                          dry_run=bool(opts.get("dry_run")), steps=opts.get("steps") or DEFAULT_STEPS, log=log)
             paths["report"].write_text(report.markdown(limit=40), encoding="utf-8")

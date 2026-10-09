@@ -116,6 +116,7 @@ All add tools take a `collections` parameter accepting collection keys, names, o
 
 - `zotero_fetch_fulltext`: Find and attach a PDF for items that have none: open-access sources, the publisher's page, Google Scholar (SerpApi) and a web search (Tavily), each PDF checked against the item first — see [Fetching full texts](fulltext-fetch.md)
 - `zotero_fetch_fulltext_status`: Progress or result of a `zotero_fetch_fulltext` run still going in the background
+- `zotero_read_paper`: Find a paper's full text online (by DOI, or title with author and year) and read it, without adding anything to the library; the same search and checks as `zotero_fetch_fulltext`, the text returned to Claude (whole text in a .txt file), the PDF optionally saved to a folder
 - `zotero_metadata_audit`: Check up to 15 items against Crossref/DataCite, Open Library, OpenAlex, PubMed and the item's PDF; fill empty fields and correct those two sources agree on (`apply=true`), propose the rest — see [Checking and fixing metadata](metadata-audit.md)
 - `zotero_metadata_review`: List, accept or reject the metadata proposals waiting in the review list
 - `zotero_citations`: The library's citation graph (OpenAlex reference lists, stored): what a paper cites, which papers in the library cite it, papers sharing its references, and a collection's most-cited papers and gaps — see [The citation graph](citations.md)

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.61] - 2026-10-09
+
+### Added
+
+- **Read a paper without adding it to Zotero** (`zotero_read_paper` in Claude). Give a DOI, or a title with author and year: the paper is found with the same sources and checks as the PDF fetcher (open access, the publisher on the university network, Google Scholar, the web search; the visible browser step is left out), and Claude gets its text to read. For a paper you are only curious about, one for someone else's project, or one not worth keeping. Nothing is written to the library or to the shared records; the whole text is kept in a `.txt` file in the temp folder, and `save_to` also saves the PDF to a folder you name.
+
 ## [0.13.2+arne.60] - 2026-10-09
 
 ### Fixed

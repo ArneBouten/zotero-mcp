@@ -193,3 +193,13 @@ stops at the free allowance. Change the limits in a `fulltext_fetch` section
 of `config.json`: `serpapi_monthly` (250), `tavily_monthly` (1000),
 `zenrows_monthly_credits` (5000), `openalex_content_daily` (100),
 `host_delay` (6 seconds), `retry_days` (30), `max_candidates` (12 links per step and paper).
+
+## Reading a paper without adding it
+
+`zotero_read_paper` (in Claude) looks a paper up by DOI, or by title with author and year, and
+reads it without adding anything to Zotero: for a paper you are only curious about, one for
+someone else's project, or one not worth keeping. It uses the same sources and checks as the
+fetcher (not the visible browser step) and gives Claude the paper's text; the whole text is also
+in a `.txt` file in the temp folder, and with `save_to` the PDF is saved to a folder you name.
+Nothing is recorded in the shared state either.
+
