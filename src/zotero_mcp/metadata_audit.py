@@ -2134,7 +2134,8 @@ def run(
                     except Exception as e:
                         log(f"    -> could not remove the check-pdf tag: {type(e).__name__}: {e}")
             notify(audit_event(audit, applied=writer is not None))
-            state.setdefault(audit.key, {})["last_audit"] = _dt.datetime.now().isoformat(timespec="seconds")
+            if not audit.error and not any(f.startswith(NOT_CHECKED) for f in audit.flags):
+                state.setdefault(audit.key, {})["last_audit"] = _dt.datetime.now().isoformat(timespec="seconds")
             if n % 50 == 0:
                 _save_state(state)
     _save_state(state)

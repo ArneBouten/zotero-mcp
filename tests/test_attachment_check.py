@@ -395,3 +395,138 @@ def test_maintenance_can_update_the_search_index_last(tmp_path, monkeypatch):
     maintenance.run(keys=["A"], index=True, apply=False, backend=object(), audit_run=audit_run,
                     fetch_run=fetch_run, index_run=index_run, log=lambda m: None)
     assert "index" not in order                  # a report-only run changes nothing, the index neither
+
+
+class Library:
+    """A backend with dateModified, for the monthly check."""
+
+    def __init__(self, items):
+        self.items = items
+
+    def list_items(self, item_type=None, limit=100):
+        return list(self.items.values())
+
+    def get_items(self, keys):
+        return {k: self.items[k] for k in keys if k in self.items}
+
+
+def _paper(key, modified, doi="", tags=()):
+    return {"key": key, "data": {"key": key, "itemType": "journalArticle", "title": f"Paper {key}",
+                                 "creators": [{"creatorType": "author", "lastName": "Smith"}], "date": "2020",
+                                 "DOI": doi, "dateModified": modified, "tags": [{"tag": t} for t in tags]}}
+
+
+def test_the_monthly_check_checks_changed_papers_fully_and_the_rest_for_retractions(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from zotero_mcp import maintenance
+
+    monkeypatch.setattr(maintenance, "_state_path", lambda: tmp_path / "maintenance.json")
+    lib = Library({"OLD": _paper("OLD", "2026-01-01T10:00:00Z", "10.1/old"),
+                   "NODOI": _paper("NODOI", "2026-01-01T10:00:00Z"),
+                   "EDITED": _paper("EDITED", "2026-01-01T10:00:00Z", "10.1/edited"),
+                   "MISS": _paper("MISS", "2026-01-01T10:00:00Z", tags=[ff.TAG_NOT_FOUND]),
+                   "NEW": _paper("NEW", "2026-10-09T08:00:00Z", "10.1/new")})
+    maintenance.remember_checked(lib, ["OLD", "NODOI", "EDITED"])
+    lib.items["EDITED"]["data"]["dateModified"] = "2026-10-01T09:00:00Z"     # you changed it since
+    full, recheck = maintenance.monthly_plan(lib)
+    assert sorted(full) == ["EDITED", "MISS", "NEW"] and recheck == ["OLD"]
+
+    ff._save_item_state("MISS", {"last_attempt": "2026-10-08T10:00:00", "status": "not found"})
+    calls, events = {}, []
+
+    def audit_run(keys=None, **kw):
+        return SimpleNamespace(audits=[SimpleNamespace(key=k, flags=[]) for k in keys], totals=lambda: {})
+
+    def fetch_run(keys=None, **kw):
+        calls["fetch"] = list(keys)
+        return SimpleNamespace(results=[])
+
+    def retraction_run(keys, **kw):
+        calls["retractions"] = list(keys)
+        return {"checked": len(keys)}
+
+    out = maintenance.monthly(backend=lib, audit_run=audit_run, fetch_run=fetch_run, index_run=lambda log: True,
+                              retraction_run=retraction_run, writer_factory=object, progress=events.append,
+                              log=lambda m: None)
+    assert calls["retractions"] == ["OLD"]
+    assert sorted(calls["fetch"]) == ["EDITED", "NEW"]       # MISS was searched in vain yesterday
+    assert [e["detail"] for e in events if e["status"] == "stage"] == maintenance.monthly_stages()
+    assert out["indexed"] is True
+    # Done: not due again for a month, and nothing changed means nothing to check fully.
+    assert maintenance.monthly_due()[0] is False
+    assert maintenance.monthly(log=lambda m: None) == {"due": False}
+    assert maintenance.monthly_plan(lib)[0] == []
+
+
+def test_a_large_first_check_is_spread_over_days(tmp_path, monkeypatch):
+    import datetime as dt
+    from types import SimpleNamespace
+
+    from zotero_mcp import maintenance
+
+    monkeypatch.setattr(maintenance, "_state_path", lambda: tmp_path / "maintenance.json")
+    lib = Library({f"K{i}": _paper(f"K{i}", f"2026-01-0{i}T10:00:00Z") for i in range(1, 6)})
+    seen = []
+
+    def audit_run(keys=None, **kw):
+        seen.append(list(keys))
+        return SimpleNamespace(audits=[SimpleNamespace(key=k, flags=[]) for k in keys], totals=lambda: {})
+
+    run = dict(backend=lib, audit_run=audit_run, fetch_run=lambda **kw: SimpleNamespace(results=[]),
+               index_run=lambda log: True, retraction_run=lambda keys, **kw: {}, writer_factory=object,
+               log=lambda m: None, max_full=2)
+    maintenance.monthly(**run)
+    assert seen[0] == ["K1", "K2"]                          # oldest changes first
+    state = maintenance._load()
+    assert state["monthly_backlog"] == 3 and maintenance.monthly_due()[0] is False     # not the same day
+    state["last_monthly"] = (dt.datetime.now() - dt.timedelta(days=1, minutes=1)).isoformat(timespec="seconds")
+    maintenance._save(state)
+    assert maintenance.monthly_due() == (True, "3 papers left from the last run")
+    maintenance.monthly(**run)
+    assert seen[1] == ["K3", "K4"]
+
+
+def test_new_retractions_are_tagged_once_and_old_corrections_stay_quiet(tmp_path):
+    from test_metadata_audit import FakeHttp
+
+    from zotero_mcp import maintenance
+
+    lib = Library({"R1": _paper("R1", "2026-01-01T10:00:00Z", "10.1/r1")})
+    message = {"message": {"DOI": "10.1/r1", "title": ["Paper R1"], "type": "journal-article", "updated-by": [
+        {"type": "retraction", "updated": {"date-parts": [[2026, 9, 1]]}, "DOI": "10.1/retraction"},
+        {"type": "correction", "updated": {"date-parts": [[2015, 3, 1]]}, "DOI": "10.1/old-correction"}]}}
+    http = FakeHttp({"api.crossref.org": (200, message)})
+
+    class W:
+        def __init__(self):
+            self.calls = []
+
+        def apply(self, audit, changes, tags_add=(), tags_remove=()):
+            self.calls.append(("tags", list(tags_add)))
+
+        def add_note(self, key, body):
+            self.calls.append(("note", body))
+
+    w, events = W(), []
+    totals = maintenance.check_retractions(["R1"], backend=lib, http=http, settings=ff.Settings(), writer=w,
+                                           progress=events.append, log=lambda m: None, sleep=lambda s: None)
+    assert totals["retracted"] == 1 and w.calls[0] == ("tags", [ma.TAG_RETRACTED])
+    assert "RETRACTED" in w.calls[1][1] and "old-correction" not in w.calls[1][1]
+    assert any(e.get("status") == "retracted" for e in events)
+    w2 = W()
+    maintenance.check_retractions(["R1"], backend=lib, http=http, settings=ff.Settings(), writer=w2,
+                                  log=lambda m: None, sleep=lambda s: None)
+    assert w2.calls == []                                   # known since the last check
+
+
+def test_the_monthly_window_counts_the_retraction_step():
+    from zotero_mcp import maintenance
+    from zotero_mcp.fulltext_window import Progress
+
+    p = Progress(maintenance.monthly_stages())
+    p.active_runs = 1
+    p.apply({"key": "", "status": "stage", "detail": "Retractions", "index": 0})
+    p.apply({"key": "", "status": "count", "done": 120, "total": 1500})
+    assert p.headline() == "Checking for retractions and corrections · 120 of 1500"
+    assert 0 < p.fraction() < 0.1

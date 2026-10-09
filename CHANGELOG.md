@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.41] - 2026-10-09
+
+### Added
+
+- **The monthly check**, without Claude: the Actions & Tags action "Monthly check" (event Main Window Load) starts `maintain --monthly` five minutes after Zotero opens, at most once a day; it stops at once unless due (30 days, or papers left over). Papers changed since their last check get Check & complete (at most 400 per run, the rest the next day); the others with a DOI only a check for new retractions (tag `retracted`, note) and recent corrections (note); then the search index. Papers searched in vain recently are not searched again.
+
+### Fixed
+
+- A paper that was not checked because a registry did not answer is no longer remembered as checked.
+
 ## [0.13.2+arne.40] - 2026-10-09
 
 ### Added

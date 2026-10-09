@@ -36,17 +36,18 @@ FINISHED = {"attached", "found", "not found", "error", "skipped", "needs your br
 
 META_TEXT = {"waiting": "Waiting", "checking": "Checking…"}
 META_ICON = {"ok": "✓", "updated": "✎", "review": "⚑", "wrong pdf": "⚠", "no record": "?", "not checked": "–",
-             "retracted": "⚠", "error": "✗", "pdf replaced": "✓", "other version": "◐"}
+             "retracted": "⚠", "error": "✗", "pdf replaced": "✓", "other version": "◐", "notice": "ℹ"}
 META_PENDING = {"waiting", "checking"}
 
 #: Row colour: the most pressing of the row's columns wins.
 _SEVERITY = {"bad": 4, "warn": 3, "busy": 2, "ok": 1}
 _META_TONE = {"error": "bad", "retracted": "bad", "wrong pdf": "warn", "review": "warn", "no record": "warn",
-              "updated": "ok", "ok": "ok", "pdf replaced": "ok", "other version": "ok"}
+              "updated": "ok", "ok": "ok", "pdf replaced": "ok", "other version": "ok", "notice": "warn"}
 _FETCH_TONE = {"not found": "bad", "error": "bad", "no download": "bad", "needs your browser": "warn",
                "waiting for your download": "warn", "attached": "ok", "found": "ok"}
 
-TITLES = {"fetch": "Find Full Text", "maintain": "Check & complete", "metadata": "Check metadata"}
+TITLES = {"fetch": "Find Full Text", "maintain": "Check & complete", "metadata": "Check metadata",
+          "monthly": "Monthly check"}
 
 
 class Progress:
@@ -69,6 +70,7 @@ class Progress:
         self.stage_index = -1
         self.stage_keys: set[str] = set()
         self.main_done = not self.stages
+        self.count: tuple[int, int] | None = None     # a step without rows (retractions): done, total
 
     def apply(self, event: dict) -> str | None:
         """Take one event from the run; returns the paper's key when its row changed."""
@@ -80,6 +82,9 @@ class Progress:
             elif status == "stage":
                 self.stage_index = int(event.get("index", self.stage_index + 1))
                 self.stage_keys = set()
+                self.count = None
+            elif status == "count":
+                self.count = (int(event.get("done", 0)), int(event.get("total", 0)))
             return None
         if key not in self.labels:
             self.order.append(key)
@@ -143,6 +148,8 @@ class Progress:
         return finished, total
 
     def _stage_progress(self) -> tuple[int, int]:
+        if self.count is not None:
+            return self.count
         keys = self.stage_keys
         if self._stage_is_metadata():
             done = sum(1 for k in keys if self.meta.get(k) not in META_PENDING)
@@ -173,6 +180,8 @@ class Progress:
             done, total = self._stage_progress()
             if self.stages[self.stage_index] == "Search index":
                 return "Updating the search index…"
+            if self.stages[self.stage_index] == "Retractions":
+                return f"Checking for retractions and corrections · {done} of {total}"
             what = "Checking metadata" if self._stage_is_metadata() else "Fetching PDFs"
             return f"{what} · {done} of {total}"
         finished, total = self._fetch_progress()
@@ -214,6 +223,9 @@ class Progress:
                  "Changes only one source suggests: not made. See 'To do'."),
                 ("ChipBad", "⚠ {} retracted", self._keys(lambda k: meta(k) == "retracted"),
                  "Retracted by the journal (tag: retracted)."),
+                ("ChipNeutral", "ℹ {} correction", self._keys(lambda k: meta(k) == "notice"),
+                 "A correction, erratum or expression of concern was published this year. A note on the paper "
+                 "says which."),
             ]
             groups.append(("Metadata", chips))
         pdf_chips = [("ChipWarn", "⚠ {} wrong PDF", wrong,
@@ -436,6 +448,8 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
     if run is None:
         if mode == "fetch":
             from zotero_mcp.fulltext_fetch import run as run
+        elif mode == "monthly":
+            run = maintenance.monthly
         else:
             run = maintenance.run
     if fetch is None:
@@ -443,12 +457,13 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
             fetch = run
         else:
             from zotero_mcp.fulltext_fetch import run as fetch
-    if mode != "fetch":
+    if mode in ("maintain", "metadata"):
         run_kwargs = dict(run_kwargs, fetch=mode == "maintain")
     with_pdfs = mode != "metadata"
     with_meta = mode != "fetch"
 
-    prog = Progress(maintenance.stages(mode == "maintain", bool(run_kwargs.get("index"))) if with_meta else None)
+    prog = Progress(maintenance.monthly_stages() if mode == "monthly" else
+                    maintenance.stages(mode == "maintain", bool(run_kwargs.get("index"))) if with_meta else None)
     events: queue.Queue = queue.Queue()
     main_uses_browser = mode == "fetch" and "browser" in (run_kwargs.get("steps") or [])
     dry_run = bool(run_kwargs.get("dry_run", not run_kwargs.get("apply", True)))

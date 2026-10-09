@@ -43,6 +43,16 @@ The window stays minimised in the taskbar. It comes forward at the end only when
 
 `maintain --index` adds the index update to a run in a terminal; `--quiet` (with `--window`) is the minimised window.
 
+## The monthly check
+
+The action **Monthly check** (event "Main Window Load", no menu entry) starts five minutes after Zotero opens, at most once a day. zotero-mcp then decides whether the check is due: 30 days after the last one, or the next day when papers were left over. Otherwise it stops at once.
+
+- **Papers changed since their last check**, or never checked: Check & complete (metadata, a PDF for those without one, metadata again). Papers searched in vain within the last 30 days are not searched again. At most 400 per run, oldest changes first; the rest follow the next day, so the registries' daily allowances are not used up. The first run therefore takes a few days for a whole library.
+- **Every other paper with a DOI**: only Crossref's retraction and correction notices (Retraction Watch data), free and quick. A new retraction gets the tag `retracted` and a note; a correction, erratum or expression of concern from the last year gets a note. Older notices are remembered silently, so nothing is reported twice.
+- **Then the search index**, as on import.
+
+"Changed" means Zotero's modified time differs from the one noted after the paper's last check (including the check's own changes), so a paper is only checked again after you or another program changed it. In a terminal: `zotero-mcp maintain --monthly` (`--force` when not due, `--window` for the window).
+
 **At Claude Desktop's start instead** (older option, without the import action): with `"maintenance": {"new_items": true}` in config.json, every start first maintains the items added since the last start, then updates the index. Add `"fetch": false` for metadata only.
 
 ## The attached PDF
