@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.51] - 2026-10-09
+
+### Changed
+
+- **The online year becomes the issue year by rule**, without a review: when Crossref's record, found by the item's DOI, has both dates and the item's volume and issue, and the item has the online year. Tagged `auto-corrected` with a note, like other corrections. A large year gap, or another volume or issue, stays a suggestion.
+- A paper whose suggestions are all settled at its next check (by this rule or by the registry) leaves the review list; its old suggestions note goes to the trash.
+- The checking rules' version is raised, so papers checked before are checked once more at the next Check & complete.
+
 ## [0.13.2+arne.50] - 2026-10-09
 
 ### Fixed

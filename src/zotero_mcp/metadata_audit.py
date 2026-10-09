@@ -1090,6 +1090,11 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
         elif any(same(name, record_value(r, name), old) for r in second if record_value(r, name)):
             audit.flags.append(f"{FIELD_LABELS.get(name, name)}: {ref.source} says {new!r}, "
                                f"but another source agrees with yours ({old!r}); left as is")
+        elif name == "year" and ref.online_year == old and _same_issue(ref, data):
+            # Both dates come from the publisher's own record, for the same volume and issue: the
+            # issue year is a style rule (APA), not a judgement.
+            audit.changes.append(Change(name, old, new, "correct", [ref.source],
+                                        "yours was the online year; APA uses the issue year"))
         elif name == "year" and ref.online_year == old:
             audit.changes.append(Change(name, old, new, "propose", [ref.source],
                                         "yours is the online year; APA uses the issue year"))
@@ -1205,6 +1210,18 @@ def _doi_identity_problem(info: ff.ItemInfo, ref: Record) -> str | None:
     if info.year.isdigit() and ref.year.isdigit() and abs(int(info.year) - int(ref.year)) > 3 and sim < 0.9:
         return f"the DOI's record is from {ref.year} with another title: check the DOI"
     return None
+
+
+def _same_issue(ref: Record, data: dict) -> bool:
+    """Crossref's record (found by the item's DOI) is for the volume and issue the item has: its
+    online and issue dates then belong to this article. An empty volume or issue counts as agreeing."""
+    if ref.source != "Crossref" or ref.by not in ("doi", "pdf-doi", "page-doi") or not ref.volume:
+        return False
+    for name, theirs in (("volume", ref.volume), ("issue", ref.issue)):
+        mine = str(data.get(name) or "").strip()
+        if mine and theirs and mine.lower() != str(theirs).strip().lower():
+            return False
+    return True
 
 
 def _note_updates(audit: ItemAudit, ref: Record) -> None:
@@ -2383,6 +2400,12 @@ def _write(writer, audit: ItemAudit, log: Callable[[str], None]) -> None:
             writer.apply(audit, [], tags_add=[TAG_REVIEW])
             writer.add_note(audit.key, _note_html(f"Proposed metadata changes ({_today()})",
                                                   audit, props, proposals=True))
+        elif (TAG_REVIEW in audit.tags and audit.reference
+              and not any(f.startswith(NOT_CHECKED) for f in audit.flags)):
+            # Nothing left to review (settled by a rule now, or by the registry): the old suggestions go.
+            for old in writer.proposal_notes(audit.key):
+                writer.trash(old)
+            writer.apply(audit, [], tags_remove=[TAG_REVIEW])
     except Exception as e:
         audit.error = f"writing failed: {type(e).__name__}: {e}"
         log(f"    -> {audit.error}")

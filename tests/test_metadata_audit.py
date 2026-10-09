@@ -310,6 +310,31 @@ def test_a_checked_paper_is_not_asked_for_its_notices_again():
     assert not asked and totals["checked"] == 0
 
 
+def test_the_online_year_becomes_the_issue_year_by_rule():
+    online_first = {"message": dict(CROSSREF["message"], **{
+        "published-online": {"date-parts": [[1999, 11, 2]]}, "published-print": {"date-parts": [[2000, 1]]}})}
+    a, _ = audit(item(date="1999"), {"api.crossref.org": (200, online_first)})
+    [year] = [c for c in a.changes if c.field == "year"]
+    assert (year.kind, year.new) == ("correct", "2000") and "issue year" in year.why
+    # Another volume on the item: not surely this record's dates, so a suggestion.
+    a, _ = audit(item(date="1999", volume="54"), {"api.crossref.org": (200, online_first)})
+    assert [c.kind for c in a.changes if c.field == "year"] == ["propose"]
+
+
+def test_a_review_settled_by_a_rule_is_cleared():
+    online_first = {"message": dict(CROSSREF["message"], **{
+        "published-online": {"date-parts": [[1999, 11, 2]]}, "published-print": {"date-parts": [[2000, 1]]}})}
+    raw = item(date="1999", tags=[{"tag": ma.TAG_REVIEW}])
+    items = {"ABCD1234": raw}
+    writer = FakeWriter(items)
+    old = [ma.Change("year", "1999", "2000", "propose", ["Crossref"], "yours is the online year; APA uses the issue year")]
+    writer.add_note("ABCD1234", ma._note_html("Proposed metadata changes", ma.ItemAudit("ABCD1234", "", ""), old, True))
+    ma.run(apply=True, log=lambda m: None, settings=ff.Settings(), http=FakeHttp({"api.crossref.org": (200, online_first)}),
+           backend=FakeBackend(items), writer_factory=lambda: writer, pdf_text=lambda k: "", workers=1)
+    assert raw["data"]["date"] == "2000"
+    assert ma.TAG_REVIEW not in {t["tag"] for t in raw["data"]["tags"]} and not writer.proposal_notes("ABCD1234")
+
+
 def test_reject_tag_is_processed_on_the_next_run():
     raw = item(volume="56")
     items = {"ABCD1234": raw}
@@ -484,7 +509,7 @@ def test_online_year_and_publisher_differences():
                      "publisher": "Taylor & Francis"})
     a, _ = audit(item(date="2000", publisher="Routledge"), routes)
     year = next(c for c in a.changes if c.field == "year")
-    assert year.kind == "propose" and "online year" in year.why
+    assert year.kind == "correct" and "online year" in year.why     # by rule (arne.51)
     assert "publisher" not in {c.field for c in a.changes}
 
 

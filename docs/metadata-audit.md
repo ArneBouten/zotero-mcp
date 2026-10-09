@@ -60,7 +60,7 @@ Crossref's record includes Retraction Watch data. A retracted item is flagged `R
 
   When the registry has no abstract, PubMed's is used for articles, then OpenAlex's. Either only if it shares at least three content words with the title, is 200–6,000 characters long, is not mostly copyright boilerplate and is not in another language than the title. The place of publication is left alone: APA 7 does not use it.
 - **A filled field is corrected only when two independent sources agree** on a different value. This applies to volume, issue, pages, DOI, year and journal name. A publisher is only filled in, never changed.
-  - The year is the issue year (Crossref's print date before its online date), as APA wants. When yours is the online year, the proposal says so.
+  - The year is the issue year (Crossref's print date before its online date), as APA wants. When yours is the online year and Crossref's record, found by the item's DOI, has the item's volume and issue, the year is corrected by rule (tag `auto-corrected`, a note). Otherwise it is a suggestion that says so. A paper whose only suggestion is settled this way leaves the review list.
   - An abbreviated or misspelt journal name, or one with clutter ("(Auckland, N.Z.)", " - ELEM SCH J", "&amp;"), is replaced by the plain name; the abbreviation moves to *Journal Abbr*. A registry name that only adds a subtitle to yours is not a difference.
   - A year more than two years off is never corrected, only proposed: it usually means a wrong DOI.
   - A DOI that works is never replaced by another (Crossref aliases).
@@ -87,7 +87,7 @@ To decide:
 
 A rejected value is remembered (`~/.config/zotero-mcp/metadata/state.json`) and not proposed again. With the tag or through Claude, accepting only some fields counts the rest as rejected.
 
-**Learning from your decisions.** Each proposal has a kind: its field plus its reason, such as "Year | yours is the online year; APA uses the issue year". Once you have decided at least 10 proposals of one kind the same way at least 90 % of the time, later runs decide that kind for you. The change then says "you accepted 12 of 12 like this"; a kind you keep rejecting is no longer proposed. The counts are in `state.json` under `_learned`.
+**Learning from your decisions.** Each proposal has a kind: its field plus its reason, such as "Pages | no second source to confirm". Once you have decided at least 10 proposals of one kind the same way at least 90 % of the time, later runs decide that kind for you. The change then says "you accepted 12 of 12 like this"; a kind you keep rejecting is no longer proposed. The counts are in `state.json` under `_learned`.
 
 ## Running it
 

@@ -297,7 +297,7 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
 
 #: The checking rules' version. A paper checked under older rules counts as changed, so
 #: the next run checks it again; raised when the rules improve enough to be worth that.
-RULES = 1
+RULES = 2      # 2: the online year is corrected to the issue year by rule (arne.51)
 #: Days between retraction checks of an unchanged paper.
 RETRACTION_DAYS = 30
 #: Days after which a recent article still without volume or pages (online first) is checked
