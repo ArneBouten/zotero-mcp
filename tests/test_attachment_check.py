@@ -409,6 +409,11 @@ class Library:
     def get_items(self, keys):
         return {k: self.items[k] for k in keys if k in self.items}
 
+    children: dict = {}
+
+    def get_children(self, keys, item_type=None):
+        return {k: self.children.get(k, []) for k in keys}
+
 
 def _paper(key, modified, doi="", tags=()):
     return {"key": key, "data": {"key": key, "itemType": "journalArticle", "title": f"Paper {key}",
@@ -431,6 +436,10 @@ def test_the_monthly_check_checks_changed_papers_fully_and_the_rest_for_retracti
     lib.items["EDITED"]["data"]["dateModified"] = "2026-10-01T09:00:00Z"     # you changed it since
     full, recheck = maintenance.monthly_plan(lib)
     assert sorted(full) == ["EDITED", "MISS", "NEW"] and recheck == ["OLD"]
+    # A PDF added by hand changes the attachment, not the paper: still a change.
+    lib.children = {"OLD": [{"data": {"itemType": "attachment", "dateModified": "2026-10-05T12:00:00Z"}}]}
+    assert "OLD" in maintenance.monthly_plan(lib)[0]
+    lib.children = {}
 
     ff._save_item_state("MISS", {"last_attempt": "2026-10-08T10:00:00", "status": "not found"})
     calls, events = {}, []

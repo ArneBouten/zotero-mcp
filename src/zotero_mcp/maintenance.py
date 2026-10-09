@@ -223,6 +223,21 @@ def _modified(raw: dict) -> str:
     return str(raw.get("data", raw).get("dateModified") or "")
 
 
+def _stamps(backend, items: dict) -> dict[str, str]:
+    """Each paper's latest change: its own, or one of its attachments' (a PDF added or replaced
+    does not change the paper's own modified time in Zotero)."""
+    try:
+        children = backend.get_children(list(items)) or {}
+    except Exception:
+        children = {}
+    out = {}
+    for key, raw in items.items():
+        times = [_modified(raw)] + [_modified(c) for c in children.get(key) or []
+                                    if (c.get("data", c).get("itemType") == "attachment")]
+        out[key] = max((t.replace("T", " ").replace("Z", "") for t in times if t), default="")
+    return out
+
+
 def remember_checked(backend, keys: list[str]) -> None:
     """Note each paper's Zotero "modified" time after a check (and after the check's own writes),
     so the monthly check knows which papers changed since."""
@@ -232,12 +247,12 @@ def remember_checked(backend, keys: list[str]) -> None:
         found = backend.get_items(list(keys)) or {}
     except Exception:
         return
+    stamps = _stamps(backend, {k: v for k, v in found.items() if k in set(keys)})
     state = _load()
     seen = state.setdefault("checked_modified", {})
-    for key in keys:
-        raw = found.get(key)
-        if raw and _modified(raw):
-            seen[key] = _modified(raw)
+    for key, stamp in stamps.items():
+        if stamp:
+            seen[key] = stamp
     _save(state)
 
 
@@ -247,15 +262,17 @@ def monthly_plan(backend) -> tuple[list[str], list[str]]:
     from zotero_mcp.metadata_audit import AUDITED_TYPES, norm_doi
 
     seen = _load().get("checked_modified") or {}
-    full, recheck = [], []
+    papers = {}
     for raw in backend.list_items("-attachment", limit=100000) or []:
         data = raw.get("data", raw)
-        if data.get("itemType") not in AUDITED_TYPES:
-            continue
-        key = raw.get("key") or data.get("key")
-        if key not in seen or (_modified(raw) and _modified(raw) != seen[key]):
-            full.append((_modified(raw), key))
-        elif norm_doi(data.get("DOI") or ""):
+        if data.get("itemType") in AUDITED_TYPES:
+            papers[raw.get("key") or data.get("key")] = raw
+    stamps = _stamps(backend, papers)
+    full, recheck = [], []
+    for key, raw in papers.items():
+        if key not in seen or (stamps[key] and stamps[key] != seen[key]):
+            full.append((stamps[key], key))
+        elif norm_doi(raw.get("data", raw).get("DOI") or ""):
             recheck.append(key)
     return [k for _m, k in sorted(full)], recheck
 

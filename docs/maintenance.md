@@ -51,7 +51,7 @@ The action **Monthly check** (event "Main Window Load", no menu entry) starts fi
 - **Every other paper with a DOI**: only Crossref's retraction and correction notices (Retraction Watch data), free and quick. A new retraction gets the tag `retracted` and a note; a correction, erratum or expression of concern from the last year gets a note. Older notices are remembered silently, so nothing is reported twice.
 - **Then the search index**, as on import.
 
-"Changed" means Zotero's modified time differs from the one noted after the paper's last check (including the check's own changes), so a paper is only checked again after you or another program changed it. In a terminal: `zotero-mcp maintain --monthly` (`--force` when not due, `--window` for the window).
+"Changed" means Zotero's modified time of the paper or one of its attachments differs from the one noted after the paper's last check (including the check's own changes), so a paper is only checked again after you or another program changed it. In a terminal: `zotero-mcp maintain --monthly` (`--force` when not due, `--window` for the window).
 
 **At Claude Desktop's start instead** (older option, without the import action): with `"maintenance": {"new_items": true}` in config.json, every start first maintains the items added since the last start, then updates the index. Add `"fetch": false` for metadata only.
 
