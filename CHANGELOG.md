@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.50] - 2026-10-09
+
+### Fixed
+
+- **Checking the whole library seemed to check only the unchanged papers.** The window listed the unchanged papers first and then spent minutes on their retraction check, with no progress shown ("0 of 0"), before the papers that needed a check began. Now the papers to check come first in the list and are checked first; the unchanged ones follow, with "Retractions and corrections · 12 of 316" as progress.
+- Papers checked fully no longer get a second retraction check the same month: the check records the notices it read.
+- A wrong-PDF finding that no longer holds now takes its note with it (to the trash) instead of adding a "Checked again" note.
+
 ## [0.13.2+arne.49] - 2026-10-09
 
 ### Fixed

@@ -144,6 +144,23 @@ def test_the_audit_reports_attachments_and_fetches_the_right_pdfs():
     assert report.totals()["attachments"] == 1 and "## Wrong PDFs (1)" in report.markdown()
 
 
+def test_a_finding_that_no_longer_holds_takes_its_note_with_it():
+    from test_metadata_audit import CROSSREF, FakeBackend, FakeHttp, FakeWriter
+
+    r = raw(tags=[{"tag": ff.TAG_CHECK_PDF}])
+    items = {"EDP8CXSW": r}
+    writer = FakeWriter(items)
+    writer.add_note("EDP8CXSW", "<p><b>PDF to check (08-10-2026)</b>: another paper</p>")
+    writer.add_note("EDP8CXSW", "<p>My own reading notes</p>")
+    ma.run(apply=True, log=lambda m: None, settings=ff.Settings(), http=FakeHttp({"api.crossref.org": (200, CROSSREF)}),
+           backend=FakeBackend(items), writer_factory=lambda: writer, pdf_text=lambda k: "", workers=1,
+           pdfs=lambda key: [pdf(OWN)], gemini=False)
+    assert ff.TAG_CHECK_PDF not in {t["tag"] for t in r["data"]["tags"]}
+    notes = [n["data"]["note"] for n in writer.notes["EDP8CXSW"]]
+    assert not any("PDF to check" in n or "right after all" in n for n in notes)
+    assert any("My own reading notes" in n for n in notes)
+
+
 def test_maintenance_audits_fetches_and_checks_again_what_no_registry_knew(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -467,8 +484,11 @@ def test_a_run_skips_papers_unchanged_since_their_last_check(tmp_path, monkeypat
     ff._save_item_state("MISS", {"last_attempt": "2026-10-08T10:00:00", "status": "not found"})
     calls, events = {}, []
 
+    order = []
+
     def audit_run(keys=None, **kw):
         calls["audit"] = list(keys)
+        order.append("audit")
         return SimpleNamespace(audits=[SimpleNamespace(key=k, flags=[]) for k in keys], totals=lambda: {})
 
     def fetch_run(keys=None, **kw):
@@ -477,12 +497,17 @@ def test_a_run_skips_papers_unchanged_since_their_last_check(tmp_path, monkeypat
 
     def retraction_run(keys, **kw):
         calls["retractions"] = list(keys)
+        order.append("retractions")
         return {}
 
     run = dict(keys=["OLD", "EDITED", "MISS", "NEW"], backend=lib, audit_run=audit_run, fetch_run=fetch_run,
                retraction_run=retraction_run, writer_factory=object, progress=events.append, log=lambda m: None)
     maintenance.run(**run)
     assert calls["audit"] == ["EDITED", "NEW"] and calls["retractions"] == ["OLD", "MISS"]
+    # The papers to check come first, in the list and in time; the unchanged ones after them.
+    assert order == ["audit", "retractions"]
+    rows = [e["key"] for e in events if e.get("status") in ("waiting", "unchanged")]
+    assert rows[:2] == ["EDITED", "NEW"] and set(rows[2:]) == {"OLD", "MISS"}
     assert calls["fetch"] == ["OLD", "EDITED", "NEW"]       # MISS was searched in vain yesterday
     assert {e["key"] for e in events if e.get("status") == "unchanged"} == {"OLD", "MISS"}
     assert all(e["detail"].startswith("unchanged, checked ") for e in events if e.get("status") == "unchanged")

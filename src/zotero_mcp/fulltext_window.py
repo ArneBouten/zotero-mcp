@@ -72,6 +72,7 @@ class Progress:
         self.stage_keys: set[str] = set()
         self.main_done = not self.stages
         self.count: tuple[int, int] | None = None     # a step without rows (retractions): done, total
+        self.count_what = ""                           # and what it is
 
     def apply(self, event: dict) -> str | None:
         """Take one event from the run; returns the paper's key when its row changed."""
@@ -86,6 +87,7 @@ class Progress:
                 self.count = None
             elif status == "count":
                 self.count = (int(event.get("done", 0)), int(event.get("total", 0)))
+                self.count_what = str(event.get("what") or "")
             return None
         if key not in self.labels:
             self.order.append(key)
@@ -183,6 +185,8 @@ class Progress:
                 return "Updating the search index…"
             if self.stages[self.stage_index] == "Retractions":
                 return f"Checking for retractions and corrections · {done} of {total}"
+            if self.count is not None and self.count_what:
+                return f"{self.count_what} · {done} of {total}"
             what = "Checking metadata" if self._stage_is_metadata() else "Fetching PDFs"
             return f"{what} · {done} of {total}"
         finished, total = self._fetch_progress()

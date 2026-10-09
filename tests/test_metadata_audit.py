@@ -177,6 +177,9 @@ class FakeWriter:
     def proposal_notes(self, parent):
         return [n for n in self.notes.get(parent, []) if ma.NOTE_MARK in n["data"]["note"]]
 
+    def finding_notes(self, parent):
+        return [n for n in self.notes.get(parent, []) if "PDF to check" in n["data"]["note"]]
+
     def trash(self, child):
         for notes in self.notes.values():
             if child in notes:
@@ -285,6 +288,26 @@ def test_an_accept_tag_on_the_suggestions_note_counts_for_its_paper():
     counts = ma.process_review(writer, FakeBackend({**items, "NOTE0001": tagged}), log=lambda m: None)
     assert counts == {"accepted": 1, "rejected": 0}
     assert raw["data"]["volume"] == "55" and not writer.proposal_notes("ABCD1234")
+
+
+def test_a_checked_paper_is_not_asked_for_its_notices_again():
+    from zotero_mcp import maintenance
+
+    raw = item(volume="55", issue="1")
+    items = {"ABCD1234": raw}
+    ma.run(apply=True, log=lambda m: None, settings=ff.Settings(), http=FakeHttp({"api.crossref.org": (200, CROSSREF)}),
+           backend=FakeBackend(items), writer_factory=lambda: FakeWriter(items), pdf_text=lambda k: "", workers=1)
+    assert ma._load_state()["ABCD1234"]["notices_checked"]
+    asked = []
+
+    class Http:
+        def api_json(self, url, **kw):
+            asked.append(url)
+            return 200, None
+
+    totals = maintenance.check_retractions(["ABCD1234"], backend=FakeBackend(items), http=Http(),
+                                           settings=ff.Settings(), log=lambda m: None, sleep=lambda s: None)
+    assert not asked and totals["checked"] == 0
 
 
 def test_reject_tag_is_processed_on_the_next_run():

@@ -735,6 +735,9 @@ class ItemAudit:
     tags: set = field(default_factory=set)
     #: tagged fulltext/check-pdf by an earlier run, but its PDF passes now
     attachment_ok: bool = False
+    #: the notices (retractions, corrections) the DOI's record lists, when it was read: a later
+    #: retraction check of an unchanged paper then knows them already; None = not read
+    notices: list | None = None
 
     def by_kind(self, kind: str) -> list[Change]:
         return [c for c in self.changes if c.kind == kind]
@@ -961,6 +964,7 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
             _type_flags(audit, data)
             return audit
         _note_updates(audit, ref)
+        audit.notices = [u[2] or u[0] + u[1] for u in ref.updates]
 
     second: list[Record] = []          # independent records, fetched only when needed
     fetched_second = False
@@ -1498,6 +1502,16 @@ class MetadataWriter:
         for child in self.zot.children(parent):
             d = child.get("data", {})
             if d.get("itemType") == "note" and NOTE_MARK in (d.get("note") or ""):
+                out.append(child)
+        return out
+
+    def finding_notes(self, parent: str) -> list[dict]:
+        """The notes of an earlier attachment finding ("PDF to check", "Attached PDF to check")."""
+        out = []
+        for child in self.zot.children(parent):
+            d = child.get("data", {})
+            text = re.sub(r"<[^>]+>", "", d.get("note") or "")[:60]
+            if d.get("itemType") == "note" and re.match(r"\s*(Attached )?PDF to check\b", text):
                 out.append(child)
         return out
 
@@ -2214,15 +2228,20 @@ def run(
                 elif audit.attachment_ok:
                     try:
                         writer.apply(audit, [], tags_add=[], tags_remove=[ff.TAG_CHECK_PDF])
-                        writer.add_note(audit.key, f"<p>Checked again ({_today()}): "
-                                                   "the attached PDF is right after all.</p>")
+                        # The earlier finding was wrong: its note goes (to the trash), no new note.
+                        for old_note in writer.finding_notes(audit.key):
+                            writer.trash(old_note)
                         ff.clear_bad_pdf(audit.key)
-                        log("    -> the attached PDF is right after all; tag fulltext/check-pdf removed")
+                        log("    -> the attached PDF is right after all; tag fulltext/check-pdf and its note removed")
                     except Exception as e:
                         log(f"    -> could not remove the check-pdf tag: {type(e).__name__}: {e}")
             notify(audit_event(audit, applied=writer is not None))
             if not audit.error and not any(f.startswith(NOT_CHECKED) for f in audit.flags):
-                state.setdefault(audit.key, {})["last_audit"] = _dt.datetime.now().isoformat(timespec="seconds")
+                entry = state.setdefault(audit.key, {})
+                entry["last_audit"] = _dt.datetime.now().isoformat(timespec="seconds")
+                if audit.notices is not None:
+                    entry["notices_checked"] = _dt.date.today().isoformat()
+                    entry["notices"] = sorted(set(entry.get("notices") or []) | set(audit.notices))
             if n % 50 == 0:
                 _save_state(state)
     _save_state(state)

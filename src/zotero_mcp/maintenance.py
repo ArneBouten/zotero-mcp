@@ -197,33 +197,36 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
     log(f"1/{n} Metadata ...")
     stage(0)
     changed, unchanged = (keys, []) if every or not apply else split_unchanged(backend, keys)
-    if unchanged:
-        log(f"{len(unchanged)} paper(s) unchanged since their last check: only a retraction check "
-            f"(zotero-mcp maintain --all checks them again too).")
-        from zotero_mcp.fulltext_fetch import ItemInfo
+    from zotero_mcp.fulltext_fetch import ItemInfo
 
-        known = backend.get_items(unchanged) or {}
+    try:
+        known = backend.get_items(list(keys)) or {}
+    except Exception:
+        known = {}
+
+    def label(key: str) -> str:
+        return ItemInfo.from_zotero(known[key]).label if key in known else key
+
+    # The papers to check first in the list, the unchanged ones after them.
+    for key in changed:
+        notify({"key": key, "label": label(key), "phase": "metadata", "status": "waiting", "detail": ""})
+    if unchanged:
+        log(f"{len(unchanged)} paper(s) unchanged since their last check: only a retraction check, after the "
+            f"others (zotero-mcp maintain --all checks them again too).")
         seen = _load().get("checked_modified") or {}
         for key in unchanged:
-            label = ItemInfo.from_zotero(known[key]).label if key in known else key
             when = (seen.get(key) or {}).get("date", "")
             when = f", checked {_dt.date.fromisoformat(when).strftime('%d-%m-%Y')}" if when else ""
-            notify({"key": key, "label": label, "phase": "metadata", "status": "unchanged",
+            notify({"key": key, "label": label(key), "phase": "metadata", "status": "unchanged",
                     "detail": f"unchanged{when}"})
-        if writer_factory is None:
-            from zotero_mcp.metadata_audit import MetadataWriter
+    if writer_factory is None:
+        from zotero_mcp.metadata_audit import MetadataWriter
 
-            writer_factory = MetadataWriter
-        summary["retractions"] = (retraction_run or check_retractions)(
-            unchanged, backend=backend, log=log, progress=progress, writer=writer_factory())
+        writer_factory = MetadataWriter
     audits: list = []
     if apply and not changed:
         # Papers tagged metadata/accept or /reject: applied by every audit, and here when no audit runs.
         try:
-            if writer_factory is None:
-                from zotero_mcp.metadata_audit import MetadataWriter
-
-                writer_factory = MetadataWriter
             summary["review"] = ma.process_review(writer_factory(), backend, log)
         except Exception as e:
             log(f"Your review tags could not be applied now: {type(e).__name__}: {e}")
@@ -234,6 +237,9 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         summary["audit"] = report.totals() if hasattr(report, "totals") else {}
         if getattr(report, "report_path", ""):
             notify({"key": "", "status": "done", "detail": report.report_path})
+    if unchanged:
+        summary["retractions"] = (retraction_run or check_retractions)(
+            unchanged, backend=backend, log=log, progress=progress, writer=writer_factory())
     unknown = [a.key for a in audits if any("no registry record" in f for f in a.flags)]
     fetch_keys = changed + _not_recently_missed(backend, unchanged)
 
@@ -422,7 +428,8 @@ def check_retractions(keys: list[str], *, backend, log: Callable[[str], None] = 
     notify = progress or (lambda event: None)
     found = backend.get_items(list(keys)) or {}
     year_ago = (today - _dt.timedelta(days=365)).isoformat()
-    for key in keys:
+    for i, key in enumerate(keys):
+        notify({"key": "", "status": "count", "done": i, "total": len(keys), "what": "Retractions and corrections"})
         raw = found.get(key)
         if not raw:
             continue
@@ -462,5 +469,6 @@ def check_retractions(keys: list[str], *, backend, log: Callable[[str], None] = 
                                      f"({ma._today()})</b>: {ma.html.escape(detail)}.</p>")
             except Exception as e:
                 log(f"    -> could not write: {type(e).__name__}: {e}")
+    notify({"key": "", "status": "count", "done": len(keys), "total": len(keys), "what": "Retractions and corrections"})
     ma._save_state(state)
     return totals
