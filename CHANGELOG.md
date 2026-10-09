@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.46] - 2026-10-09
+
+### Changed
+
+- One button, "Check all unchanged anyway"; a single paper, or several selected, from the right-click menu ("Check anyway", "Check these N unchanged anyway").
+
 ## [0.13.2+arne.45] - 2026-10-09
 
 ### Changed

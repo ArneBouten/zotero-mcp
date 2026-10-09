@@ -675,13 +675,9 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
 
     # Papers passed over because nothing changed since their last check: check them again on request
     # (all of them here, or one by right-clicking its row).
-    def selected_unchanged() -> list[str]:
-        return [k for k in tree.selection() if prog.meta.get(k) == "unchanged"]
-
-    recheck_btn = ttk.Button(buttons, text="Check unchanged papers again",
-                             command=lambda: on_recheck(selected_unchanged() or None))
+    recheck_btn = ttk.Button(buttons, text="Check all unchanged anyway", command=on_recheck)
     _Tooltip(recheck_btn, "Nothing changed in Zotero since their last check, so they were only checked for "
-                          "retractions. Select papers (or right-click one) to check only those again.")
+                          "retractions. Right-click a paper to check only that one (or the selected ones).")
     ttk.Button(buttons, text="Close", command=on_close).pack(side="right")
     report_btn = ttk.Button(buttons, text="Show report", command=on_report)
     report_btn.pack(side="right", padx=(0, 8))
@@ -695,11 +691,13 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
             row = tree.identify_row(event.y)
             if not row:
                 return
-            tree.selection_set(row)
+            if row not in tree.selection():
+                tree.selection_set(row)     # right-click outside the selection: just that paper
             menu.delete(0, "end")
             chosen = [k for k in tree.selection() if prog.meta.get(k) == "unchanged"]
             if chosen and not prog.active_runs:
-                menu.add_command(label="Check again", command=lambda: on_recheck(chosen))
+                menu.add_command(label="Check anyway" if len(chosen) == 1 else f"Check these {len(chosen)} unchanged anyway",
+                                 command=lambda: on_recheck(chosen))
             menu.add_command(label="Show in Zotero", command=on_open)
             menu.tk_popup(event.x_root, event.y_root)
 
@@ -753,12 +751,7 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
                     chip_widgets.append(chip)
         unchanged = [k for k in prog.order if prog.meta.get(k) == "unchanged"]
         if unchanged and not prog.active_runs:
-            chosen = selected_unchanged()
-            if chosen:
-                text = "Check selected again" if len(chosen) == 1 else f"Check {len(chosen)} selected again"
-            else:
-                text = "Check again" if len(unchanged) == 1 else f"Check {len(unchanged)} unchanged again"
-            recheck_btn.configure(text=text)
+            recheck_btn.configure(text="Check it anyway" if len(unchanged) == 1 else "Check all unchanged anyway")
             recheck_btn.pack(side="left", padx=(0, 8))
         else:
             recheck_btn.pack_forget()
