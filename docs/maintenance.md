@@ -94,7 +94,7 @@ For every item with a PDF, the first pages are compared with the item (free; Gem
 |---|---|---|---|
 | Accepted manuscript or preprint of a published article | the PDF says so outright ("This is an Accepted Manuscript of ...") | `fulltext/accepted-manuscript`, `fulltext/preprint` | A fetch swaps in the published version when it finds it. |
 | Proof | page numbers "000-000", "uncorrected proof", volume "XX" | `fulltext/proof` | As a manuscript. |
-| Whole book attached to a chapter | far more pages than the chapter's page range | `fulltext/whole-book` if the chapter cannot be cut out | The chapter's pages are cut out (by the book's printed page numbers) and attached as the chapter's own PDF; the book stays. |
+| Whole book attached to a chapter | far more pages than the chapter's page range | `fulltext/whole-book` if the chapter cannot be cut out | The chapter's pages are cut out (by the book's printed page numbers) and attached as the chapter's own PDF. Only the chapter stays: the whole book moves to the book's own item when the library has one without a PDF, else to Zotero's trash (recoverable); a book PDF you annotated stays. |
 
 A publisher's cover page ("To cite this article", "Journal homepage") counts as the published version, also when its licence text mentions "the Accepted Manuscript". When one of an item's PDFs matches it, its other PDFs (supplements) are not questioned. A scan without text is left alone. An earlier finding that no longer holds is cleared, with a note. `metadata-audit --no-attachments` skips the check.
 

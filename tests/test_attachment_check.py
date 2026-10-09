@@ -569,3 +569,44 @@ def test_a_published_pdf_beside_a_manuscript_is_fine():
     aam = OWN + "\nThis is an Author's Accepted Manuscript of: Moreno (2016)."
     assert ac.check(i, d, [pdf(aam, "AAM")]).kind == "manuscript"
     assert ac.check(i, d, [pdf(aam, "AAM"), pdf(OWN, "PUB")]) is None
+
+
+def test_only_the_chapter_stays_on_a_chapters_item(monkeypatch):
+    # A chapter with its own PDF and the whole book beside it: the book is set aside.
+    r = raw(itemType="bookSection", title="Flow theory and research", pages="195-206", DOI="",
+            bookTitle="Oxford Handbook of Positive Psychology",
+            creators=[{"creatorType": "author", "lastName": "Nakamura"}])
+    i, d = info_data(r)
+    book_text = "Oxford Handbook of Positive Psychology\nContents\n15 Flow theory and research ... 195"
+    chapter_text = "Flow theory and research Jeanne Nakamura and Mihaly Csikszentmihalyi ... 195"
+    book_item = {"key": "BOOKITEM", "data": {"key": "BOOKITEM", "itemType": "book", "title":
+                                             "Oxford Handbook of Positive Psychology", "creators": []}}
+    index = ac.library_index([r, book_item])
+    found = ac.check(i, d, [pdf(chapter_text, key="CHAP1", pages=12), pdf(book_text, key="BOOK1", pages=744)],
+                     index=index)
+    assert (found.kind, found.attachment_key, found.other_item) == ("book beside chapter", "BOOK1", "BOOKITEM")
+
+    class W(Writer):
+        trashed: list = []
+
+        def has_annotations(self, key):
+            return key == "ANNOTATED"
+
+        def trash_attachment(self, key):
+            self.calls.append(("trash", key))
+
+    audit = ma.ItemAudit("427BV3EH", "Nakamura (2009)", "bookSection")
+    audit.attachment = found
+    # The book's own item has no PDF: the book moves there.
+    w = W()
+    assert ma._fix_attachment(w, audit, lambda m: None, pdfs=lambda key: []) is False
+    assert ("move", "BOOK1", "BOOKITEM") in w.calls and "was moved to the book" in w.calls[-1][2]
+    # No book item (or it has its PDF): to the trash, unless you annotated it.
+    found.other_item = ""
+    w = W()
+    ma._fix_attachment(w, audit, lambda m: None, pdfs=lambda key: [])
+    assert ("trash", "BOOK1") in w.calls and "trash (recoverable" in w.calls[-1][2]
+    found.attachment_key = "ANNOTATED"
+    w = W()
+    ma._fix_attachment(w, audit, lambda m: None, pdfs=lambda key: [])
+    assert not [c for c in w.calls if c[0] == "trash"] and "annotations" in w.calls[-1][2]

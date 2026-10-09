@@ -75,6 +75,7 @@ class Problem:
             "preprint": "the attached PDF is a preprint, not the published version",
             "proof": "the attached PDF is a proof (page numbers not final)",
             "whole book": "the whole book is attached to this chapter",
+            "book beside chapter": "the whole book is attached beside the chapter's own PDF",
         }[self.kind]
         return f"{what}: {self.detail}" + (f" (it belongs to item {self.other_item})" if self.other_item else "")
 
@@ -159,7 +160,10 @@ def check(info: ff.ItemInfo, data: dict, pdfs: list[dict], reading: Callable[[],
                 return None         # Gemini sees the item's title (the rules missed it: layout, OCR)
             book_main = re.split(r"[:?!]\s", book, maxsplit=1)[0]
             if book and max(title_match(book, got["title"]), title_match(book_main, got["title"])) >= 0.8:
-                return _whole_book(info, data, first)   # the book this chapter is in
+                whole = _whole_book(info, data, first)   # the book this chapter is in
+                if whole is not None:
+                    whole.other_item = _book_item(data, index)
+                return whole
             if _same_work(info, got):
                 return None         # same DOI, or same first author and year: a translated or reworded title
             found_title, found_doi = got.get("title", ""), (got.get("doi") or "").lower()
@@ -181,7 +185,35 @@ def check(info: ff.ItemInfo, data: dict, pdfs: list[dict], reading: Callable[[],
     # Several PDFs of the item (a merged duplicate, a manuscript beside the published version):
     # fine as soon as one of them is.
     problems = [_form_problem(info, data, pdf) for pdf in matching]
-    return None if any(p is None for p in problems) else problems[0]
+    if any(p is None for p in problems):
+        # The chapter has its own PDF; a whole book beside it is set aside (moved to the book's
+        # own item, or to the trash) so that only the chapter stays.
+        books = [p for p in problems if p is not None and p.kind == "whole book"]
+        if books and info.item_type == "bookSection":
+            b = books[0]
+            return Problem("book beside chapter", b.attachment_key, b.path, b.detail,
+                           other_item=_book_item(data, index))
+        return None
+    found = problems[0]
+    if found is not None and found.kind == "whole book" and not found.other_item:
+        found.other_item = _book_item(data, index)
+    return found
+
+
+def _book_item(data: dict, index: dict | None) -> str:
+    """The library's own item for the book a chapter is in (by ISBN or title), or ""."""
+    if not index:
+        return ""
+    books = index.get("book") or {}
+    isbn = re.sub(r"[^0-9Xx]", "", (data.get("ISBN") or "").split()[0]) if data.get("ISBN") else ""
+    if isbn and isbn in (index.get("isbn") or {}):
+        return index["isbn"][isbn]
+    title = data.get("bookTitle") or ""
+    for t in (title, re.split(r"[:?!]\s", title, maxsplit=1)[0]):
+        key = books.get(ff._fold(t))
+        if key:
+            return key
+    return ""
 
 
 def _form_problem(info: ff.ItemInfo, data: dict, pdf: dict) -> Problem | None:
@@ -214,14 +246,20 @@ def _whole_book(info: ff.ItemInfo, data: dict, pdf: dict) -> Problem | None:
 
 def library_index(items: list[dict]) -> dict:
     """DOI and folded title -> item key, to name the item a stray PDF belongs to."""
-    by_doi, by_title = {}, {}
+    by_doi, by_title, books, by_isbn = {}, {}, {}, {}
     for raw in items:
         info = ff.ItemInfo.from_zotero(raw)
         if info.doi:
             by_doi.setdefault(info.doi.lower(), info.key)
         if info.title:
             by_title.setdefault(ff._fold(info.title), info.key)
-    return {"doi": by_doi, "title": by_title}
+        if info.item_type == "book":
+            for t in (info.title, re.split(r"[:?!]\s", info.title, maxsplit=1)[0]):
+                if t:
+                    books.setdefault(ff._fold(t), info.key)
+            if info.isbn:
+                by_isbn.setdefault(info.isbn, info.key)
+    return {"doi": by_doi, "title": by_title, "book": books, "isbn": by_isbn}
 
 
 def pdf_reader() -> Callable[[str], list[dict]]:

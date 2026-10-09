@@ -1535,6 +1535,17 @@ class MetadataWriter:
     def trash(self, child: dict) -> None:
         self._helpers.trash_item(self.zot, child)
 
+    def has_annotations(self, attachment_key: str) -> bool:
+        """Whether you annotated this PDF (highlights, notes in the reader). Unsure counts as yes."""
+        try:
+            return any((c.get("data") or {}).get("itemType") == "annotation"
+                       for c in self.zot.children(attachment_key) or [])
+        except Exception:
+            return True
+
+    def trash_attachment(self, attachment_key: str) -> None:
+        self._helpers.trash_item(self.zot, self.zot.item(attachment_key))
+
     def move_attachment(self, attachment_key: str, new_parent: str) -> None:
         att = self.zot.item(attachment_key)
         att["data"]["parentItem"] = new_parent
@@ -2101,7 +2112,8 @@ class AuditReport:
 
 _PDF_PROBLEM = {"another work": "the PDF is another paper", "manuscript": "accepted manuscript",
                 "preprint": "preprint", "proof": "proof (page numbers not final)",
-                "whole book": "the whole book (the chapter is in it)"}
+                "whole book": "the whole book (the chapter is in it)",
+                "book beside chapter": "the whole book beside the chapter's PDF (set aside)"}
 
 
 def audit_event(audit: ItemAudit, applied: bool) -> dict:
@@ -2342,7 +2354,7 @@ def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
             log(f"    -> could not tag the attachment: {type(e).__name__}: {e}")
             return False
         return True
-    if ff.TAG_CHECK_PDF in audit.tags and problem.kind != "whole book":
+    if ff.TAG_CHECK_PDF in audit.tags and problem.kind not in ("whole book", "book beside chapter"):
         return True     # noted in an earlier run: only look for the right PDF again
     seen = f" ({problem.detail})" if problem.kind in ("another work", "whole book") else ""
     note = [f"<p><b>PDF to check ({_today()})</b>: {_PROBLEM_NOTE.get(problem.kind, problem.kind)}"
@@ -2361,6 +2373,11 @@ def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
                 note.append("<p>'Check & complete' or 'Fetch PDF only' looks for the right one; once found, it "
                             "replaces this PDF (which goes to Zotero's trash).</p>")
             fetch = True
+        elif problem.kind == "book beside chapter":
+            done = _set_aside_book(writer, audit, problem, pdfs)
+            writer.add_note(audit.key, f"<p>Only the chapter kept ({_today()}): {html.escape(done)}</p>")
+            log(f"    -> {done}")
+            return False
         elif problem.kind == "whole book":
             # The right content, with the rest of the book around it: the chapter is cut out when
             # its printed pages can be found; otherwise the item is only tagged.
@@ -2376,9 +2393,10 @@ def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
             if span:
                 writer.attach_file(audit.key, out, f"Chapter PDF (from the book, PDF pages {span[0]}-{span[1]})")
                 writer.apply(audit, [], tags_add=[], tags_remove=remove)
+                done = _set_aside_book(writer, audit, problem, pdfs)
                 writer.add_note(audit.key, f"<p>Chapter cut out of the attached book ({_today()}): PDF pages "
-                                           f"{span[0]}-{span[1]}, attached as its own PDF. The book stays.</p>")
-                log(f"    -> attached the chapter cut from the book (PDF pages {span[0]}-{span[1]})")
+                                           f"{span[0]}-{span[1]}, attached as its own PDF. {html.escape(done)}</p>")
+                log(f"    -> attached the chapter cut from the book (PDF pages {span[0]}-{span[1]}); {done}")
             else:
                 writer.apply(audit, [], tags_add=[ff.TAG_WHOLE_BOOK], tags_remove=remove)
                 log("    -> the whole book is attached; the chapter's pages were not found in it")
@@ -2390,6 +2408,25 @@ def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
         log(f"    -> could not act on the attachment: {type(e).__name__}: {e}")
         return False
     return fetch
+
+
+def _set_aside_book(writer, audit: ItemAudit, problem, pdfs) -> str:
+    """Only the chapter stays on a chapter's item: the whole book's PDF moves to the book's own
+    item when the library has one without a PDF, else to Zotero's trash (recoverable). A book PDF
+    with your annotations stays. Returns what was done, for the note."""
+    book = getattr(problem, "other_item", "") or ""
+    try:
+        if book and pdfs is not None and not pdfs(book):
+            writer.move_attachment(problem.attachment_key, book)
+            writer.add_note(book, f"<p>zotero-mcp moved this book's PDF here from the chapter {audit.key} "
+                                  f"({html.escape(audit.label)}), which keeps only its own pages.</p>")
+            return f"The whole book was moved to the book's own item ({book})."
+        if getattr(writer, "has_annotations", lambda key: True)(problem.attachment_key):
+            return "The whole book stays attached: it has your annotations."
+        writer.trash_attachment(problem.attachment_key)
+        return "The whole book went to Zotero's trash (recoverable there)."
+    except Exception as e:
+        return f"The whole book stays attached (could not set it aside: {type(e).__name__})."
 
 
 def _write(writer, audit: ItemAudit, log: Callable[[str], None]) -> None:

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.58] - 2026-10-09
+
+### Changed
+
+- **Only the chapter stays on a chapter's item.** Once the chapter is cut out of a whole book, the book's PDF moves to the book's own item when the library has one without a PDF, otherwise to Zotero's trash (recoverable). A book PDF with your annotations stays. Chapters cut earlier, with the book still beside them, are tidied the same way at their next check.
+
 ## [0.13.2+arne.57] - 2026-10-09
 
 ### Fixed
