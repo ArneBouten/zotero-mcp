@@ -27,9 +27,9 @@ py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2 --no-fetch  # metadata onl
 | **Check & complete** | metadata → PDFs → metadata again | The default |
 | **Check metadata only** | metadata, no PDF downloads | When you want no new PDFs |
 | **Fetch PDF only** | PDFs, no metadata changes | Quick, when the metadata is fine |
-| **Fetch PDF in browser** | only the browser step, starting with the links an earlier run could not download | Papers an earlier run did not find |
+| **Check PDF (browser only)** | only the browser step, starting with the links an earlier run could not download | Papers an earlier run did not find |
 
-Each works on the selected papers (item menu) or a whole collection (collection menu). To add all four at once: Zotero → Settings → Actions & Tags → Import, and choose `zotero-actions/zotero-mcp-actions.yml` (importing it again later updates them). The separate scripts are in `zotero-actions/` too. They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`.
+Each works on the selected papers (item menu) or a whole collection (collection menu). To add all four at once: Zotero → Settings → Actions & Tags → Import, and choose `zotero-actions/zotero-mcp-actions.yml` (importing it again later updates them). For the order above, set "Sort menu by" to Name in the same settings. The separate scripts are in `zotero-actions/` too. They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`.
 
 **Automatically for new items:** with
 

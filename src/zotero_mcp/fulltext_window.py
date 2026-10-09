@@ -627,8 +627,6 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
         else:
             stripe = len(tree.get_children()) % 2 == 1
             tree.insert("", "end", iid=key, values=values, tags=(tone, "stripe") if stripe else (tone,))
-        if prog.status.get(key) in ("searching", "browser") or prog.meta.get(key) == "checking":
-            tree.see(key)
 
     def refresh() -> None:
         head.configure(text=prog.headline())

@@ -108,7 +108,7 @@ py -3.12 -m zotero_mcp.cli metadata-audit --process-review
 
 **When a registry does not answer.** A service that refuses (HTTP 429, for instance OpenAlex's free daily allowance of about 1,000 searches, which resets at midnight UTC), fails or cannot be reached is not taken as "no record": the item is reported as *not checked this time* and counted separately, without proposals from its PDF or Google Scholar. A service that refuses three times is not asked again in that run. Run the audit again later for those items.
 
-`--workers N` sets how many items are checked at once (default 4). With an OpenAlex key, the whole library (about 2,200 items) takes a few minutes. Every run writes its report to `~/.config/zotero-mcp/metadata/runs/<date-time>.md`.
+`--workers N` sets how many items are checked at once (default 4). With an OpenAlex key, the whole library (about 2,200 items) takes a few minutes. Every run writes its report to `~/.config/zotero-mcp/metadata/runs/<date-time>.md`: a summary, then what needs you (suggestions to review, wrong PDFs, papers not checked or unknown to every registry, other findings, grouped), then what was changed automatically.
 
 Writing goes the same way as the other write tools (the Zotero web API key). The OpenAlex, Semantic Scholar and Unpaywall keys, and an optional `GOOGLE_BOOKS_API_KEY`, come from the full-text fetcher's `keys.env`.
 

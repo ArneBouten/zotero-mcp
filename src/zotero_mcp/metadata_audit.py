@@ -88,12 +88,32 @@ class Record:
     abstract: str = ""
     kind: str = ""
     container: str = ""             # book title for a chapter
+    containers: list = field(default_factory=list)  # every container title (book and series)
     isbn: str = ""
     article_number: str = ""        # e.g. "e70024": APA's stand-in for pages
     online_year: str = ""           # Crossref's published-online year, when it differs from the issue's
     updates: list = field(default_factory=list)     # (type, date, doi): retractions, corrections
     published_doi: str = ""         # a preprint's published version
     editors: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _given_case(given: str) -> str:
+    """ "JOSJE M." as "Josje M.": some publishers send first names in capitals."""
+    if given and given.isupper() and len(re.sub(r"[^A-Za-z]", "", given)) > 2:
+        return given.title()
+    return given
+
+
+#: A heading glued to the abstract's first word ("IntroductionSELF-DETERMINATION", "Comunicaciones brevesRESUMEN El").
+_GLUED_HEADING_RE = re.compile(r"^(?:Comunicaciones breves|Short communication)?\s*"
+                               r"(?:[Aa]bstract|ABSTRACT|[Ss]ummary|SUMMARY|[Ii]ntroduction|INTRODUCTION|"
+                               r"[Rr]esumen|RESUMEN|[Rr]ésumé|RÉSUMÉ)?\s*[:.]?\s*(?=[A-ZÀ-Ý])")
+
+
+def _clean_abstract(text: str) -> str:
+    t = re.sub(r"^abstract\b\s*[:.]?\s*", "", (text or "").strip(), flags=re.I)
+    m = _GLUED_HEADING_RE.match(t)
+    return t[m.end():] if m and m.end() else t
 
 
 def _demojibake(text: str) -> str:
@@ -170,7 +190,10 @@ def _crossref_record(m: dict, doi: str) -> Record:
     date = _date_from_parts(m.get("published-print")) or _date_from_parts(m.get("issued"))
     online = _date_from_parts(m.get("published-online"))
     kind = m.get("type", "")
-    container = _strip_tags((m.get("container-title") or [""])[0])
+    containers = [_strip_tags(c) for c in m.get("container-title") or [] if c]
+    container = containers[0] if containers else ""
+    if kind in ("book-chapter", "book-section", "reference-entry") and len(containers) > 1:
+        container = max(containers, key=len)   # the book, not its series ("Evolutionary Psychology")
     title = _strip_tags((m.get("title") or [""])[0]).rstrip(".")
     subtitle = _strip_tags((m.get("subtitle") or [""])[0]).rstrip(".")
     if subtitle and ff._fold(subtitle) not in ff._fold(title):
@@ -178,16 +201,17 @@ def _crossref_record(m: dict, doi: str) -> Record:
     return Record(
         source="Crossref",
         title=title,
-        authors=[(_clean_family(a["family"]), _strip_tags(a.get("given", ""))) for a in m.get("author") or []
-                 if a.get("family")],
+        authors=[(_clean_family(a["family"]), _given_case(_strip_tags(a.get("given", ""))))
+                 for a in m.get("author") or [] if a.get("family")],
         year=date[:4], date=date,
         journal=container if kind in ("journal-article", "proceedings-article") else "",
         container=container if kind in ("book-chapter", "book-section", "reference-entry") else "",
+        containers=containers,
         issn=list(m.get("ISSN") or []),
         volume=str(m.get("volume") or ""), issue=str(m.get("issue") or ""), pages=str(m.get("page") or ""),
         doi=(m.get("DOI") or doi).lower(), publisher=m.get("publisher") or "",
         place=m.get("publisher-location") or "",
-        abstract=re.sub(r"^abstract\b\s*[:.]?\s*", "", _strip_tags(m.get("abstract") or ""), flags=re.I),
+        abstract=_clean_abstract(_strip_tags(m.get("abstract") or "")),
         kind=kind, isbn=(m.get("ISBN") or [""])[0], article_number=str(m.get("article-number") or ""),
         online_year=online[:4] if online[:4] != date[:4] else "",
         updates=[(u.get("type", ""), _date_from_parts(u.get("updated")), (u.get("DOI") or "").lower())
@@ -228,8 +252,7 @@ def _openalex_record(work: dict, by: str) -> Record:
     inv = work.get("abstract_inverted_index") or {}
     if inv:
         words = sorted(((pos, w) for w, positions in inv.items() for pos in positions))
-        abstract = re.sub(r"\s+", " ", " ".join(w for _pos, w in words)).strip()
-        abstract = re.sub(r"^abstract\b\s*[:.]?\s*", "", abstract, flags=re.I)
+        abstract = _clean_abstract(re.sub(r"\s+", " ", " ".join(w for _pos, w in words)).strip())
     authors = []
     for au in work.get("authorships") or []:
         name = ((au.get("author") or {}).get("display_name") or "").strip()
@@ -556,6 +579,13 @@ def isbn13s(value: str) -> set[str]:
     return out
 
 
+def _same_book(a: str, b: str) -> bool:
+    """ "Oxford handbook of positive psychology" and "The Oxford Handbook of Positive Psychology"."""
+    def drop(v: str) -> str:
+        return re.sub(r"^(?:the|a|an|de|het|een)\s+", "", norm_title(v))
+    return bool(a and b) and ff.title_similarity(drop(a), drop(b)) >= 0.97
+
+
 def norm_title(value: str) -> str:
     """A title without a series note ("(Routledge Revivals)"), edition, "Chapter 4:" or punctuation."""
     v = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]\s*$", "", str(value or ""))
@@ -703,6 +733,8 @@ class ItemAudit:
     attachment: Any = None
     #: the item's tags when it was read
     tags: set = field(default_factory=set)
+    #: tagged fulltext/check-pdf by an earlier run, but its PDF passes now
+    attachment_ok: bool = False
 
     def by_kind(self, kind: str) -> list[Change]:
         return [c for c in self.changes if c.kind == kind]
@@ -814,9 +846,11 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
     if ctx.pdfs is not None:
         from zotero_mcp import attachment_check
 
+        pdfs: list = []
         try:
+            pdfs = ctx.pdfs(info.key) or []
             problem = attachment_check.check(
-                info, data, ctx.pdfs(info.key),
+                info, data, pdfs,
                 reading=(lambda: ctx.pdf_read(info.key)) if ctx.pdf_read else None, index=ctx.index)
         except Exception as e:
             problem = None
@@ -824,6 +858,9 @@ def audit_item(raw: dict, ctx: Context) -> ItemAudit:
         if problem is not None:
             audit.attachment = problem
             audit.flags.append(f"attachment: {problem.describe()}")
+        elif (ff.TAG_CHECK_PDF in audit.tags and any((p.get("text") or "").strip() for p in pdfs)
+              and "attachment not checked" not in " ".join(audit.flags)):
+            audit.attachment_ok = True      # an earlier run's finding no longer holds (or the PDF was replaced)
     return audit
 
 
@@ -1018,6 +1055,8 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
                 audit.flags.append(f"DOI: {ref.source} lists this work under {new} as well; "
                                    f"yours ({old}) works, so it is left as is")
                 continue
+        if name == "bookTitle" and any(_same_book(old, c) for c in (ref.containers or [new])):
+            continue
         if name in ("title", "bookTitle"):
             if ff.title_similarity(norm_title(old), norm_title(new)) < 0.97 and not _loses_accents(old, new):
                 audit.changes.append(Change(name, old, new, "propose", [ref.source], "the wording differs"))
@@ -1124,6 +1163,12 @@ def _plausible_abstract(text: str, title: str) -> bool:
         return False
     if len(_BOILERPLATE_RE.findall(t)) >= 2:
         return False
+    if re.match(r"^(?:preface|foreword|contents|table of contents)\b", t, re.I) or re.match(r"^[a-z]\s", t):
+        return False    # a table of contents, or a first word that lost its drop cap ("e authors argue")
+    head = ff._fold(t[:300])
+    title_words = ff._fold(title or "").split()[:8]
+    if len(title_words) >= 4 and " ".join(title_words) in head:
+        return False    # a citation line ("HARTER, SUSAN. Pleasure derived from ...") rather than an abstract
     words = set(_content_words(title))
     if words:
         found = sum(1 for w in words if w in ff._fold(t))
@@ -1169,10 +1214,10 @@ def _note_updates(audit: ItemAudit, ref: Record) -> None:
         elif k == "expression_of_concern":
             audit.flags.append(f"an expression of concern was published{where}")
         elif k in ("correction", "erratum", "corrigendum", "addendum", "clarification"):
-            audit.flags.append(f"a {k} was published{where}")
+            audit.flags.append(f"{'an' if k[0] in 'aeiou' else 'a'} {k} was published{where}")
 
 
-PDF_SOURCE = "the item's PDF (read by Gemini)"
+PDF_SOURCE = "Gemini, reading its PDF"
 PAGE_SOURCE = "the item's saved web page"
 _BY = {"pdf-doi": "the DOI printed on its PDF", "page-doi": "the DOI on its saved web page"}
 _FILL_WHY = {"title": "matched by title", "pdf-doi": "the DOI printed on the item's PDF",
@@ -1241,7 +1286,8 @@ def _from_pdf_only(audit: ItemAudit, data: dict, info: ff.ItemInfo, reading: dic
     what = "PDF" if source == PDF_SOURCE else "saved web page"
     if not reading or not reading.get("title"):
         return
-    if info.title and title_match(info.title, reading["title"]) < 0.8:
+    main = re.split(r"[:?!]\s", info.title or "", maxsplit=1)[0]
+    if info.title and max(title_match(info.title, reading["title"]), title_match(main, reading["title"])) < 0.8:
         audit.flags.append(f"the attached {what} looks like another work (its title: {reading['title'][:90]})")
         return
     for name in _fields_for(info.item_type):
@@ -1723,7 +1769,7 @@ def decide(writer, raw: dict, accept: bool, state: dict, fields: list[str] | Non
     writer.apply(audit, take, tags_add=[TAG_CORRECTED] if take else [],
                  tags_remove=[TAG_ACCEPT, TAG_REJECT, TAG_REVIEW])
     if take:
-        writer.add_note(key, _note_html(f"Metadata changes you accepted ({_dt.date.today()})",
+        writer.add_note(key, _note_html(f"Metadata changes you accepted ({_today()})",
                                         audit, take, proposals=False))
     rejected = state.setdefault(key, {}).setdefault("rejected", {})
     for c in drop:
@@ -1791,52 +1837,129 @@ class AuditReport:
         return t
 
     def markdown(self, limit: int | None = None) -> str:
+        """The report: a summary, then what needs you (suggestions, wrong PDFs, papers not
+        checked or unknown, other findings), then what was changed. ``limit``: papers per section."""
         t = self.totals()
-        verb = "Filled" if self.applied else "Would fill"
-        lines = [
-            f"# Metadata audit ({self.started})", "",
-            ("" if self.applied else "Report only: nothing was changed (run with --apply to change). ")
-            + f"{t['items']} items checked. {verb} {t['filled']} empty fields; "
-            f"{'corrected' if self.applied else 'would correct'} {t['corrected']} fields confirmed by two sources; "
-            f"{t['proposals']} proposals on {t['items_to_review']} items for your review; "
-            f"{t['flags']} other findings; no registry record for {t['no_source']} items"
-            + (f"; {t['retracted']} retracted item(s), tagged '{TAG_RETRACTED}'" if t["retracted"] else "")
-            + (f"; {t['not_checked']} item(s) not checked because a registry did not answer (run again later)"
-               if t["not_checked"] else "")
-            + (f"; {t['attachments']} attached PDF(s) to check (another work, manuscript, proof or whole book), "
-               f"tagged '{ff.TAG_CHECK_PDF}'" if t["attachments"] else "") + ".",
-            "",
-        ]
-        if self.review_counts:
-            lines += [f"Review tags processed: {self.review_counts}", ""]
-        if self.saved_search:
-            lines += [f"Saved search \"{SAVED_SEARCH}\": {self.saved_search}", ""]
-        shown = 0
-        for a in self.audits:
-            if not (a.changes or a.flags or a.error):
-                continue
-            if limit and shown >= limit:
-                lines.append("- … more in the report file")
-                break
-            shown += 1
-            lines.append(f"## {a.label} [{a.key}]" + (f" — {a.reference}" if a.reference else ""))
-            for c in a.changes:
-                label = FIELD_LABELS.get(c.field, c.field)
-                if c.field == "creators" and c.kind == "fill":
-                    lines.append(f"- {c.kind}: {label}: {c.why} ({', '.join(c.sources)})")
-                    continue
-                old = c.old[:120] if c.old else "(empty)"
-                why = f" — {c.why}" if c.why else ""
-                lines.append(f"- {c.kind}: {label}: {old} → {c.new[:120]} ({', '.join(c.sources)}){why}")
-            for f in a.flags:
-                lines.append(f"- note: {f}")
-            if a.error:
-                lines.append(f"- error: {a.error}")
-            lines.append("")
-        if self.report_path:
-            lines.append(f"Full report: {self.report_path}")
-        return "\n".join(lines)
+        done = self.applied
+        started = self.started
+        try:
+            started = _dt.datetime.strptime(self.started, "%Y-%m-%d %H:%M").strftime("%d-%m-%Y %H:%M")
+        except ValueError:
+            pass
+        changed = [a for a in self.audits if a.by_kind("fill") or a.by_kind("correct")]
+        review = [a for a in self.audits if a.by_kind("propose")]
+        wrong = [a for a in self.audits if a.attachment is not None]
+        not_checked = [a for a in self.audits if any(f.startswith(NOT_CHECKED) for f in a.flags)]
+        unknown = [a for a in self.audits if any("no registry record" in f for f in a.flags)]
+        errors = [a for a in self.audits if a.error]
 
+        def n(count: int, word: str) -> str:
+            return f"{count} {word}{'' if count == 1 else 's'}"
+
+        def short(a: ItemAudit) -> str:
+            return a.label.split(") ", 1)[0] + ")" if ") " in a.label else a.label
+
+        def more(n: int) -> list[str]:
+            return [f"- … {n} more in the report file"] if n > 0 else []
+
+        def cut(items: list) -> tuple[list, int]:
+            return (items[:limit], len(items) - limit) if limit else (items, 0)
+
+        lines = [f"# Metadata check, {started}", ""]
+        if not done:
+            lines += ["Report only: nothing was changed.", ""]
+        lines.append(f"**{t['items']} paper{'s' if t['items'] != 1 else ''} checked.**")
+        lines.append("")
+        fixes = f", {t['corrected']} corrected" if t["corrected"] else ""
+        summary = [
+            (f"{'Changed' if done else 'To change'} automatically: {n(t['filled'], 'empty field')} filled{fixes}"
+             f" on {n(len(changed), 'paper')}" if changed else ""),
+            (f"For you to review: {n(t['proposals'], 'suggested change')} on {n(len(review), 'paper')} "
+             f"(saved search \"{SAVED_SEARCH}\")" if review else ""),
+            (f"Wrong PDFs: {len(wrong)} (tag {ff.TAG_CHECK_PDF})" if wrong else ""),
+            (f"Retracted: {t['retracted']} (tag {TAG_RETRACTED})" if t["retracted"] else ""),
+            (f"Not checked: {len(not_checked)}, because a registry did not answer; run again later"
+             if not_checked else ""),
+            (f"Unknown to every registry: {len(unknown)}" if unknown else ""),
+            (f"Errors: {len(errors)}" if errors else ""),
+        ]
+        lines += [f"- {x}" for x in summary if x] + [""]
+        if self.review_counts and any(self.review_counts.values()):
+            lines += [f"Your review decisions applied: {self.review_counts.get('accepted', 0)} accepted, "
+                      f"{self.review_counts.get('rejected', 0)} rejected.", ""]
+
+        def change_line(c: Change) -> str:
+            label = FIELD_LABELS.get(c.field, c.field)
+            src = ", ".join(c.sources)
+            why = f" — {c.why}" if c.why else ""
+            if c.field == "creators" and c.kind == "fill":
+                return f"- {c.why[:1].upper()}{c.why[1:]} ({src})"
+            if c.field == "abstractNote" and not c.old:
+                return f"- Abstract added ({src})"
+            if not c.old:
+                return f"- {label}: {c.new[:120]} ({src}){why}"
+            return f"- {label}: {c.old[:120]} → {c.new[:120]} ({src}){why}"
+
+        if review:
+            lines += [f"## To review ({len(review)})", "",
+                      f"Tag a paper `{TAG_ACCEPT}` or `{TAG_REJECT}` in Zotero; the next check applies it.", ""]
+            shown, rest = cut(review)
+            for a in shown:
+                lines.append(f"### {a.label} [{a.key}]")
+                lines += [change_line(c) for c in a.by_kind("propose")] + [""]
+            lines += more(rest)
+        if wrong:
+            lines += [f"## Wrong PDFs ({len(wrong)})", ""]
+            shown, rest = cut(wrong)
+            for a in shown:
+                p = a.attachment
+                what = {"another work": "another paper", "manuscript": "the accepted manuscript",
+                        "preprint": "a preprint", "proof": "a proof", "whole book": "the whole book"}.get(p.kind, p.kind)
+                extra = (f" ({p.detail.removeprefix('its first pages show ')})" if p.kind == "another work"
+                         else f" ({p.detail})" if p.kind == "whole book" else "")
+                lines.append(f"- {a.label} [{a.key}]: {what}{extra}"
+                             + (f", which belongs to item {p.other_item}" if p.other_item else ""))
+            lines += more(rest) + [""]
+        for title, group, why in ((f"Not checked ({len(not_checked)})", not_checked, None),
+                                  (f"Unknown to every registry ({len(unknown)})", unknown, None),
+                                  (f"Errors ({len(errors)})", errors, "error")):
+            if not group:
+                continue
+            lines += [f"## {title}", ""]
+            shown, rest = cut(group)
+            for a in shown:
+                lines.append(f"- {a.label} [{a.key}]" + (f": {a.error}" if why else ""))
+            lines += more(rest) + [""]
+
+        # Other findings, grouped: "Article without a DOI (8): Gray (2011), ..."
+        groups: dict[str, list[ItemAudit]] = {}
+        for a in self.audits:
+            for f in a.flags:
+                if (f.startswith(NOT_CHECKED) or "no registry record" in f or f.startswith("attachment: ")
+                        or f.startswith("RETRACTED")):
+                    continue
+                groups.setdefault(f, []).append(a)
+        if groups:
+            lines += ["## Other findings", ""]
+            for f, group in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+                text = f[:1].upper() + f[1:]
+                if len(group) == 1:
+                    lines.append(f"- {short(group[0])} [{group[0].key}]: {f}")
+                else:
+                    names = ", ".join(f"{short(a)} [{a.key}]" for a in group[: limit or len(group)])
+                    lines.append(f"- {text} ({len(group)}): {names}")
+            lines.append("")
+
+        if changed:
+            lines += [f"## {'Changed' if done else 'To change'} automatically ({len(changed)})", ""]
+            shown, rest = cut(changed)
+            for a in shown:
+                lines.append(f"### {a.label} [{a.key}]")
+                lines += [change_line(c) for c in a.by_kind("fill") + a.by_kind("correct")] + [""]
+            lines += more(rest)
+        if self.report_path:
+            lines += ["", f"Full report: {self.report_path}"]
+        return "\n".join(lines).rstrip() + "\n"
 
 _PDF_PROBLEM = {"another work": "the PDF is another paper", "manuscript": "the PDF is the accepted manuscript",
                 "preprint": "the PDF is a preprint", "proof": "the PDF is a proof",
@@ -1975,8 +2098,10 @@ def run(
         for n, audit in enumerate(pool.map(one, items), 1):
             audits.append(audit)
             fills, fixes, props = (len(audit.by_kind(k)) for k in ("fill", "correct", "propose"))
+            done = writer is not None and not audit.error
             summary = ", ".join(s for s in (
-                f"{fills} to fill" if fills else "", f"{fixes} to correct" if fixes else "",
+                f"{fills} {'filled' if done else 'to fill'}" if fills else "",
+                f"{fixes} {'corrected' if done else 'to correct'}" if fixes else "",
                 f"{props} to review" if props else "", f"{len(audit.flags)} note(s)" if audit.flags else "",
                 audit.error and f"error: {audit.error}") if s) or "ok"
             log(f"[{n}/{len(items)}] {audit.label} [{audit.key}]: {summary}")
@@ -1985,6 +2110,15 @@ def run(
                 if audit.attachment is not None and not audit.error:
                     if _fix_attachment(writer, audit, log, pdfs=ctx.pdfs):
                         to_fetch.append(audit.key)
+                elif audit.attachment_ok:
+                    try:
+                        writer.apply(audit, [], tags_add=[], tags_remove=[ff.TAG_CHECK_PDF])
+                        writer.add_note(audit.key, f"<p>Checked again ({_today()}): "
+                                                   "the attached PDF is right after all.</p>")
+                        ff.clear_bad_pdf(audit.key)
+                        log("    -> the attached PDF is right after all; tag fulltext/check-pdf removed")
+                    except Exception as e:
+                        log(f"    -> could not remove the check-pdf tag: {type(e).__name__}: {e}")
             notify(audit_event(audit, applied=writer is not None))
             state.setdefault(audit.key, {})["last_audit"] = _dt.datetime.now().isoformat(timespec="seconds")
             if n % 50 == 0:
@@ -2015,6 +2149,19 @@ def run(
     return report
 
 
+def _today() -> str:
+    return _dt.date.today().strftime("%d-%m-%Y")
+
+
+_PROBLEM_NOTE = {
+    "another work": "another paper is attached",
+    "manuscript": "this is the accepted manuscript, not the published version",
+    "preprint": "this is a preprint, not the published version",
+    "proof": "this is a proof (page numbers not final), not the published version",
+    "whole book": "the whole book is attached, not just this chapter",
+}
+
+
 def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
                     pdfs: Callable[[str], list[dict]] | None = None) -> bool:
     """Act on a wrong attachment; True when the fetcher should look for the right PDF."""
@@ -2023,7 +2170,9 @@ def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
     problem = audit.attachment
     if ff.TAG_CHECK_PDF in audit.tags and problem.kind != "whole book":
         return True     # noted in an earlier run: only look for the right PDF again
-    note = [f"<p><b>Attached PDF to check ({_dt.date.today()})</b>: {html.escape(problem.describe())}.</p>"]
+    seen = f" ({problem.detail})" if problem.kind in ("another work", "whole book") else ""
+    note = [f"<p><b>PDF to check ({_today()})</b>: {_PROBLEM_NOTE.get(problem.kind, problem.kind)}"
+            f"{html.escape(seen)}.</p>"]
     fetch = False
     try:
         if problem.kind == "another work":
@@ -2035,16 +2184,18 @@ def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
                 note.append(f"<p>It belongs to item {other}, which had no PDF, and was moved there.</p>")
             else:
                 ff.mark_bad_pdf(audit.key, problem.attachment_key, problem.kind, want_published=False)
-                note.append("<p>The right PDF is searched for; once found and checked it replaces this one, "
-                            "which then goes to Zotero's trash.</p>")
+                note.append("<p>'Check & complete' or 'Fetch PDF only' looks for the right one; once found, it "
+                            "replaces this PDF (which goes to Zotero's trash).</p>")
             fetch = True
         elif problem.kind in ("manuscript", "preprint", "proof"):
             ff.mark_bad_pdf(audit.key, problem.attachment_key, problem.kind, want_published=True)
-            note.append("<p>The published version is searched for; once found it replaces this one, which then "
-                        "goes to Zotero's trash. Until then this PDF stays.</p>")
+            note.append("<p>'Check & complete' or 'Fetch PDF only' looks for the published version; once found, "
+                        "it replaces this PDF (which goes to Zotero's trash). Until then this one stays.</p>")
             fetch = True
         elif problem.kind == "whole book":
             import tempfile
+
+            ff.clear_bad_pdf(audit.key)     # an earlier run may have taken the book for another work
 
             folder = tempfile.mkdtemp(prefix="zmcp-chapter-")
             out = os.path.join(folder, "chapter.pdf")
@@ -2076,13 +2227,13 @@ def _write(writer, audit: ItemAudit, log: Callable[[str], None]) -> None:
         if auto:
             tags = ([TAG_FILLED] if audit.by_kind("fill") else []) + ([TAG_CORRECTED] if audit.by_kind("correct") else [])
             writer.apply(audit, auto, tags_add=tags)
-            writer.add_note(audit.key, _note_html(f"Metadata changes by zotero-mcp ({_dt.date.today()})",
+            writer.add_note(audit.key, _note_html(f"Metadata changes by zotero-mcp ({_today()})",
                                                   audit, auto, proposals=False))
         if props:
             for old in writer.proposal_notes(audit.key):
                 writer.trash(old)
             writer.apply(audit, [], tags_add=[TAG_REVIEW])
-            writer.add_note(audit.key, _note_html(f"Proposed metadata changes ({_dt.date.today()})",
+            writer.add_note(audit.key, _note_html(f"Proposed metadata changes ({_today()})",
                                                   audit, props, proposals=True))
     except Exception as e:
         audit.error = f"writing failed: {type(e).__name__}: {e}"

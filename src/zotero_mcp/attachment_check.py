@@ -29,13 +29,26 @@ from zotero_mcp import fulltext_fetch as ff
 TAG_CHECK_PDF = "fulltext/check-pdf"
 
 _MANUSCRIPT_RE = re.compile(
-    r"author(?:'s|s')? accepted manuscript|accepted author manuscript|\baccepted manuscript\b|"
-    r"this is (?:an|the) (?:author'?s? )?(?:accepted|peer[- ]reviewed|pre-?print|final draft|post-?print)|"
-    r"\bpost-?print\b|author'?s? final (?:draft|version)|has been accepted for publication in", re.I)
+    r"author(?:['’]s|s['’])? accepted manuscript|accepted author manuscript|\baccepted manuscript\b|"
+    r"this is (?:an|the) (?:author['’]?s? )?(?:accepted|peer[- ]reviewed|pre-?print|final draft|post-?print)|"
+    r"\bpost-?print\b|author['’]?s? final (?:draft|version)|has been accepted for publication in", re.I)
 _PREPRINT_RE = re.compile(r"\bpre-?print\b(?! server)|not (?:yet )?(?:been )?peer[- ]reviewed|"
                           r"\b(?:psyarxiv|biorxiv|medrxiv|arxiv|osf preprints|ssrn)\b", re.I)
 _PROOF_RE = re.compile(r"\b000\s*[–—-]\s*000\b|\buncorrected (?:page )?proofs?\b|\bvol(?:ume)?\.?\s*X{2,}\b|"
                        r"\bvolume\s+\d+\s*,?\s*issue\s+X+\b", re.I)
+#: Sentences that mention a manuscript without the PDF being one: Taylor & Francis's open-access
+#: licence ("allow the posting of the Accepted Manuscript in a repository"), an old journal's
+#: "Accepted manuscript received 1 September 1974", a repository's general cover text.
+_NOT_A_STATEMENT_RE = re.compile(
+    r"allows? the posting of the accepted manuscript[^.]*\.?|accepted manuscript received\b|"
+    r"(?:author accepted manuscripts\s+)?if this document is identified as the author accepted manuscript[^.]*\.?",
+    re.I)
+#: A publisher's own cover or first page: the published version.
+_PUBLISHED_RE = re.compile(r"to cite this article:|to link to this article:|journal homepage:|published online:|"
+                           r"full terms & conditions of access", re.I)
+#: The PDF says outright what it is ("This is an Accepted Manuscript of an article published by ...").
+_SAYS_MANUSCRIPT_RE = re.compile(r"this is (?:an?|the) (?:author['’]?s? )?(?:peer[- ]reviewed, )?"
+                                 r"(?:accepted manuscript|post-?print|accepted version)", re.I)
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"<>]+", re.I)
 
 
@@ -121,6 +134,10 @@ def check(info: ff.ItemInfo, data: dict, pdfs: list[dict], reading: Callable[[],
     if not readable:
         return None                 # a scan without text: nothing to compare
     matching = [p for p in readable if _doi_on_pages(info.doi, p["text"]) or title_on_pages(info.title, p["text"])]
+    book = (data.get("bookTitle") or "") if info.item_type == "bookSection" else ""
+    if not matching and book:
+        # A chapter's PDF often opens with the book's title page: the chapter itself, or the whole book.
+        matching = [p for p in readable if title_on_pages(book, p["text"][:4000])]
     if not matching:
         first = readable[0]
         found_title, found_doi = "", ""
@@ -130,6 +147,9 @@ def check(info: ff.ItemInfo, data: dict, pdfs: list[dict], reading: Callable[[],
 
             if title_match(info.title, got["title"]) >= 0.8:
                 return None         # Gemini sees the item's title (the rules missed it: layout, OCR)
+            book_main = re.split(r"[:?!]\s", book, maxsplit=1)[0]
+            if book and max(title_match(book, got["title"]), title_match(book_main, got["title"])) >= 0.8:
+                return _whole_book(info, data, first)   # the book this chapter is in
             if _same_work(info, got):
                 return None         # same DOI, or same first author and year: a translated or reworded title
             found_title, found_doi = got.get("title", ""), (got.get("doi") or "").lower()
@@ -149,21 +169,29 @@ def check(info: ff.ItemInfo, data: dict, pdfs: list[dict], reading: Callable[[],
         return Problem("another work", first["key"], first["path"], detail, found_title, found_doi, other_item)
 
     pdf = matching[0]
-    text = pdf["text"][:12000]
+    text = _NOT_A_STATEMENT_RE.sub(" ", pdf["text"][:12000])
     if info.item_type == "bookSection":
-        rng = _pages_range(data.get("pages") or "")
-        if rng and pdf.get("pages", 0) > max(60, 3 * (rng[1] - rng[0] + 1)):
-            return Problem("whole book", pdf["key"], pdf["path"],
-                           f"{pdf['pages']} pages for a chapter on pp. {rng[0]}-{rng[1]}")
+        return _whole_book(info, data, pdf)
     published = info.item_type == "journalArticle" and bool((data.get("volume") or data.get("pages") or "").strip())
     if not published:
         return None
+    if _PUBLISHED_RE.search(text[:4000]) and not _SAYS_MANUSCRIPT_RE.search(text[:4000]):
+        return None             # the publisher's cover page: the published version
     if _PROOF_RE.search(text):
         return Problem("proof", pdf["key"], pdf["path"], "it has placeholder page numbers or says it is a proof")
     if _MANUSCRIPT_RE.search(text):
         return Problem("manuscript", pdf["key"], pdf["path"], "it says it is the accepted or author's version")
     if _PREPRINT_RE.search(text[:3000]):
         return Problem("preprint", pdf["key"], pdf["path"], "it says it is a preprint or not peer reviewed")
+    return None
+
+
+def _whole_book(info: ff.ItemInfo, data: dict, pdf: dict) -> Problem | None:
+    """A chapter's item with the whole book attached: far more pages than the chapter's range."""
+    rng = _pages_range(data.get("pages") or "")
+    if rng and pdf.get("pages", 0) > max(60, 3 * (rng[1] - rng[0] + 1)):
+        return Problem("whole book", pdf["key"], pdf["path"],
+                       f"{pdf['pages']} pages for a chapter on pp. {rng[0]}-{rng[1]}")
     return None
 
 

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.37] - 2026-10-09
+
+### Changed
+
+- **The metadata report** is ordered by what needs you: a summary, then suggestions to review, wrong PDFs, papers not checked or unknown to every registry, other findings grouped ("Article without a DOI (8): ..."), and last what was changed automatically. Added abstracts are listed as "Abstract added" instead of their first 120 characters. Dates as dd-mm-yyyy.
+- The terminal says "filled" and "corrected" when the changes were made, and the right-click actions print the number of papers instead of their keys.
+- The progress window no longer scrolls by itself.
+- The right-click actions start the PowerShell window minimised from the first moment, so no terminal flashes up before the progress window (if Zotero cannot start it hidden, it opens as before and minimises itself).
+- The browser action is now called "Check PDF (browser only)" and comes last in the menu (Actions & Tags: "Sort menu by" Name).
+
+### Fixed
+
+- **Published PDFs reported as accepted manuscripts.** Taylor & Francis's open-access licence ("allow the posting of the Accepted Manuscript in a repository"), an old journal's "Accepted manuscript received ...", and a repository's general cover text no longer count; a publisher's cover page ("To cite this article", "Journal homepage") means the published version unless the PDF says outright that it is a manuscript. Of the 10 PDFs flagged in the first run, 5 were published versions (Sæther 2025, Thomas 2025, Sando 2025, Wood 1976, Pyke 2025); 4 are real accepted manuscripts and 1 a proof.
+- The note on a paper with a wrong PDF is shorter and says which action replaces it; notes are dated dd-mm-yyyy.
+- A chapter's PDF that opens with its book's title page was reported as another work (Ellis 1984, Chatzipanteli 2022); a whole book attached to a chapter (Nakamura 2009) is now reported as the whole book, so the chapter is cut out. An earlier wrong finding is cleared: the tag `fulltext/check-pdf` is removed, with a note.
+- A PDF whose title is the item's main title ("Unmasking the face" for "Unmasking the face: A guide ...") was reported as another work.
+- A book series was proposed as a chapter's book title ("Evolutionary Psychology"); "Oxford handbook of ..." against "The Oxford Handbook of ..." is no longer a difference.
+- First names in capitals from Crossref ("JOSJE M.") are filled as "Josje M.".
+- Abstracts that are not abstracts are no longer filled: a citation line ("HARTER, SUSAN. Pleasure derived ..."), a table of contents ("Preface ... Foreword"), or text that lost its first letters ("e authors argue"). A heading glued to the text ("IntroductionSELF-DETERMINATION") is removed.
+- "an erratum", and no nested brackets in sources ("Gemini, reading its PDF").
+
 ## [0.13.2+arne.36] - 2026-10-09
 
 ### Added

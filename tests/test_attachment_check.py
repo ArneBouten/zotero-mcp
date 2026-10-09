@@ -131,7 +131,7 @@ def test_the_audit_reports_attachments_and_fetches_the_right_pdfs():
     a = ma.audit_item(r, ctx)
     assert a.attachment.kind == "another work" and any(f.startswith("attachment: ") for f in a.flags)
     report = ma.AuditReport([a], False, "now")
-    assert report.totals()["attachments"] == 1 and "1 attached PDF(s) to check" in report.markdown()
+    assert report.totals()["attachments"] == 1 and "## Wrong PDFs (1)" in report.markdown()
 
 
 def test_maintenance_audits_fetches_and_checks_again_what_no_registry_knew(tmp_path, monkeypatch):
@@ -263,3 +263,55 @@ def test_the_check_and_complete_window_follows_the_steps():
     p.apply({"key": "D", "label": "D", "status": "not found", "detail": ""})
     assert [(t[1], t[2]) for t in p.todo()] == [("✗ 1 not found", "browser"),
                                                  ("⚑ 1 with changes to review  ⓘ", None)]
+
+
+def test_a_chapter_pdf_that_opens_with_its_books_title_is_not_another_work():
+    r = raw(itemType="bookSection", title="Play, novelty, and stimulus seeking", DOI="", pages="209-246",
+            bookTitle="Child's play: Developmental and applied",
+            creators=[{"creatorType": "author", "lastName": "Ellis"}])
+    i, d = info_data(r)
+    scan = "CHILD'S PLAY: Developmental and Applied\nEdited by Thomas D. Yawkey and Anthony D. Pellegrini"
+    assert ac.check(i, d, [pdf(scan, pages=38)]) is None
+    assert ac.check(i, d, [pdf(scan, pages=420)]).kind == "whole book"
+    # Gemini reads the book's title: the same.
+    assert ac.check(i, d, [pdf("A scan", pages=38)], reading=lambda: {"title": "Child's Play"}) is None
+
+
+def test_report_texts_from_registries_are_cleaned_up():
+    assert ma._given_case("JOSJE M.") == "Josje M." and ma._given_case("K. Ann") == "K. Ann"
+    assert ma._given_case("JC") == "JC"
+    assert ma._clean_abstract("IntroductionSELF-DETERMINATION THEORY (SDT) defines") == \
+        "SELF-DETERMINATION THEORY (SDT) defines"
+    assert ma._clean_abstract("Comunicaciones brevesRESUMEN El objetivo de este estudio") == \
+        "El objetivo de este estudio"
+    assert ma._clean_abstract("The purpose of this study") == "The purpose of this study"
+    body = " This study examined pride and shame in children of both genders in easy and hard tasks." * 4
+    title = "Differences in shame and pride as a function of children's gender and task difficulty"
+    assert ma._plausible_abstract("Shame and pride differences by gender and task difficulty." + body, title)
+    assert not ma._plausible_abstract("Michael Lewis, Steven M. Alessandri, " + title + "." + body, title)
+    assert not ma._plausible_abstract("Preface, Irving E. Sigel Foreword, Frank A. Pedersen" + body, title)
+    assert not ma._plausible_abstract("e authors argue that shame and pride" + body, title)
+    assert ma._same_book("Oxford handbook of positive psychology", "The Oxford Handbook of Positive Psychology")
+    assert not ma._same_book("Evolutionary Perspectives on Child Development and Education", "Evolutionary Psychology")
+
+
+def test_publisher_pdfs_that_only_mention_a_manuscript_are_the_published_version():
+    """Real first pages from the library: the published PDFs passed, the manuscripts are still found."""
+    i, d = info_data(raw())
+    tf = (OWN + "\nEuropean Early Childhood Education Research Journal ISSN: 1350-293X (Print) Journal homepage: "
+          "www.tandfonline.com/journals/recr20\nTo cite this article: Ole Johan Sando ...\nThe terms on which this "
+          "article has been published allow the posting of the Accepted Manuscript in a repository by the author(s) "
+          "or with their consent.")
+    assert ac.check(i, d, [pdf(tf)]) is None
+    old = OWN + "\nJ. Child Psychol. Psychiat., Vol. 17, 1976, pp. 89 to 100.\nAccepted manuscript received 1 September 1974"
+    assert ac.check(i, d, [pdf(old)]) is None
+    kent = (OWN + "\nKent Academic Repository ... Author Accepted Manuscripts If this document is identified as the "
+            "Author Accepted Manuscript it is the version after peer review but before type setting.")
+    assert ac.check(i, d, [pdf(kent)]) is None
+    aam = OWN + "\nThis is an Author's Accepted Manuscript of: Aggerholm, K. (2018). Competition in Physical Education."
+    assert ac.check(i, d, [pdf(aam)]).kind == "manuscript"
+    tf_aam = (OWN + "\nThis is a peer-reviewed, post-print (final draft post-refereeing) version. This is an Accepted "
+              "Manuscript of an article published by Taylor & Francis. To cite this article: ...")
+    assert ac.check(i, d, [pdf(tf_aam)]).kind == "manuscript"
+    proof = OWN + "\nInternational Journal of Rehabilitation Research XXX: 000–000 Copyright © 2022 Wolters Kluwer"
+    assert ac.check(i, d, [pdf(proof)]).kind == "proof"

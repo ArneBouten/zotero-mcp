@@ -552,7 +552,7 @@ def test_a_registry_that_does_not_answer_is_not_a_missing_record():
     assert not any("wrong DOI" in f for f in a.flags)
     report = ma.AuditReport([a], False, "now")
     assert report.totals()["not_checked"] == 1 and report.totals()["no_source"] == 0
-    assert "1 item(s) not checked" in report.markdown()
+    assert "Not checked: 1, because a registry did not answer" in report.markdown()
 
 
 def test_a_service_that_keeps_refusing_is_given_up_for_the_run():

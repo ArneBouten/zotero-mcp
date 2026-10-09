@@ -54,7 +54,7 @@ zotero-mcp fetch-fulltext --retry --steps browser   # only the browser, for what
 ```
 
 A run without the browser remembers the links that refused a plain download,
-so a later browser-only run (the "Fetch PDF in browser" action in Zotero, or the
+so a later browser-only run (the "Check PDF (browser only)" action in Zotero, or the
 window's button) starts with them.
 
 ### Bot checks only your own browser passes
