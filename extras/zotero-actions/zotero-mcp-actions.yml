@@ -1,0 +1,506 @@
+type: ActionsTagsBackup
+author: ''
+platformVersion: ''
+pluginVersion: 2.6.1
+timestamp: '2026-10-09T05:12:19+00:00'
+actions:
+  zotero-mcp-check-complete:
+    event: 0
+    operation: 4
+    data: |
+      // Actions & Tags script: "Check & complete" (zotero-mcp maintain)
+      // 1. Checks and fixes the metadata (empty fields filled, corrections two sources agree on,
+      //    the rest to the saved search "Metadata to review") and the attached PDFs (another
+      //    paper, a manuscript, a proof);
+      // 2. fetches the missing PDFs and the right ones for wrong PDFs (the wrong ones go to the trash);
+      // 3. checks again the papers no registry knew, now with their PDF (Gemini reads it).
+      // Works from the item menu (selected papers) and the collection menu (a whole
+      // collection). Opens a minimised PowerShell window (the details); the progress window shows each paper.
+      // From the item menu the action runs once for all selected items and once per
+      // item: act only on the first run.
+      if (item) return;
+      let args, what;
+      if (collection && !(items && items.length)) {
+        if (collection.libraryID !== Zotero.Libraries.userLibraryID) return "Only collections in My Library work this way.";
+        args = ["-Collection", collection.key, "-CollectionName", collection.name];
+        what = `collection "${collection.name}"`;
+      } else {
+        const keys = (items || []).filter((i) => i.isRegularItem()).map((i) => i.key);
+        if (!keys.length) return "Select one or more papers first.";
+        if (items.some((i) => i.libraryID !== Zotero.Libraries.userLibraryID)) {
+          return "Only items in My Library work this way.";
+        }
+        args = ["-Items", keys.join(",")];
+        what = `${keys.length} item(s)`;
+      }
+      const extra = [];
+      let home = "";
+      try {
+        home = Services.env.get("USERPROFILE");
+      } catch (e) {}
+      const script = (home || Services.dirsvc.get("Home", Components.interfaces.nsIFile).path) + "\\.config\\zotero-mcp\\zotero-maintain.ps1";
+      const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+      const argv = ["-NoExit", "-ExecutionPolicy", "Bypass", "-File", script, ...args, ...extra];
+      // Start the PowerShell window minimised from the first moment (no flash of a terminal): a hidden
+      // PowerShell starts it with Start-Process -WindowStyle Minimized. If that is not possible, the
+      // window opens as before and minimises itself.
+      try {
+        const ps = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+        const arg = (s) => {
+          const v = String(s).replace(/"/g, "");
+          return ps(/\s/.test(v) ? `"${v}"` : v);
+        };
+        const command = `Start-Process -FilePath ${ps(powershell)} -WindowStyle Minimized -ArgumentList ${argv.map(arg).join(",")}`;
+        const proc = Components.classes["@mozilla.org/process/util;1"].createInstance(Components.interfaces.nsIProcess);
+        proc.init(Zotero.File.pathToFile(powershell));
+        proc.startHidden = true;
+        const launcher = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", command];
+        proc.runwAsync(launcher, launcher.length);
+      } catch (e) {
+        Zotero.debug("Check & complete action: no hidden start (" + e + "); opening PowerShell directly");
+        // Not awaited: the window stays open after the run, and Zotero should not wait for it.
+        Zotero.Utilities.Internal.exec(powershell, argv).catch((err) => Zotero.debug("Check & complete action: " + err));
+      }
+      return `Checking and completing for ${what} in a PowerShell window.`;
+    shortcut: ''
+    enabled: true
+    menu: Check & complete
+    name: 1 Check & complete
+    showInMenu: &id001
+      item: true
+      collection: true
+      tools: false
+      reader: false
+      readerAnnotation: false
+  zotero-mcp-check-metadata:
+    event: 0
+    operation: 4
+    data: |
+      // Actions & Tags script: "Check metadata only" (zotero-mcp maintain --no-fetch)
+      // Checks and fixes the metadata and checks the attached PDFs, without downloading PDFs:
+      // a wrong PDF is tagged fulltext/check-pdf (with a note), not replaced.
+      // Works from the item menu (selected papers) and the collection menu (a whole
+      // collection). Opens a minimised PowerShell window (the details); the progress window shows each paper.
+      // From the item menu the action runs once for all selected items and once per
+      // item: act only on the first run.
+      if (item) return;
+      let args, what;
+      if (collection && !(items && items.length)) {
+        if (collection.libraryID !== Zotero.Libraries.userLibraryID) return "Only collections in My Library work this way.";
+        args = ["-Collection", collection.key, "-CollectionName", collection.name];
+        what = `collection "${collection.name}"`;
+      } else {
+        const keys = (items || []).filter((i) => i.isRegularItem()).map((i) => i.key);
+        if (!keys.length) return "Select one or more papers first.";
+        if (items.some((i) => i.libraryID !== Zotero.Libraries.userLibraryID)) {
+          return "Only items in My Library work this way.";
+        }
+        args = ["-Items", keys.join(",")];
+        what = `${keys.length} item(s)`;
+      }
+      const extra = ["-NoFetch"];
+      let home = "";
+      try {
+        home = Services.env.get("USERPROFILE");
+      } catch (e) {}
+      const script = (home || Services.dirsvc.get("Home", Components.interfaces.nsIFile).path) + "\\.config\\zotero-mcp\\zotero-maintain.ps1";
+      const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+      const argv = ["-NoExit", "-ExecutionPolicy", "Bypass", "-File", script, ...args, ...extra];
+      // Start the PowerShell window minimised from the first moment (no flash of a terminal): a hidden
+      // PowerShell starts it with Start-Process -WindowStyle Minimized. If that is not possible, the
+      // window opens as before and minimises itself.
+      try {
+        const ps = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+        const arg = (s) => {
+          const v = String(s).replace(/"/g, "");
+          return ps(/\s/.test(v) ? `"${v}"` : v);
+        };
+        const command = `Start-Process -FilePath ${ps(powershell)} -WindowStyle Minimized -ArgumentList ${argv.map(arg).join(",")}`;
+        const proc = Components.classes["@mozilla.org/process/util;1"].createInstance(Components.interfaces.nsIProcess);
+        proc.init(Zotero.File.pathToFile(powershell));
+        proc.startHidden = true;
+        const launcher = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", command];
+        proc.runwAsync(launcher, launcher.length);
+      } catch (e) {
+        Zotero.debug("Check metadata only action: no hidden start (" + e + "); opening PowerShell directly");
+        // Not awaited: the window stays open after the run, and Zotero should not wait for it.
+        Zotero.Utilities.Internal.exec(powershell, argv).catch((err) => Zotero.debug("Check metadata only action: " + err));
+      }
+      return `Checking the metadata for ${what} in a PowerShell window.`;
+    shortcut: ''
+    enabled: true
+    menu: Check metadata only
+    name: 2 Check metadata only
+    showInMenu: *id001
+  1791371343173-DVh4ejoJ:
+    event: 0
+    operation: 4
+    data: |
+      // Actions & Tags script: "Fetch PDF only" (zotero-mcp fetch-fulltext)
+      // Finds and attaches PDFs for the papers without one (open access, publisher, Google
+      // Scholar, web search); changes no metadata. Papers not found can then be searched with
+      // the browser from the progress window.
+      // Works from the item menu (selected papers) and the collection menu (a whole
+      // collection). Opens a minimised PowerShell window (the details); the progress window shows each paper.
+      // From the item menu the action runs once for all selected items and once per
+      // item: act only on the first run.
+      if (item) return;
+      let args, what;
+      if (collection && !(items && items.length)) {
+        if (collection.libraryID !== Zotero.Libraries.userLibraryID) return "Only collections in My Library work this way.";
+        args = ["-Collection", collection.key, "-CollectionName", collection.name];
+        what = `collection "${collection.name}"`;
+      } else {
+        const keys = (items || []).filter((i) => i.isRegularItem()).map((i) => i.key);
+        if (!keys.length) return "Select one or more papers first.";
+        if (items.some((i) => i.libraryID !== Zotero.Libraries.userLibraryID)) {
+          return "Only items in My Library work this way.";
+        }
+        args = ["-Items", keys.join(",")];
+        what = `${keys.length} item(s)`;
+      }
+      const extra = [];
+      let home = "";
+      try {
+        home = Services.env.get("USERPROFILE");
+      } catch (e) {}
+      const script = (home || Services.dirsvc.get("Home", Components.interfaces.nsIFile).path) + "\\.config\\zotero-mcp\\zotero-fetch.ps1";
+      const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+      const argv = ["-NoExit", "-ExecutionPolicy", "Bypass", "-File", script, ...args, ...extra];
+      // Start the PowerShell window minimised from the first moment (no flash of a terminal): a hidden
+      // PowerShell starts it with Start-Process -WindowStyle Minimized. If that is not possible, the
+      // window opens as before and minimises itself.
+      try {
+        const ps = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+        const arg = (s) => {
+          const v = String(s).replace(/"/g, "");
+          return ps(/\s/.test(v) ? `"${v}"` : v);
+        };
+        const command = `Start-Process -FilePath ${ps(powershell)} -WindowStyle Minimized -ArgumentList ${argv.map(arg).join(",")}`;
+        const proc = Components.classes["@mozilla.org/process/util;1"].createInstance(Components.interfaces.nsIProcess);
+        proc.init(Zotero.File.pathToFile(powershell));
+        proc.startHidden = true;
+        const launcher = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", command];
+        proc.runwAsync(launcher, launcher.length);
+      } catch (e) {
+        Zotero.debug("Fetch PDF only action: no hidden start (" + e + "); opening PowerShell directly");
+        // Not awaited: the window stays open after the run, and Zotero should not wait for it.
+        Zotero.Utilities.Internal.exec(powershell, argv).catch((err) => Zotero.debug("Fetch PDF only action: " + err));
+      }
+      return `Fetching PDFs for ${what} in a PowerShell window.`;
+    shortcut: ''
+    enabled: true
+    menu: Fetch PDF only
+    name: 3 Fetch PDF only
+    showInMenu: *id001
+  1791502637412-DVh4ejoJ:
+    event: 0
+    operation: 4
+    data: |
+      // Actions & Tags script: "Check PDF (browser only)" (zotero-mcp fetch-fulltext --steps browser)
+      // Only the browser step, for papers an earlier run did not find: links that refused a plain
+      // download, ResearchGate, Academia.edu and publisher logins in the fetcher's Chrome window.
+      // Stay nearby for captchas; bot checks only your own browser passes go to your own browser.
+      // Works from the item menu (selected papers) and the collection menu (a whole
+      // collection). Opens a minimised PowerShell window (the details); the progress window shows each paper.
+      // From the item menu the action runs once for all selected items and once per
+      // item: act only on the first run.
+      if (item) return;
+      let args, what;
+      if (collection && !(items && items.length)) {
+        if (collection.libraryID !== Zotero.Libraries.userLibraryID) return "Only collections in My Library work this way.";
+        args = ["-Collection", collection.key, "-CollectionName", collection.name];
+        what = `collection "${collection.name}"`;
+      } else {
+        const keys = (items || []).filter((i) => i.isRegularItem()).map((i) => i.key);
+        if (!keys.length) return "Select one or more papers first.";
+        if (items.some((i) => i.libraryID !== Zotero.Libraries.userLibraryID)) {
+          return "Only items in My Library work this way.";
+        }
+        args = ["-Items", keys.join(",")];
+        what = `${keys.length} item(s)`;
+      }
+      const extra = ["-Browser"];
+      let home = "";
+      try {
+        home = Services.env.get("USERPROFILE");
+      } catch (e) {}
+      const script = (home || Services.dirsvc.get("Home", Components.interfaces.nsIFile).path) + "\\.config\\zotero-mcp\\zotero-fetch.ps1";
+      const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+      const argv = ["-NoExit", "-ExecutionPolicy", "Bypass", "-File", script, ...args, ...extra];
+      // Start the PowerShell window minimised from the first moment (no flash of a terminal): a hidden
+      // PowerShell starts it with Start-Process -WindowStyle Minimized. If that is not possible, the
+      // window opens as before and minimises itself.
+      try {
+        const ps = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+        const arg = (s) => {
+          const v = String(s).replace(/"/g, "");
+          return ps(/\s/.test(v) ? `"${v}"` : v);
+        };
+        const command = `Start-Process -FilePath ${ps(powershell)} -WindowStyle Minimized -ArgumentList ${argv.map(arg).join(",")}`;
+        const proc = Components.classes["@mozilla.org/process/util;1"].createInstance(Components.interfaces.nsIProcess);
+        proc.init(Zotero.File.pathToFile(powershell));
+        proc.startHidden = true;
+        const launcher = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", command];
+        proc.runwAsync(launcher, launcher.length);
+      } catch (e) {
+        Zotero.debug("Check PDF (browser only) action: no hidden start (" + e + "); opening PowerShell directly");
+        // Not awaited: the window stays open after the run, and Zotero should not wait for it.
+        Zotero.Utilities.Internal.exec(powershell, argv).catch((err) => Zotero.debug("Check PDF (browser only) action: " + err));
+      }
+      return `Looking for PDFs with the browser for ${what} in a PowerShell window.`;
+    shortcut: ''
+    enabled: true
+    menu: Check PDF (browser only)
+    name: 4 Check PDF (browser only)
+    showInMenu: *id001
+  zotero-mcp-check-new:
+    event: 1
+    operation: 4
+    data: |
+      // Actions & Tags script: "Check & complete new papers" (event: Create Item; zotero-mcp maintain --quiet --index)
+      // When papers are added (Zotero Connector, import, DOI), about a minute after the last one: their
+      // metadata is checked and fixed, a PDF is fetched if Zotero did not attach one, and the search index
+      // is updated. The window stays minimised and only comes forward when something is left for you.
+      // Papers added together are checked in one run. Turn it off by disabling this action.
+      // With two computers: a paper that arrives by sync was added (and is checked) on the other one.
+      if (!item || !item.isRegularItem() || item.libraryID !== Zotero.Libraries.userLibraryID) return;
+      if (item.synced) return;
+      const WAIT_MS = 60000;   // the Connector attaches the page's PDF a little after the item
+      const queue = Zotero.__zoteroMcpNewItems || (Zotero.__zoteroMcpNewItems = { keys: new Set(), gen: 0 });
+      queue.keys.add(item.key);
+      const gen = ++queue.gen;
+      Zotero.Promise.delay(WAIT_MS).then(() => {
+        if (gen !== queue.gen || !queue.keys.size) return;   // more papers came: the last one starts the run
+        const keys = Array.from(queue.keys);
+        queue.keys.clear();
+        let home = "";
+        try {
+          home = Services.env.get("USERPROFILE");
+        } catch (e) {}
+        const script = (home || Services.dirsvc.get("Home", Components.interfaces.nsIFile).path) + "\\.config\\zotero-mcp\\zotero-maintain.ps1";
+        const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        // No -NoExit: the minimised terminal closes when the run is done.
+        const argv = ["-ExecutionPolicy", "Bypass", "-File", script, "-Items", keys.join(","), "-Quiet"];
+        try {
+          const ps = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+          const command = `Start-Process -FilePath ${ps(powershell)} -WindowStyle Minimized -ArgumentList ${argv.map(ps).join(",")}`;
+          const proc = Components.classes["@mozilla.org/process/util;1"].createInstance(Components.interfaces.nsIProcess);
+          proc.init(Zotero.File.pathToFile(powershell));
+          proc.startHidden = true;
+          const launcher = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", command];
+          proc.runwAsync(launcher, launcher.length);
+        } catch (e) {
+          Zotero.debug("Check & complete new papers: no hidden start (" + e + "); opening PowerShell directly");
+          Zotero.Utilities.Internal.exec(powershell, argv).catch((err) => Zotero.debug("Check & complete new papers: " + err));
+        }
+      }).catch((e) => Zotero.debug("Check & complete new papers: " + e));
+      return;   // no message: this runs for every new paper
+    shortcut: ''
+    enabled: true
+    menu: ''
+    name: 5 Check & complete new papers (on import)
+    showInMenu:
+      item: false
+      collection: false
+      tools: false
+      reader: false
+      readerAnnotation: false
+  zotero-mcp-merge-duplicates:
+    event: 0
+    operation: 4
+    data: |
+      // Actions & Tags script: "Merge certain duplicates" (Tools menu)
+      // Merges papers in My Library that are certainly the same work, with Zotero's own merge (the same as
+      // its "Merge items" button: attachments, notes, tags, collections and links to the merged copies are
+      // kept; the other copies go to the trash, recoverable). Certain = the same DOI, or for books the same
+      // ISBN, the same item type, and titles that agree. Pairs with the same DOI but a different type or
+      // title are not merged: they get the tag "duplicate/check" for you to look at.
+      // Which copy stays: the one zotero-mcp has already checked; else the oldest (Word documents most
+      // likely cite it). Its empty fields are filled from the other copies; afterwards the merged papers
+      // get Check & complete, which settles fields where the copies disagreed.
+      if (item) return;   // from a menu: runs once
+      const TAG_CHECK = "duplicate/check";
+      const libraryID = Zotero.Libraries.userLibraryID;
+
+      const normDoi = (v) => String(v || "").trim().toLowerCase()
+        .replace(/^https?:\/\/(dx\.)?doi\.org\//, "").replace(/^doi:\s*/, "").replace(/[.,;)\]]+$/, "");
+      const isbn13 = (v) => {
+        const d = String(v || "").toUpperCase().replace(/[^0-9X]/g, "");
+        if (d.length === 13) return d;
+        if (d.length !== 10) return "";
+        const core = "978" + d.slice(0, 9);
+        let sum = 0;
+        for (let i = 0; i < 12; i++) sum += Number(core[i]) * (i % 2 ? 3 : 1);
+        return core + ((10 - (sum % 10)) % 10);
+      };
+      const field = (it, name) => {
+        try {
+          return it.getField(name) || "";
+        } catch (e) {
+          return "";
+        }
+      };
+      const doiOf = (it) => normDoi(field(it, "DOI") || ((field(it, "extra").match(/^DOI:\s*(\S+)/im) || [])[1]));
+      const words = (t) => new Set(String(t || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 2));
+      const sameTitle = (a, b) => {
+        const A = words(a), B = words(b);
+        if (!A.size || !B.size) return false;
+        let shared = 0;
+        for (const w of A) if (B.has(w)) shared++;
+        return shared / Math.min(A.size, B.size) >= 0.8;   // a missing subtitle is still the same title
+      };
+
+      // The papers zotero-mcp has checked (its record of checks).
+      let checked = {};
+      try {
+        const home = Services.env.get("USERPROFILE") || Services.env.get("HOME");
+        const state = await IOUtils.readJSON(PathUtils.join(home, ".config", "zotero-mcp", "maintenance.json"));
+        checked = state.checked_modified || {};
+      } catch (e) {}
+
+      const ids = await Zotero.Items.getAll(libraryID, true, false, true);
+      const papers = (await Zotero.Items.getAsync(ids)).filter((it) => it.isRegularItem() && !it.deleted);
+      const groups = new Map();
+      for (const it of papers) {
+        const doi = doiOf(it);
+        const isbn = it.itemType === "book" ? isbn13(field(it, "ISBN").split(/[\s,;]+/)[0]) : "";
+        const key = doi ? "doi:" + doi : isbn ? "isbn:" + isbn : "";
+        if (!key) continue;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(it);
+      }
+
+      const toMerge = [], toCheck = [];
+      for (const [key, items] of groups) {
+        if (items.length < 2) continue;
+        const first = items[0];
+        const certain = items.every((it) => it.itemTypeID === first.itemTypeID && sameTitle(field(it, "title"), field(first, "title")));
+        (certain ? toMerge : toCheck).push({ key, items });
+      }
+      if (!toMerge.length && !toCheck.length) return "No duplicates with the same DOI or ISBN.";
+
+      const label = (it) => {
+        const c = it.getCreators()[0];
+        return `${c ? c.lastName : "Anon."} (${field(it, "date").slice(0, 4) || "n.d."}) ${field(it, "title").slice(0, 60)}`;
+      };
+      const lines = toMerge.slice(0, 12).map((g) => "• " + label(g.items[0]) + (g.items.length > 2 ? ` (${g.items.length} copies)` : ""));
+      if (toMerge.length > 12) lines.push(`• … and ${toMerge.length - 12} more`);
+      const message = (toMerge.length ? `${toMerge.length} paper(s) are in your library more than once (same DOI or ISBN, same type and title):\n\n${lines.join("\n")}\n\n`
+        + "Each is merged into one with Zotero's own merge; the other copies go to the trash.\n" : "")
+        + (toCheck.length ? `\n${toCheck.length} group(s) share a DOI or ISBN but differ in type or title: not merged, tagged "${TAG_CHECK}".` : "");
+      const ps = Services.prompt;
+      const choice = ps.confirmEx(Zotero.getMainWindow(), "Merge certain duplicates", message,
+        ps.BUTTON_POS_0 * ps.BUTTON_TITLE_IS_STRING + ps.BUTTON_POS_1 * ps.BUTTON_TITLE_CANCEL,
+        toMerge.length ? "Merge" : "Tag them", null, null, null, {});
+      if (choice !== 0) return "Nothing merged.";
+
+      for (const g of toCheck) {
+        for (const it of g.items) {
+          it.addTag(TAG_CHECK);
+          await it.saveTx();
+        }
+      }
+      const kept = [];
+      let failed = 0;
+      for (const g of toMerge) {
+        // Keep the copy already checked by zotero-mcp, else the oldest.
+        const byAge = g.items.slice().sort((a, b) => String(a.dateAdded).localeCompare(String(b.dateAdded)));
+        const master = byAge.find((it) => checked[it.key]) || byAge[0];
+        const others = g.items.filter((it) => it !== master);
+        try {
+          for (const fieldID of Zotero.ItemFields.getItemTypeFields(master.itemTypeID)) {
+            const name = Zotero.ItemFields.getName(fieldID);
+            if (field(master, name)) continue;
+            const value = others.map((it) => field(it, name)).find((v) => v);
+            if (value) master.setField(name, value);
+          }
+          if (!master.getCreators().length) {
+            const withCreators = others.find((it) => it.getCreators().length);
+            if (withCreators) master.setCreators(withCreators.getCreators());
+          }
+          await master.saveTx();
+          await Zotero.Items.merge(master, others);
+          kept.push(master.key);
+        } catch (e) {
+          failed++;
+          Zotero.debug("Merge certain duplicates: " + label(master) + ": " + e);
+        }
+      }
+
+      // Check & complete for the merged papers: it settles the fields where the copies disagreed.
+      if (kept.length) {
+        let home = "";
+        try {
+          home = Services.env.get("USERPROFILE");
+        } catch (e) {}
+        const script = (home || Services.dirsvc.get("Home", Components.interfaces.nsIFile).path) + "\\.config\\zotero-mcp\\zotero-maintain.ps1";
+        const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        const argv = ["-ExecutionPolicy", "Bypass", "-File", script, "-Items", kept.join(","), "-Quiet"];
+        try {
+          const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+          const command = `Start-Process -FilePath ${q(powershell)} -WindowStyle Minimized -ArgumentList ${argv.map(q).join(",")}`;
+          const proc = Components.classes["@mozilla.org/process/util;1"].createInstance(Components.interfaces.nsIProcess);
+          proc.init(Zotero.File.pathToFile(powershell));
+          proc.startHidden = true;
+          const launcher = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", command];
+          proc.runwAsync(launcher, launcher.length);
+        } catch (e) {
+          Zotero.Utilities.Internal.exec(powershell, argv).catch((err) => Zotero.debug("Merge certain duplicates: " + err));
+        }
+      }
+      return `Merged ${kept.length} paper(s)` + (failed ? `; ${failed} could not be merged (see Help > Debug Output)` : "")
+        + (toCheck.length ? `; ${toCheck.length} group(s) tagged "${TAG_CHECK}" for you.` : ".");
+    shortcut: ''
+    enabled: true
+    menu: Merge certain duplicates
+    name: 6 Merge certain duplicates
+    showInMenu:
+      item: false
+      collection: false
+      tools: true
+      reader: false
+      readerAnnotation: false
+  zotero-mcp-review-metadata:
+    event: 0
+    operation: 4
+    data: |
+      // Actions & Tags script: "Review suggested metadata" (zotero-mcp metadata-review)
+      // Opens a window with the metadata changes zotero-mcp suggested but did not make (tag
+      // metadata/review): accept or reject each with a click. Item menu: the selected papers;
+      // collection menu: the papers in that collection; Tools menu: every paper waiting for review.
+      if (item) return;   // from the item menu the action also runs once per item: act only once
+      const TAG_REVIEW = "metadata/review";
+      let args = [];
+      if (items && items.length) {
+        const keys = items.filter((i) => i.isRegularItem() && i.hasTag(TAG_REVIEW)).map((i) => i.key);
+        if (!keys.length) return "None of the selected papers has suggested changes.";
+        args = ["--items", keys.join(",")];
+      } else if (collection) {
+        args = ["--collection", collection.key];
+      }
+      // pyw: Python without a console window; py as a fallback.
+      let python = "C:\\Windows\\pyw.exe";
+      try {
+        if (!Zotero.File.pathToFile(python).exists()) python = "C:\\Windows\\py.exe";
+      } catch (e) {}
+      const argv = ["-3.12", "-m", "zotero_mcp.cli", "metadata-review", ...args];
+      try {
+        const proc = Components.classes["@mozilla.org/process/util;1"].createInstance(Components.interfaces.nsIProcess);
+        proc.init(Zotero.File.pathToFile(python));
+        proc.startHidden = true;
+        proc.runwAsync(argv, argv.length);
+      } catch (e) {
+        Zotero.Utilities.Internal.exec(python, argv).catch((err) => Zotero.debug("Review suggested metadata: " + err));
+      }
+    shortcut: ''
+    enabled: true
+    menu: Review suggested metadata
+    name: 7 Review suggested metadata
+    showInMenu:
+      item: true
+      collection: true
+      tools: true
+      reader: false
+      readerAnnotation: false

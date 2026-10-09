@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.53] - 2026-10-09
+
+### Added
+
+- `extras/`: the Zotero actions (`zotero-mcp-actions.yml` and each script) and the PowerShell scripts they start, kept with the code they call.
+
+### Changed
+
+- The actions no longer name a user folder: without `USERPROFILE` they use the system's home folder. The actions file has no author. The maintain script no longer has the removed `-Monthly` switch.
+
 ## [0.13.2+arne.52] - 2026-10-09
 
 ### Added
