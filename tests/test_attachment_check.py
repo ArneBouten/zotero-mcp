@@ -474,11 +474,6 @@ def test_a_run_skips_papers_unchanged_since_their_last_check(tmp_path, monkeypat
 
     run = dict(keys=["OLD", "EDITED", "MISS", "NEW"], backend=lib, audit_run=audit_run, fetch_run=fetch_run,
                retraction_run=retraction_run, writer_factory=object, progress=events.append, log=lambda m: None)
-    # A paper or a few clicked on their own are always checked fully.
-    maintenance.run(**dict(run, keys=["OLD"]))
-    assert calls["audit"] == ["OLD"] and "retractions" not in calls
-    monkeypatch.setattr(maintenance, "SMALL_SELECTION", 1)
-    calls.clear()
     maintenance.run(**run)
     assert calls["audit"] == ["EDITED", "NEW"] and calls["retractions"] == ["OLD", "MISS"]
     assert calls["fetch"] == ["OLD", "EDITED", "NEW"]       # MISS was searched in vain yesterday
@@ -490,8 +485,12 @@ def test_a_run_skips_papers_unchanged_since_their_last_check(tmp_path, monkeypat
     for e in events:
         p.apply(e)
     p.active_runs, p.main_done = 0, True
-    assert [(t[1].split("  ")[0], t[2]) for t in p.todo()] == [
-        ("– 2 unchanged since their last check, not checked again", "recheck")]
+    assert p.todo() == []                                   # nothing for you to do: no "To do" line
+    assert p.meta_text("OLD").startswith("– Unchanged, checked ")
+    today = __import__("datetime").date.today().strftime("%d-%m-%Y")
+    assert maintenance.all_unchanged(lib, ["OLD", "MISS"]) == (2, today)
+    lib.items["FRESH"] = _paper("FRESH", "2026-10-09T09:00:00Z")          # never checked
+    assert maintenance.all_unchanged(lib, ["OLD", "FRESH"]) is None
     # Afterwards everything is checked; with every=True all are checked again.
     calls.clear()
     maintenance.run(**run)

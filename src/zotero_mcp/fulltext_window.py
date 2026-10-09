@@ -281,11 +281,6 @@ class Progress:
                         "A note on the paper says what is wrong (tag: fulltext/check-pdf). "
                         + ("'Check & complete' looks for the right one." if self.stages == ["Metadata"]
                            else "It stays attached until the right one is found.")))
-        unchanged = self._keys(lambda k: meta(k) == "unchanged")
-        if unchanged and not self.active_runs:
-            out.append(("busy", f"– {len(unchanged)} unchanged since their last check, not checked again  ⓘ",
-                        "recheck", "Nothing changed in Zotero since their last check, so only retractions were "
-                        "checked. 'Check anyway' runs the full check for them too."))
         errors = self._keys(lambda k: meta(k) == "error" or status(k) == "error")
         if errors:
             out.append(("bad", f"✗ {len(errors)} error{'s' if len(errors) != 1 else ''}", "report",
@@ -434,6 +429,44 @@ def _style(root, ttk) -> dict:
     style.configure("Vertical.TScrollbar", background="#e5e7eb", troughcolor=ui["card"], bordercolor=ui["card"],
                     arrowcolor=ui["muted"], lightcolor="#e5e7eb", darkcolor="#e5e7eb", gripcount=0)
     return ui
+
+
+def ask_check_again(count: int, when: str, title: str = "Check & complete") -> bool:
+    """The papers chosen were all checked before and nothing changed since: ask before checking
+    them again. True to check again."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title(f"{title} — zotero-mcp")
+    root.resizable(False, False)
+    ui = _style(root, ttk)
+    root.configure(background=ui["bg"])
+    frame = ttk.Frame(root, padding=(20, 16, 20, 14), style="App.TFrame")
+    frame.pack(fill="both", expand=True)
+    head = "Nothing changed since the last check" if count == 1 else f"These {count} papers are unchanged"
+    text = (f"This paper was last checked on {when}, and nothing changed in Zotero since." if count == 1
+            else f"All {count} papers were checked before (the last on {when}), and nothing changed in Zotero since.")
+    ttk.Label(frame, text=head, style="Title.TLabel").pack(anchor="w")
+    ttk.Label(frame, text=text, style="Muted.TLabel", wraplength=420,
+              justify="left").pack(anchor="w", pady=(6, 14))
+    answer = {"again": False}
+
+    def again() -> None:
+        answer["again"] = True
+        root.destroy()
+
+    buttons = ttk.Frame(frame, style="App.TFrame")
+    buttons.pack(fill="x")
+    ttk.Button(buttons, text="Cancel", command=root.destroy).pack(side="right")
+    ttk.Button(buttons, text="Check again", command=again, style="Accent.TButton").pack(side="right", padx=(0, 8))
+    root.bind("<Return>", lambda e: again())
+    root.bind("<Escape>", lambda e: root.destroy())
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(600, lambda: root.attributes("-topmost", False))
+    root.mainloop()
+    return answer["again"]
 
 
 def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mode: str = "fetch",
@@ -607,8 +640,8 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
         threading.Thread(target=watch, daemon=True).start()
         refresh()
 
-    def on_recheck() -> None:
-        keys = [k for k in prog.order if prog.meta.get(k) == "unchanged"]
+    def on_recheck(keys: list[str] | None = None) -> None:
+        keys = keys or [k for k in prog.order if prog.meta.get(k) == "unchanged"]
         if not keys:
             return
         for k in keys:
@@ -640,10 +673,37 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
             except Exception:
                 pass
 
+    # Papers passed over because nothing changed since their last check: check them again on request
+    # (all of them here, or one by right-clicking its row).
+    def selected_unchanged() -> list[str]:
+        return [k for k in tree.selection() if prog.meta.get(k) == "unchanged"]
+
+    recheck_btn = ttk.Button(buttons, text="Check unchanged papers again",
+                             command=lambda: on_recheck(selected_unchanged() or None))
+    _Tooltip(recheck_btn, "Nothing changed in Zotero since their last check, so they were only checked for "
+                          "retractions. Select papers (or right-click one) to check only those again.")
     ttk.Button(buttons, text="Close", command=on_close).pack(side="right")
     report_btn = ttk.Button(buttons, text="Show report", command=on_report)
     report_btn.pack(side="right", padx=(0, 8))
     tree.bind("<Double-1>", on_open)
+
+    if with_meta:
+        # Right-click a paper that was passed over (unchanged): check it again on its own.
+        menu = tk.Menu(root, tearoff=0)
+
+        def on_menu(event) -> None:
+            row = tree.identify_row(event.y)
+            if not row:
+                return
+            tree.selection_set(row)
+            menu.delete(0, "end")
+            chosen = [k for k in tree.selection() if prog.meta.get(k) == "unchanged"]
+            if chosen and not prog.active_runs:
+                menu.add_command(label="Check again", command=lambda: on_recheck(chosen))
+            menu.add_command(label="Show in Zotero", command=on_open)
+            menu.tk_popup(event.x_root, event.y_root)
+
+        tree.bind("<Button-3>", on_menu)
     root.protocol("WM_DELETE_WINDOW", on_close)
 
     def select(keys: list[str]) -> None:
@@ -691,6 +751,17 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
                     chip.bind("<Button-1>", lambda _e, ks=keys: select(ks))
                     _Tooltip(chip, explanation + " Click to select these papers.")
                     chip_widgets.append(chip)
+        unchanged = [k for k in prog.order if prog.meta.get(k) == "unchanged"]
+        if unchanged and not prog.active_runs:
+            chosen = selected_unchanged()
+            if chosen:
+                text = "Check selected again" if len(chosen) == 1 else f"Check {len(chosen)} selected again"
+            else:
+                text = "Check again" if len(unchanged) == 1 else f"Check {len(unchanged)} unchanged again"
+            recheck_btn.configure(text=text)
+            recheck_btn.pack(side="left", padx=(0, 8))
+        else:
+            recheck_btn.pack_forget()
         items = prog.todo()
         state = (items, prog.browser_busy)
         if state != shown_todo[0]:
@@ -713,8 +784,6 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
                                state="disabled" if prog.browser_busy else "normal").pack(side="right")
                 elif action == "report":
                     ttk.Button(row, text="Show report", command=on_report, style="Soft.TButton").pack(side="right")
-                elif action == "recheck":
-                    ttk.Button(row, text="Check anyway", command=on_recheck, style="Soft.TButton").pack(side="right")
                 todo_rows.append(row)
             if items:
                 todo_card.pack(side="bottom", fill="x", pady=(12, 0), before=holder)

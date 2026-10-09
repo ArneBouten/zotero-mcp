@@ -7,11 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.45] - 2026-10-09
+
+### Changed
+
+- Unchanged papers are not checked again, also when selected on their own (arne.44 always checked up to 5). If every paper chosen is unchanged, a small window says when it was last checked, with "Check again" and "Cancel". Otherwise the progress window shows "Unchanged, checked 09-10-2026" for those papers, a button "Check N unchanged again" ("Check N selected again" when you select some), and "Check again" when you right-click one.
+
 ## [0.13.2+arne.44] - 2026-10-09
 
 ### Changed
 
-- Up to 5 selected papers are always checked fully (clicking a paper means "check this one"). In a larger run the window says which papers were unchanged and when they were last checked, with a "Check anyway" button.
+- Up to 5 selected papers were always checked fully; in a larger run the window said which papers were unchanged, with a "Check anyway" button.
 
 ## [0.13.2+arne.43] - 2026-10-09
 

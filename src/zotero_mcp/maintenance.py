@@ -195,7 +195,6 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
 
     log(f"1/{n} Metadata ...")
     stage(0)
-    every = every or len(keys) <= SMALL_SELECTION
     changed, unchanged = (keys, []) if every or not apply else split_unchanged(backend, keys)
     if unchanged:
         log(f"{len(unchanged)} paper(s) unchanged since their last check: only a retraction check "
@@ -267,8 +266,6 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
 #: The checking rules' version. A paper checked under older rules counts as changed, so
 #: the next run checks it again; raised when the rules improve enough to be worth that.
 RULES = 1
-#: A selection this small is always checked fully: clicking a few papers means "check these".
-SMALL_SELECTION = 5
 #: Days between retraction checks of an unchanged paper.
 RETRACTION_DAYS = 30
 #: Days after which a recent article still without volume or pages (online first) is checked
@@ -348,6 +345,24 @@ def split_unchanged(backend, keys: list[str]) -> tuple[list[str], list[str]]:
                 same = False
         (unchanged if same else changed).append(key)
     return changed, unchanged
+
+
+def all_unchanged(backend, keys: list[str] | None, collection: str | None = None) -> tuple[int, str] | None:
+    """When every paper chosen was checked before and nothing changed since: (how many, the
+    latest check date dd-mm-yyyy), to ask before checking them again. Else None."""
+    if collection and not keys:
+        from zotero_mcp.metadata_audit import AUDITED_TYPES
+
+        keys = [i.get("key") or i.get("data", {}).get("key") for i in backend.collection_items(collection) or []
+                if i.get("data", {}).get("itemType") in AUDITED_TYPES]
+    if not keys:
+        return None
+    changed, unchanged = split_unchanged(backend, list(keys))
+    if changed or not unchanged:
+        return None
+    seen = _load().get("checked_modified") or {}
+    last = max(((seen.get(k) or {}).get("date") or "") for k in unchanged)
+    return len(unchanged), (_dt.date.fromisoformat(last).strftime("%d-%m-%Y") if last else "an earlier date")
 
 
 def check_retractions(keys: list[str], *, backend, log: Callable[[str], None] = print,

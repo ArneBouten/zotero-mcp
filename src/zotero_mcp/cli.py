@@ -1544,8 +1544,17 @@ def main():
                       index=args.index, every=args.all)
         if args.window:
             try:
-                from zotero_mcp import fulltext_window
+                from zotero_mcp import fulltext_window, library
 
+                if not (args.quiet or args.all or args.report_only):
+                    # Everything chosen was checked before and nothing changed: ask, without the big window.
+                    same = maintenance.all_unchanged(library.get_library_backend(), keys, args.collection)
+                    if same is not None:
+                        title = "Check metadata" if args.no_fetch else "Check & complete"
+                        if not fulltext_window.ask_check_again(*same, title=title):
+                            print("Nothing changed since the last check; not checked again.")
+                            return
+                        kwargs["every"] = True
                 fulltext_window.run_window(kwargs, mode="metadata" if args.no_fetch else "maintain", quiet=args.quiet)
                 return
             except ImportError as e:
