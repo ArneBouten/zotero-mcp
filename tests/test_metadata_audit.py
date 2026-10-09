@@ -726,3 +726,15 @@ def test_a_doi_printed_on_the_pdf_or_saved_page_finds_the_record_without_a_title
     ctx.page_meta = lambda key: meta
     a = ma.audit_item(item(DOI=""), ctx)
     assert a.reference == "Crossref (by the DOI on its saved web page)"
+
+
+def test_semantic_scholar_alone_refusing_does_not_leave_a_paper_unchecked():
+    # Crossref and OpenAlex answered and do not know the book; Semantic Scholar (often refusing
+    # without a key) is not needed for that conclusion.
+    routes = {"api.crossref.org": (200, {"message": {"items": []}}), "api.openalex.org": (200, {"results": []}),
+              "semanticscholar": (429, None)}
+    a, _ = audit(item(DOI="", itemType="book"), routes=routes)
+    assert not any(f.startswith(ma.NOT_CHECKED) for f in a.flags)
+    assert "no registry record found" in a.flags
+    a, _ = audit(item(DOI="", itemType="book"), routes={**routes, "api.openalex.org": (429, None)})
+    assert a.flags[0].startswith(ma.NOT_CHECKED)

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.60] - 2026-10-09
+
+### Fixed
+
+- **103 papers stayed "not checked" at every run.** A paper without a DOI counted as not checked whenever Semantic Scholar refused (it often does without an API key), even when Crossref and OpenAlex had answered. Now Semantic Scholar alone refusing no longer holds a paper back: the paper is checked, and when neither main registry knows it, it is reported as unknown. Only Crossref or OpenAlex not answering leaves a paper for the next run.
+
 ## [0.13.2+arne.59] - 2026-10-09
 
 ### Fixed

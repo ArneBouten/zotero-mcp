@@ -922,7 +922,10 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
                 rec = crossref(doi, http, settings) or datacite(doi, http, settings)
                 if rec is not None and _matches_item(info, rec, 1):
                     ref, rec.by = rec, "pdf-doi"
-        if ref is None and match is None and http.failed:
+        if ref is None and match is None and http.failed - _EXTRA_TITLE_SOURCES:
+            # Crossref or OpenAlex could not be asked: no conclusion. Semantic Scholar alone
+            # refusing (it often does, without a key) does not hold the paper back: the two
+            # main registries answered and do not know it.
             return _not_checked(audit, data, http)
         if ref is None and match and match.doi:
             # The title match points to a DOI: use its Crossref record only if
@@ -1116,6 +1119,8 @@ def _audit_item(raw: dict, data: dict, info: ff.ItemInfo, audit: ItemAudit, http
 
 
 NOT_CHECKED = "not checked this time"
+#: Title sources whose refusal alone does not leave a paper unchecked.
+_EXTRA_TITLE_SOURCES = {"semanticscholar.org"}
 
 
 def _not_checked(audit: ItemAudit, data: dict, http: _Recorder) -> ItemAudit:
