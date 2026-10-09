@@ -36,18 +36,19 @@ FINISHED = {"attached", "found", "not found", "error", "skipped", "needs your br
 
 META_TEXT = {"waiting": "Waiting", "checking": "Checking…"}
 META_ICON = {"ok": "✓", "updated": "✎", "review": "⚑", "wrong pdf": "⚠", "no record": "?", "not checked": "–",
-             "retracted": "⚠", "error": "✗", "pdf replaced": "✓", "other version": "◐", "notice": "ℹ"}
+             "retracted": "⚠", "error": "✗", "pdf replaced": "✓", "other version": "◐", "notice": "ℹ",
+             "unchanged": "–"}
 META_PENDING = {"waiting", "checking"}
 
 #: Row colour: the most pressing of the row's columns wins.
 _SEVERITY = {"bad": 4, "warn": 3, "busy": 2, "ok": 1}
 _META_TONE = {"error": "bad", "retracted": "bad", "wrong pdf": "warn", "review": "warn", "no record": "warn",
-              "updated": "ok", "ok": "ok", "pdf replaced": "ok", "other version": "ok", "notice": "warn"}
+              "updated": "ok", "ok": "ok", "pdf replaced": "ok", "other version": "ok", "notice": "warn",
+              "unchanged": "busy"}
 _FETCH_TONE = {"not found": "bad", "error": "bad", "no download": "bad", "needs your browser": "warn",
                "waiting for your download": "warn", "attached": "ok", "found": "ok"}
 
-TITLES = {"fetch": "Find Full Text", "maintain": "Check & complete", "metadata": "Check metadata",
-          "monthly": "Monthly check"}
+TITLES = {"fetch": "Find Full Text", "maintain": "Check & complete", "metadata": "Check metadata"}
 
 
 class Progress:
@@ -448,8 +449,6 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
     if run is None:
         if mode == "fetch":
             from zotero_mcp.fulltext_fetch import run as run
-        elif mode == "monthly":
-            run = maintenance.monthly
         else:
             run = maintenance.run
     if fetch is None:
@@ -462,8 +461,7 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
     with_pdfs = mode != "metadata"
     with_meta = mode != "fetch"
 
-    prog = Progress(maintenance.monthly_stages() if mode == "monthly" else
-                    maintenance.stages(mode == "maintain", bool(run_kwargs.get("index"))) if with_meta else None)
+    prog = Progress(maintenance.stages(mode == "maintain", bool(run_kwargs.get("index"))) if with_meta else None)
     events: queue.Queue = queue.Queue()
     main_uses_browser = mode == "fetch" and "browser" in (run_kwargs.get("steps") or [])
     dry_run = bool(run_kwargs.get("dry_run", not run_kwargs.get("apply", True)))

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -96,6 +97,29 @@ def stages(fetch: bool, index: bool = False) -> list[str]:
     return (["Metadata", "PDFs", "Metadata again"] if fetch else ["Metadata"]) + ([INDEX_STAGE] if index else [])
 
 
+def _not_recently_missed(backend, keys: list[str]) -> list[str]:
+    """The papers not searched in vain within the fetcher's retry period (30 days): neither for a
+    PDF (tag fulltext/not-found) nor for the published version of a manuscript or proof. After
+    that they are searched again, since authors and publishers put PDFs online later."""
+    from zotero_mcp import fulltext_fetch as ff
+
+    if not keys:
+        return []
+    state = ff._load_state()
+    cutoff = _dt.datetime.now() - _dt.timedelta(days=ff.Settings.load().retry_days)
+    out = []
+    for key in keys:
+        entry = state.get(key) or {}
+        last = entry.get("last_attempt")
+        try:
+            missed = entry.get("status") == "not found" and bool(last) and _dt.datetime.fromisoformat(last) > cutoff
+        except ValueError:
+            missed = False
+        if not missed:
+            out.append(key)
+    return out
+
+
 def update_index(log: Callable[[str], None] = print) -> bool:
     """The search index's incremental update (new and changed items, then their passage labels),
     in its own process at low priority, as at Claude Desktop's start. It takes the index's update
@@ -120,10 +144,14 @@ def update_index(log: Callable[[str], None] = print) -> bool:
 def run(*, keys: list[str] | None = None, collection: str | None = None, new: bool = False, since: str | None = None,
         apply: bool = True, fetch: bool = True, index: bool = False, log: Callable[[str], None] = print,
         progress: Callable[[dict], None] | None = None, backend=None, audit_run=None, fetch_run=None,
-        index_run: Callable[..., bool] | None = None, fetch_keys: list[str] | None = None,
-        _stages: list[str] | None = None, _offset: int = 0) -> dict:
+        index_run: Callable[..., bool] | None = None, every: bool = False, retraction_run=None,
+        writer_factory=None) -> dict:
     """Audit, fetch, audit again. Returns a summary. ``progress`` receives the audit's and the
-    fetcher's events and {"status": "stage", "detail": name, "index": i} at each step."""
+    fetcher's events and {"status": "stage", "detail": name, "index": i} at each step.
+
+    Papers unchanged since their last check (and its rules) are not checked again unless
+    ``every``: they only get a retraction check (at most monthly), and a PDF search only when they
+    have none and were not searched in vain within the fetcher's retry period."""
     from zotero_mcp import fulltext_fetch as ff
     from zotero_mcp import metadata_audit as ma
 
@@ -134,11 +162,11 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
     audit_run = audit_run or ma.run
     fetch_run = fetch_run or ff.run
     notify = progress or (lambda event: None)
-    names = _stages or stages(fetch, index)
-    n = len(names) - _offset
+    names = stages(fetch, index)
+    n = len(names)
 
     def stage(i: int) -> None:
-        notify({"key": "", "status": "stage", "detail": names[i + _offset], "index": i + _offset})
+        notify({"key": "", "status": "stage", "detail": names[i], "index": i})
 
     state = _load()
     now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -158,24 +186,48 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
             return {"items": 0}
         log(f"{len(keys)} item(s) added since {start[:16].replace('T', ' ')}.")
     summary: dict = {}
+    if collection and not keys:
+        from zotero_mcp.metadata_audit import AUDITED_TYPES
+
+        keys = [i.get("key") or i.get("data", {}).get("key") for i in backend.collection_items(collection) or []
+                if i.get("data", {}).get("itemType") in AUDITED_TYPES]
+    keys = list(keys or [])
 
     log(f"1/{n} Metadata ...")
     stage(0)
-    # The replacements for wrong PDFs are fetched in step 2, with the rest.
-    report = audit_run(keys=keys, collection=collection, apply=apply, log=log, fetch_replacements=False,
-                       progress=progress)
-    audits = getattr(report, "audits", []) or []
-    summary["audit"] = report.totals() if hasattr(report, "totals") else {}
-    if getattr(report, "report_path", ""):
-        notify({"key": "", "status": "done", "detail": report.report_path})
-    keys = keys or [a.key for a in audits]
+    changed, unchanged = (keys, []) if every or not apply else split_unchanged(backend, keys)
+    if unchanged:
+        log(f"{len(unchanged)} paper(s) unchanged since their last check: only a retraction check "
+            f"(zotero-mcp maintain --all checks them again too).")
+        from zotero_mcp.fulltext_fetch import ItemInfo
+
+        known = backend.get_items(unchanged) or {}
+        for key in unchanged:
+            label = ItemInfo.from_zotero(known[key]).label if key in known else key
+            notify({"key": key, "label": label, "phase": "metadata", "status": "unchanged",
+                    "detail": "unchanged since its last check"})
+        if writer_factory is None:
+            from zotero_mcp.metadata_audit import MetadataWriter
+
+            writer_factory = MetadataWriter
+        summary["retractions"] = (retraction_run or check_retractions)(
+            unchanged, backend=backend, log=log, progress=progress, writer=writer_factory())
+    audits: list = []
+    if changed:
+        # The replacements for wrong PDFs are fetched in step 2, with the rest.
+        report = audit_run(keys=changed, apply=apply, log=log, fetch_replacements=False, progress=progress)
+        audits = getattr(report, "audits", []) or []
+        summary["audit"] = report.totals() if hasattr(report, "totals") else {}
+        if getattr(report, "report_path", ""):
+            notify({"key": "", "status": "done", "detail": report.report_path})
     unknown = [a.key for a in audits if any("no registry record" in f for f in a.flags)]
+    fetch_keys = changed + _not_recently_missed(backend, unchanged)
 
     attached: set[str] = set()
     if fetch and keys:
         log(f"2/{n} Full text for the items without a PDF ...")
         stage(1)
-        wanted = [k for k in keys if fetch_keys is None or k in set(fetch_keys)]
+        wanted = [k for k in keys if k in set(fetch_keys)]
         fetched = fetch_run(keys=wanted, log=log, dry_run=not apply, progress=progress) if wanted else None
         attached = {r.key for r in getattr(fetched, "results", []) if r.status == "attached"}
         summary["fetched"] = len(attached)
@@ -205,18 +257,27 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
 
 
 # ---------------------------------------------------------------------------
-# The monthly check
+# Papers unchanged since their last check
 # ---------------------------------------------------------------------------
 
-#: Days between monthly checks; a check that could not finish its backlog comes back the next day.
-MONTHLY_DAYS = 30
-#: Papers fully checked per monthly run (registries' daily allowances); the rest the next day.
-MONTHLY_MAX_FULL = 400
-RETRACTION_STAGE = "Retractions"
+#: The checking rules' version. A paper checked under older rules counts as changed, so
+#: the next run checks it again; raised when the rules improve enough to be worth that.
+RULES = 1
+#: Days between retraction checks of an unchanged paper.
+RETRACTION_DAYS = 30
+#: Days after which a recent article still without volume or pages (online first) is checked
+#: again: the registries fill those in once the article is in an issue.
+OPEN_RECHECK_DAYS = 30
 
 
-def monthly_stages() -> list[str]:
-    return [RETRACTION_STAGE] + stages(True, True)
+def _still_open(raw: dict) -> bool:
+    """A recent journal article without volume or pages: its metadata is likely to change online."""
+    data = raw.get("data", raw)
+    if data.get("itemType") != "journalArticle":
+        return False
+    year = re.search(r"\d{4}", str(data.get("date") or ""))
+    recent = bool(year) and int(year.group()) >= _dt.date.today().year - 2
+    return recent and not (str(data.get("volume") or "").strip() and str(data.get("pages") or "").strip())
 
 
 def _modified(raw: dict) -> str:
@@ -239,93 +300,100 @@ def _stamps(backend, items: dict) -> dict[str, str]:
 
 
 def remember_checked(backend, keys: list[str]) -> None:
-    """Note each paper's Zotero "modified" time after a check (and after the check's own writes),
-    so the monthly check knows which papers changed since."""
+    """Note each paper's latest change (and the rules' version) after a check, the check's own
+    changes included, so a later run knows which papers changed since."""
     if not keys:
         return
     try:
         found = backend.get_items(list(keys)) or {}
     except Exception:
         return
-    stamps = _stamps(backend, {k: v for k, v in found.items() if k in set(keys)})
+    items = {k: v for k, v in found.items() if k in set(keys)}
+    stamps = _stamps(backend, items)
     state = _load()
     seen = state.setdefault("checked_modified", {})
+    today = _dt.date.today().isoformat()
     for key, stamp in stamps.items():
         if stamp:
-            seen[key] = stamp
+            seen[key] = {"stamp": stamp, "rules": RULES, "date": today, "open": _still_open(items[key])}
     _save(state)
 
 
-def monthly_plan(backend) -> tuple[list[str], list[str]]:
-    """(papers to check fully, papers to check for retractions only). Fully: never checked, or
-    changed in Zotero since their last check. The rest, when they have a DOI: retractions only."""
-    from zotero_mcp.metadata_audit import AUDITED_TYPES, norm_doi
-
+def split_unchanged(backend, keys: list[str]) -> tuple[list[str], list[str]]:
+    """(to check, unchanged). To check: never checked; changed in Zotero since (the paper or an
+    attachment, e.g. a PDF added later); checked under older rules; or a recent article that still
+    lacked volume or pages, a month after its last check (online-first metadata gets completed)."""
     seen = _load().get("checked_modified") or {}
-    papers = {}
-    for raw in backend.list_items("-attachment", limit=100000) or []:
-        data = raw.get("data", raw)
-        if data.get("itemType") in AUDITED_TYPES:
-            papers[raw.get("key") or data.get("key")] = raw
-    stamps = _stamps(backend, papers)
-    full, recheck = [], []
-    for key, raw in papers.items():
-        if key not in seen or (stamps[key] and stamps[key] != seen[key]):
-            full.append((stamps[key], key))
-        elif norm_doi(raw.get("data", raw).get("DOI") or ""):
-            recheck.append(key)
-    return [k for _m, k in sorted(full)], recheck
-
-
-def monthly_due() -> tuple[bool, str]:
-    state = _load()
-    last = state.get("last_monthly")
-    if not last:
-        return True, "first monthly check"
     try:
-        days = (_dt.datetime.now() - _dt.datetime.fromisoformat(last)).days
-    except ValueError:
-        return True, "last date unreadable"
-    if state.get("monthly_backlog") and days >= 1:
-        return True, f"{state['monthly_backlog']} papers left from the last run"
-    return days >= MONTHLY_DAYS, f"last check {days} day(s) ago"
+        found = backend.get_items(list(keys)) or {}
+    except Exception:
+        return list(keys), []
+    stamps = _stamps(backend, found)
+    today = _dt.date.today()
+    changed, unchanged = [], []
+    for key in keys:
+        entry = seen.get(key)
+        same = (isinstance(entry, dict) and stamps.get(key) and entry.get("stamp") == stamps[key]
+                and entry.get("rules") == RULES)
+        if same and entry.get("open"):
+            try:
+                same = (today - _dt.date.fromisoformat(entry.get("date", ""))).days < OPEN_RECHECK_DAYS
+            except ValueError:
+                same = False
+        (unchanged if same else changed).append(key)
+    return changed, unchanged
 
 
 def check_retractions(keys: list[str], *, backend, log: Callable[[str], None] = print,
                       progress: Callable[[dict], None] | None = None, http=None, settings=None,
-                      writer=None, sleep=None) -> dict:
-    """Crossref's notices (Retraction Watch data) for papers checked before: a new retraction is
-    tagged ``retracted`` with a note; a new correction, erratum or expression of concern gets a note."""
+                      writer=None, sleep=None, every_days: int = RETRACTION_DAYS) -> dict:
+    """Crossref's notices (Retraction Watch data) for papers unchanged since their last check, at
+    most every ``every_days``: a new retraction is tagged ``retracted`` with a note; a correction,
+    erratum or expression of concern from the last year gets a note. Older notices are noted silently."""
     import time
 
     from zotero_mcp import fulltext_fetch as ff
     from zotero_mcp import metadata_audit as ma
 
+    state = ma._load_state()
+    today = _dt.date.today()
+
+    def due(key: str) -> bool:
+        last = (state.get(key) or {}).get("notices_checked")
+        try:
+            return not last or (today - _dt.date.fromisoformat(last)).days >= every_days
+        except ValueError:
+            return True
+
+    keys = [k for k in keys if due(k)]
+    totals = {"checked": 0, "retracted": 0, "notices": 0, "not_checked": 0}
+    if not keys:
+        return totals
     settings = settings or ff.Settings.load()
     http = http or ff.Http(settings)
     sleep = sleep or time.sleep
     notify = progress or (lambda event: None)
-    found = backend.get_items(list(keys)) or {} if keys else {}
-    state = ma._load_state()
-    totals = {"checked": 0, "retracted": 0, "notices": 0, "not_checked": 0}
-    for i, key in enumerate(keys, 1):
-        notify({"key": "", "status": "count", "done": i - 1, "total": len(keys)})
+    found = backend.get_items(list(keys)) or {}
+    year_ago = (today - _dt.timedelta(days=365)).isoformat()
+    for key in keys:
         raw = found.get(key)
         if not raw:
             continue
         info = ff.ItemInfo.from_zotero(raw)
-        rec = ma.crossref(info.doi, http, settings) if info.doi else None
+        if not info.doi:
+            continue
+        rec = ma.crossref(info.doi, http, settings)
         sleep(0.1)                          # Crossref's polite pool: a few requests a second at most
         if rec is None:
             totals["not_checked"] += 1
             continue
         totals["checked"] += 1
         entry = state.setdefault(key, {})
+        entry["notices_checked"] = today.isoformat()
         known = set(entry.get("notices") or [])
         new = [u for u in rec.updates if (u[2] or u[0] + u[1]) not in known]
         entry["notices"] = sorted(known | {u[2] or u[0] + u[1] for u in new})
         # A correction from years ago is old news: only recent ones (and every retraction) are shown.
-        year_ago = (_dt.date.today() - _dt.timedelta(days=365)).isoformat()
         new = [u for u in new if (u[1] or "9999") >= year_ago
                or (u[0] or "").lower().replace("-", "_") in ("retraction", "withdrawal", "removal",
                                                               "partial_retraction", "expression_of_concern")]
@@ -335,14 +403,10 @@ def check_retractions(keys: list[str], *, backend, log: Callable[[str], None] = 
         rec.updates = new
         ma._note_updates(audit, rec)
         detail = "; ".join(audit.flags)
-        if audit.retracted:
-            totals["retracted"] += 1
-            status = "retracted"
-        else:
-            totals["notices"] += 1
-            status = "notice"
+        totals["retracted" if audit.retracted else "notices"] += 1
         log(f"  {info.label} [{key}]: {detail}")
-        notify({"key": key, "label": info.label, "phase": "metadata", "status": status, "detail": detail})
+        notify({"key": key, "label": info.label, "phase": "metadata",
+                "status": "retracted" if audit.retracted else "notice", "detail": detail})
         if writer is not None:
             try:
                 if audit.retracted:
@@ -351,66 +415,5 @@ def check_retractions(keys: list[str], *, backend, log: Callable[[str], None] = 
                                      f"({ma._today()})</b>: {ma.html.escape(detail)}.</p>")
             except Exception as e:
                 log(f"    -> could not write: {type(e).__name__}: {e}")
-    notify({"key": "", "status": "count", "done": len(keys), "total": len(keys)})
     ma._save_state(state)
     return totals
-
-
-def monthly(*, force: bool = False, log: Callable[[str], None] = print,
-            progress: Callable[[dict], None] | None = None, backend=None, audit_run=None, fetch_run=None,
-            index_run=None, retraction_run=None, writer_factory=None, max_full: int = MONTHLY_MAX_FULL) -> dict:
-    """The monthly check, without Claude: papers changed (or never checked) are checked fully
-    (metadata, PDFs for those without one and not recently searched in vain, metadata again,
-    search index); every other paper with a DOI only for new retractions and corrections."""
-    from zotero_mcp import fulltext_fetch as ff
-
-    due, why = monthly_due()
-    if not due and not force:
-        log(f"No monthly check due ({why}).")
-        return {"due": False}
-    if backend is None:
-        from zotero_mcp import library
-
-        backend = library.get_library_backend()
-    notify = progress or (lambda event: None)
-    names = monthly_stages()
-    full, recheck = monthly_plan(backend)
-    backlog = full[max_full:]
-    full = full[:max_full]
-    log(f"Monthly check ({why}): {len(full)} paper(s) to check fully"
-        f"{f' ({len(backlog)} more the next day)' if backlog else ''}, {len(recheck)} for retractions.")
-
-    notify({"key": "", "status": "stage", "detail": names[0], "index": 0})
-    log(f"1/{len(names)} Retractions and corrections ...")
-    if writer_factory is None:
-        from zotero_mcp.metadata_audit import MetadataWriter
-
-        writer_factory = MetadataWriter
-    summary: dict = {"retractions": (retraction_run or check_retractions)(
-        recheck, backend=backend, log=log, progress=progress, writer=writer_factory())}
-    remember_checked(backend, [k for k in recheck])
-
-    if full:
-        # Papers searched in vain within the fetcher's retry period are not searched again.
-        found = backend.get_items(full) or {}
-        cutoff = _dt.datetime.now() - _dt.timedelta(days=ff.Settings.load().retry_days)
-        fstate = ff._load_state()
-
-        def recent_miss(key: str) -> bool:
-            tags = {t.get("tag") for t in (found.get(key) or {}).get("data", {}).get("tags") or []}
-            last = (fstate.get(key) or {}).get("last_attempt")
-            try:
-                return ff.TAG_NOT_FOUND in tags and bool(last) and _dt.datetime.fromisoformat(last) > cutoff
-            except ValueError:
-                return False
-
-        summary.update(run(keys=full, fetch=True, index=True, log=log, progress=progress, backend=backend,
-                           audit_run=audit_run, fetch_run=fetch_run, index_run=index_run,
-                           fetch_keys=[k for k in full if not recent_miss(k)], _stages=names, _offset=1))
-    else:
-        log("Nothing changed since the last check.")
-    state = _load()
-    state["last_monthly"] = _dt.datetime.now().isoformat(timespec="seconds")
-    state["monthly_backlog"] = len(backlog)
-    _save(state)
-    return summary

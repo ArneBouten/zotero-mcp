@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.43] - 2026-10-09
+
+### Changed
+
+- **No monthly check** (arne.41-42): a manual run does its work instead. Check & complete on many papers checks fully only what needs it: papers never checked, changed in Zotero (the paper or an attachment), checked under older rules, or recent articles still without volume or pages a month later (online first). Unchanged papers get only a retraction and correction check, at most monthly. `maintain --all` checks everything.
+- Papers searched in vain, for a PDF or for the published version of a manuscript, are searched again once the last search is more than 30 days old (PDFs put online later), and not before.
+- The "Monthly check" action is disabled in `zotero-mcp-actions.yml`; delete it in Actions & Tags if you like.
+
 ## [0.13.2+arne.42] - 2026-10-09
 
 ### Fixed

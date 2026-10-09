@@ -949,10 +949,10 @@ def main():
     maintain_parser.add_argument("--quiet", action="store_true",
                                  help="With --window: start it minimised; it comes forward at the end only when "
                                       "something is left for you, else closes by itself (the import trigger)")
-    maintain_parser.add_argument("--monthly", action="store_true",
-                                 help="The monthly check: papers changed since their last check fully, the rest "
-                                      "only for retractions (does nothing when not due; see --force)")
-    maintain_parser.add_argument("--force", action="store_true", help="With --monthly: run even when not due")
+    maintain_parser.add_argument("--all", action="store_true",
+                                 help="Check every paper again, also those unchanged since their last check "
+                                      "(by default these only get a retraction check)")
+    maintain_parser.add_argument("--monthly", action="store_true", help=argparse.SUPPRESS)  # removed
     maintain_parser.add_argument("--index", action="store_true",
                                  help="Then update the search index for new and changed items (as at Claude "
                                       "Desktop's start; skipped while another update runs)")
@@ -1533,26 +1533,15 @@ def main():
 
         keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
         if args.monthly:
-            due, why = maintenance.monthly_due()
-            if not (due or args.force):
-                print(f"No monthly check due ({why}).")
-                return
-            if args.window:
-                try:
-                    from zotero_mcp import fulltext_window
-
-                    fulltext_window.run_window({"force": True}, mode="monthly", quiet=args.quiet)
-                    return
-                except ImportError as e:
-                    print(f"No progress window ({e}); showing the progress here instead.")
-            maintenance.monthly(force=True)
+            # The monthly check was removed (arne.43); an Actions & Tags action may still call it.
+            print("The monthly check was removed: select the papers in Zotero and use Check & complete.")
             return
         if not (keys or args.collection or args.new or args.since):
-            print("Choose what to maintain: --items, --collection, --new, --since YYYY-MM-DD or --monthly.")
+            print("Choose what to maintain: --items, --collection, --new or --since YYYY-MM-DD.")
             sys.exit(1)
         kwargs = dict(keys=keys, collection=args.collection, new=args.new,
                       since=f"{args.since}T00:00:00" if args.since else None, apply=not args.report_only,
-                      index=args.index)
+                      index=args.index, every=args.all)
         if args.window:
             try:
                 from zotero_mcp import fulltext_window

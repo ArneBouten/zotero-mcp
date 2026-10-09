@@ -43,15 +43,15 @@ The window stays minimised in the taskbar. It comes forward at the end only when
 
 `maintain --index` adds the index update to a run in a terminal; `--quiet` (with `--window`) is the minimised window.
 
-## The monthly check
+## Checking many papers again
 
-The action **Monthly check** (event "Main Window Load", no menu entry) starts five minutes after Zotero opens, at most once a day. zotero-mcp then decides whether the check is due: 30 days after the last one, or the next day when papers were left over. Otherwise it stops at once.
+Select papers (or a whole collection, or all of My Library) and run **Check & complete** whenever you like. Papers that need nothing are passed over quickly, so this costs little:
 
-- **Papers changed since their last check**, or never checked: Check & complete (metadata, a PDF for those without one, metadata again). Papers searched in vain within the last 30 days are not searched again. At most 400 per run, oldest changes first; the rest follow the next day, so the registries' daily allowances are not used up. The first run therefore takes a few days for a whole library.
-- **Every other paper with a DOI**: only Crossref's retraction and correction notices (Retraction Watch data), free and quick. A new retraction gets the tag `retracted` and a note; a correction, erratum or expression of concern from the last year gets a note. Older notices are remembered silently, so nothing is reported twice.
-- **Then the search index**, as on import.
+- **Checked fully** (metadata, attached PDF, a PDF if missing, metadata again): papers never checked; papers changed in Zotero since their last check, including a PDF added or replaced; papers checked under older rules (raised when the checks improve enough to be worth it); and recent articles that still lacked volume or pages a month after their last check, since the registries fill those in once an online-first article is in an issue.
+- **Unchanged papers**: only Crossref's retraction and correction notices, at most once a month per paper. A new retraction gets the tag `retracted` and a note; a correction, erratum or expression of concern from the last year gets a note.
+- **PDFs put online later**: a paper searched in vain (no PDF, or no published version of an attached manuscript) is searched again when the last search is more than 30 days old, since authors and publishers upload PDFs later. Within those 30 days it is not, so Scholar and web-search credits are not spent twice.
 
-"Changed" means Zotero's modified time of the paper or one of its attachments differs from the one noted after the paper's last check (including the check's own changes), so a paper is only checked again after you or another program changed it. In a terminal: `zotero-mcp maintain --monthly` (`--force` when not due, `--window` for the window).
+`zotero-mcp maintain --all` checks every paper fully, unchanged ones too.
 
 **At Claude Desktop's start instead** (older option, without the import action): with `"maintenance": {"new_items": true}` in config.json, every start first maintains the items added since the last start, then updates the index. Add `"fetch": false` for metadata only.
 
