@@ -217,6 +217,16 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         summary["retractions"] = (retraction_run or check_retractions)(
             unchanged, backend=backend, log=log, progress=progress, writer=writer_factory())
     audits: list = []
+    if apply and not changed:
+        # Papers tagged metadata/accept or /reject: applied by every audit, and here when no audit runs.
+        try:
+            if writer_factory is None:
+                from zotero_mcp.metadata_audit import MetadataWriter
+
+                writer_factory = MetadataWriter
+            summary["review"] = ma.process_review(writer_factory(), backend, log)
+        except Exception as e:
+            log(f"Your review tags could not be applied now: {type(e).__name__}: {e}")
     if changed:
         # The replacements for wrong PDFs are fetched in step 2, with the rest.
         report = audit_run(keys=changed, apply=apply, log=log, fetch_replacements=False, progress=progress)

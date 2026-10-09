@@ -18,7 +18,7 @@ py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2 --no-fetch  # metadata onl
 
 **Metadata only** (`--no-fetch`) is step 1: no PDFs are downloaded, for instance when Zotero's file storage is nearly full. The attached PDFs are still checked; a wrong one gets its tag and note but is not replaced, and a stray PDF still moves to the item it belongs to. Gemini still reads attached PDFs where it is needed.
 
-**The progress window** (`--window`) shows the steps (Metadata › PDFs › Metadata again) and every paper with its metadata (✎ filled or corrected, ⚑ to review, ⚠ wrong PDF, ✓ OK) and its full text. Coloured counts sit above the list: hover over one for what it means, click it to select its papers. When something is left for you, a **To do** panel lists it, each with its button where there is one (open papers behind a bot check in your own browser, search the ones not found with the browser); hover over an ⓘ for what to do. Double-click a paper to open it in Zotero.
+**The progress window** (`--window`) shows the steps (Metadata › PDFs › Metadata again) and every paper with its metadata (✎ filled or corrected, ⚑ to review, ⚠ wrong PDF, ✓ OK) and its full text. Coloured counts sit above the list: hover over one for what it means, click it to show only those papers (click again, or "Show all", for all). Click a column heading to sort by it (again: reverse); Metadata and Full text put the most pressing first. When something is left for you, a **To do** panel lists it, each with its button where there is one (review the suggested changes, open papers behind a bot check in your own browser, search the ones not found with the browser); hover over an ⓘ for what to do. Double-click a paper to open it in Zotero.
 
 ## The right-click actions in Zotero
 
@@ -29,6 +29,7 @@ py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2 --no-fetch  # metadata onl
 | **Fetch PDF only** | PDFs, no metadata changes | Quick, when the metadata is fine |
 | **Check PDF (browser only)** | only the browser step, starting with the links an earlier run could not download | Papers an earlier run did not find |
 | **Merge certain duplicates** (Tools menu) | Zotero's own merge for papers that are certainly the same | See below |
+| **Review suggested metadata** (item, collection and Tools menu) | a window with the suggested changes: accept or reject each | See [metadata-audit.md](metadata-audit.md#the-review-list) |
 
 The first four work on the selected papers (item menu) or a whole collection (collection menu). To add them all at once: Zotero → Settings → Actions & Tags → Import, and choose `zotero-actions/zotero-mcp-actions.yml` (importing it again later updates them). For the order above, set "Sort menu by" to Name in the same settings. The separate scripts are in `zotero-actions/` too. They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`.
 

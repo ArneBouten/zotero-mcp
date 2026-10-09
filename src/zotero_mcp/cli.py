@@ -919,6 +919,14 @@ def main():
     meta_parser.add_argument("--no-gemini", action="store_true",
                              help="Check the PDF by rules only; do not let Gemini read its first pages")
 
+    review_parser = subparsers.add_parser(
+        "metadata-review",
+        help="Accept or reject the suggested metadata changes, in a window (the 'Review suggested metadata' action)",
+    )
+    review_parser.add_argument("--items", help="Comma-separated item keys (default: every paper waiting for review)")
+    review_parser.add_argument("--collection", help="Only papers in this collection (key)")
+    review_parser.add_argument("--list", action="store_true", help="Print the suggestions instead of opening the window")
+
     relabel_parser = subparsers.add_parser(
         "relabel-index",
         help="Give indexed passages their printed page, heading, chapter and section (no re-embedding)",
@@ -1529,6 +1537,31 @@ def main():
             sys.exit(1)
         print()
         print(report.markdown(limit=60))
+
+    elif args.command == "metadata-review":
+        setup_zotero_environment()
+        from zotero_mcp import metadata_audit
+
+        keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
+        if not args.list:
+            try:
+                from zotero_mcp import fulltext_window
+
+                fulltext_window.review_window(keys, collection=args.collection)
+                return
+            except ImportError as e:
+                print(f"No window ({e}); the suggestions follow.")
+        try:
+            rows = metadata_audit.ReviewSession().load(keys, args.collection)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        if not rows:
+            print("Nothing waiting for review.")
+        for key, label, changes in rows:
+            print(f"{label} [{key}]")
+            for c in changes:
+                print(f"  {metadata_audit.FIELD_LABELS.get(c.field, c.field)}: {c.old or '(empty)'} -> {c.new}")
 
     elif args.command == "relabel-index":
         setup_zotero_environment()

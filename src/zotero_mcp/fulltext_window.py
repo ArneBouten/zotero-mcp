@@ -221,7 +221,8 @@ class Progress:
                  "Empty fields filled in, or errors corrected that two sources agree on. A note on the paper "
                  "lists the changes."),
                 ("ChipReview", "⚑ {} to review", self._keys(lambda k: meta(k) == "review"),
-                 "Changes only one source suggests: not made. See 'To do'."),
+                 "Changes only one source suggests: not made. 'Review' in 'To do' shows them, to accept or "
+                 "reject."),
                 ("ChipBad", "⚠ {} retracted", self._keys(lambda k: meta(k) == "retracted"),
                  "Retracted by the journal (tag: retracted)."),
                 ("ChipNeutral", "ℹ {} correction", self._keys(lambda k: meta(k) == "notice"),
@@ -270,9 +271,9 @@ class Progress:
                         "Tries ResearchGate, Academia.edu and your publisher logins in the fetcher's Chrome window."))
         review = self._keys(lambda k: meta(k) == "review")
         if review:
-            out.append(("review", f"⚑ {len(review)} with changes to review  ⓘ", None,
-                        "In Zotero: saved search 'Metadata to review'. Read the note, then tag the paper "
-                        "metadata/accept or metadata/reject; the next check applies it."))
+            out.append(("review", f"⚑ {len(review)} with suggested changes", "review",
+                        "Accept or reject each suggestion. Later also in Zotero: right-click › Review suggested "
+                        "metadata."))
         wrong = self._keys(lambda k: meta(k) == "wrong pdf")
         if wrong and not self.active_runs:
             text = (f"⚠ {len(wrong)} with another paper attached, the right one not found  ⓘ"
@@ -286,6 +287,17 @@ class Progress:
             out.append(("bad", f"✗ {len(errors)} error{'s' if len(errors) != 1 else ''}", "report",
                         "The report has the details."))
         return out
+
+    def sort_key(self, key: str, column: str) -> tuple:
+        """For sorting by a column: the paper's label; for metadata and full text, the most pressing
+        first (bad, warn, busy, ok), then the text."""
+        if column == "item":
+            return (self.labels.get(key, key).lower(),)
+        if column == "meta":
+            tone, text = _META_TONE.get(self.meta.get(key, ""), "busy"), self.meta_text(key)
+        else:
+            tone, text = _FETCH_TONE.get(self.status.get(key, ""), "busy"), self.fetch_text(key)
+        return (-_SEVERITY[tone] if text else 1, text.lower())
 
     # -- a row -------------------------------------------------------------------
 
@@ -380,6 +392,7 @@ def _style(root, ttk) -> dict:
     style.configure("Title.TLabel", background=ui["bg"], foreground=ui["text"], font=(fam, 15, "bold"))
     style.configure("Muted.TLabel", background=ui["bg"], foreground=ui["muted"])
     style.configure("Hint.TLabel", background=ui["bg"], foreground=ui["muted"], font=(fam, 9))
+    style.configure("Link.TLabel", background=ui["bg"], foreground=ui["accent"], font=(fam, 9, "underline"))
     style.configure("StepDone.TLabel", background=ui["bg"], foreground=ui["ok"], font=(fam, 10, "bold"))
     style.configure("StepNow.TLabel", background=ui["bg"], foreground=ui["accent"], font=(fam, 10, "bold"))
     style.configure("StepTodo.TLabel", background=ui["bg"], foreground="#9ca3af", font=(fam, 10))
@@ -387,6 +400,9 @@ def _style(root, ttk) -> dict:
                                ("ChipBad", ui["bad"], "#fee2e2"), ("ChipInfo", ui["accent_dark"], "#dbeafe"),
                                ("ChipReview", "#7e22ce", "#f3e8ff"), ("ChipNeutral", "#4b5563", "#f3f4f6")):
         style.configure(f"{name}.TLabel", background=tint, foreground=colour, padding=(10, 3),
+                        font=(fam, 9, "bold"))
+        # The chip whose papers the list is showing: filled.
+        style.configure(f"{name}Active.TLabel", background=colour, foreground="#ffffff", padding=(10, 3),
                         font=(fam, 9, "bold"))
     style.configure("Panel.TFrame", background=ui["card"])
     style.configure("PanelTitle.TLabel", background=ui["card"], foreground=ui["text"], font=(fam, 10, "bold"))
@@ -469,6 +485,218 @@ def ask_check_again(count: int, when: str, title: str = "Check & complete") -> b
     return answer["again"]
 
 
+def review_window(keys: list[str] | None = None, *, collection: str | None = None, master=None,
+                  on_decided: Callable[[str, int, int, int], None] | None = None, session=None) -> None:
+    """The suggested metadata changes waiting for review (of ``keys``, a collection, or all), one
+    row each under its paper: Accept changes the field in Zotero, Reject keeps the user's value (and
+    it is not suggested again). ``master``: opened from the progress window, which ``on_decided``
+    (key, applied, rejected, still left) keeps up to date."""
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    from zotero_mcp import metadata_audit as ma
+
+    session = session or ma.ReviewSession()
+    root = tk.Toplevel(master) if master is not None else tk.Tk()
+    root.title("Review suggested metadata — zotero-mcp")
+    root.geometry("1120x580")
+    root.minsize(640, 360)
+    ui = _style(root, ttk) if master is None else {"bg": "#f6f7f9", "muted": "#6b7280", "card": "#ffffff",
+                                                    "stripe": "#f9fafb", "text": "#1f2937"}
+    root.configure(background=ui["bg"])
+    frame = ttk.Frame(root, padding=(18, 14, 18, 12), style="App.TFrame")
+    frame.pack(fill="both", expand=True)
+    top = ttk.Frame(frame, style="App.TFrame")
+    top.pack(fill="x")
+    ttk.Label(top, text="Suggested changes", style="Title.TLabel").pack(side="left")
+    head = ttk.Label(top, text="Loading…", style="Muted.TLabel")
+    head.pack(side="right", anchor="s", pady=(0, 3))
+    ttk.Label(frame, text="Accept changes the field in Zotero. Reject keeps yours, and it is not suggested again. "
+                          "Select a paper to decide all its suggestions at once.",
+              style="Muted.TLabel", wraplength=900, justify="left").pack(anchor="w", pady=(4, 10))
+
+    buttons = ttk.Frame(frame, style="App.TFrame")
+    buttons.pack(side="bottom", fill="x", pady=(12, 0))
+    detail = tk.Text(frame, height=4, wrap="word", relief="flat", background=ui["card"], foreground=ui["text"],
+                     font="TkDefaultFont",
+                     padx=10, pady=8, borderwidth=0, highlightthickness=1, highlightbackground="#e5e7eb")
+    detail.pack(side="bottom", fill="x", pady=(10, 0))
+    detail.configure(state="disabled")
+    holder = ttk.Frame(frame, style="Card.TFrame", padding=1)
+    holder.pack(fill="both", expand=True)
+    tree = ttk.Treeview(holder, columns=["yours", "suggested", "why"], show="tree headings", style="Papers.Treeview")
+    tree.heading("#0", text="Paper / field", anchor="w")
+    tree.column("#0", width=400, anchor="w", stretch=True)
+    for col, text, width in (("yours", "Yours", 190), ("suggested", "Suggested", 190), ("why", "Why", 260)):
+        tree.heading(col, text=text, anchor="w")
+        tree.column(col, width=width, anchor="w", stretch=True)
+    tree.tag_configure("paper", font=("TkDefaultFont", 10, "bold"))
+    tree.tag_configure("stripe", background=ui["stripe"])
+    scroll = ttk.Scrollbar(holder, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scroll.set)
+    scroll.pack(side="right", fill="y")
+    tree.pack(side="left", fill="both", expand=True)
+
+    changes: dict[str, object] = {}         # row id -> Change
+    results: queue.Queue = queue.Queue()
+    busy = {"n": 0}
+
+    def one_line(text: str, n: int = 90) -> str:
+        text = " ".join(str(text or "").split())
+        return text if len(text) <= n else text[: n - 1] + "…"
+
+    def show(rows) -> None:
+        for key, label, suggestions in rows:
+            tree.insert("", "end", iid=key, text=label, open=True, tags=("paper",))
+            for i, c in enumerate(suggestions):
+                rid = f"{key}|{c.field}"
+                changes[rid] = c
+                tree.insert(key, "end", iid=rid, text=ma.FIELD_LABELS.get(c.field, c.field),
+                            values=(one_line(c.old) or "(empty)", one_line(c.new),
+                                    one_line(f"{', '.join(c.sources)}{' — ' + c.why if c.why else ''}")),
+                            tags=("stripe",) if i % 2 else ())
+        counted()
+
+    def counted() -> None:
+        n = len(changes)
+        papers = len(tree.get_children())
+        head.configure(text=(f"{n} suggestion{'s' if n != 1 else ''} on {papers} paper{'s' if papers != 1 else ''}"
+                             if n else "Nothing left to review"))
+        state = "normal" if n and not busy["n"] else "disabled"
+        for b in (accept_btn, reject_btn):
+            b.configure(state=state)
+
+    def chosen() -> dict[str, list[str]]:
+        """The selected suggestions, by paper (a paper row stands for all its suggestions)."""
+        out: dict[str, list[str]] = {}
+        for rid in tree.selection():
+            if "|" in rid:
+                key, field = rid.split("|", 1)
+                out.setdefault(key, []).append(field)
+            else:
+                out.setdefault(rid, []).extend(r.split("|", 1)[1] for r in tree.get_children(rid))
+        return {k: sorted(set(v)) for k, v in out.items()}
+
+    def decide(accept: bool) -> None:
+        picked = chosen()
+        if not picked:
+            return
+        busy["n"] += len(picked)
+        counted()
+        head.configure(text="Saving in Zotero…")
+
+        def work() -> None:
+            for key, fields in picked.items():
+                try:
+                    done = session.decide(key, fields if accept else [], [] if accept else fields)
+                    results.put((key, fields, done, None))
+                except Exception as e:
+                    results.put((key, fields, None, f"{type(e).__name__}: {e}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def poll() -> None:
+        try:
+            while True:
+                item = results.get_nowait()
+                if item[0] == "__loaded__":
+                    if item[2] is not None:
+                        messagebox.showerror("Review suggested metadata", item[2], parent=root)
+                    else:
+                        show(item[1])
+                        if not item[1]:
+                            head.configure(text="Nothing waiting for review")
+                    continue
+                key, fields, done, error = item
+                busy["n"] -= 1
+                if error:
+                    messagebox.showerror("Review suggested metadata", f"{key}: {error}", parent=root)
+                else:
+                    for f in fields:
+                        rid = f"{key}|{f}"
+                        changes.pop(rid, None)
+                        if tree.exists(rid):
+                            tree.delete(rid)
+                    if tree.exists(key) and not tree.get_children(key):
+                        tree.delete(key)
+                    if not tree.selection() and changes:
+                        # On to the next suggestion, so they can be decided one after the other.
+                        first = next(iter(changes))
+                        tree.selection_set(first)
+                        tree.focus(first)
+                        tree.see(first)
+                    if on_decided is not None:
+                        on_decided(key, *done)
+                counted()
+        except queue.Empty:
+            pass
+        if root.winfo_exists():
+            root.after(150, poll)
+
+    def on_select(_event=None) -> None:
+        sel = tree.selection()
+        text = ""
+        if len(sel) == 1 and sel[0] in changes:
+            c = changes[sel[0]]
+            text = (f"{tree.item(tree.parent(sel[0]), 'text')}\nYours: {c.old or '(empty)'}\nSuggested: {c.new}\n"
+                    f"Why: {', '.join(c.sources)}{' — ' + c.why if c.why else ''}")
+        elif len(sel) == 1:
+            text = f"{tree.item(sel[0], 'text')}: {len(tree.get_children(sel[0]))} suggestion(s)."
+        detail.configure(state="normal")
+        detail.delete("1.0", "end")
+        detail.insert("1.0", text)
+        detail.configure(state="disabled")
+
+    def on_open(_event=None) -> None:
+        sel = tree.selection()
+        if sel:
+            try:
+                os.startfile(f"zotero://select/library/items/{sel[0].split('|')[0]}")  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+    accept_btn = ttk.Button(buttons, text="Accept", command=lambda: decide(True), style="Accent.TButton")
+    accept_btn.pack(side="left")
+    reject_btn = ttk.Button(buttons, text="Reject", command=lambda: decide(False))
+    reject_btn.pack(side="left", padx=(8, 0))
+    ttk.Button(buttons, text="Close", command=root.destroy).pack(side="right")
+    ttk.Button(buttons, text="Show in Zotero", command=on_open).pack(side="right", padx=(0, 8))
+    tree.bind("<<TreeviewSelect>>", on_select)
+    tree.bind("<Double-1>", on_open)
+    menu = tk.Menu(root, tearoff=0)
+
+    def on_menu(event) -> None:
+        row = tree.identify_row(event.y)
+        if not row:
+            return
+        if row not in tree.selection():
+            tree.selection_set(row)
+        menu.delete(0, "end")
+        if not busy["n"]:
+            menu.add_command(label="Accept", command=lambda: decide(True))
+            menu.add_command(label="Reject", command=lambda: decide(False))
+            menu.add_separator()
+        menu.add_command(label="Show in Zotero", command=on_open)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    tree.bind("<Button-3>", on_menu)
+    counted()
+
+    def load() -> None:
+        try:
+            results.put(("__loaded__", session.load(keys, collection), None))
+        except Exception as e:
+            results.put(("__loaded__", [], f"The suggestions could not be read: {type(e).__name__}: {e}"))
+
+    threading.Thread(target=load, daemon=True).start()
+    root.after(150, poll)
+    root.lift()
+    if master is None:
+        root.attributes("-topmost", True)
+        root.after(600, lambda: root.attributes("-topmost", False))
+        root.mainloop()
+
+
 def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mode: str = "fetch",
                fetch: Callable[..., object] | None = None, quiet: bool = False) -> None:
     """Run in a background thread and show the progress until the window is closed.
@@ -529,11 +757,15 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
             lab = ttk.Label(steps_box, text=f"{i + 1}  {name}", style="StepTodo.TLabel")
             lab.pack(side="left")
             step_labels.append(lab)
-    # The counts; hover for what one means, click to select its papers.
+    # The counts; hover for what one means, click to show only its papers (again: all).
     chips_box = ttk.Frame(frame, style="App.TFrame")
     chips_box.pack(fill="x", pady=(10, 0))
     chip_widgets: list = []
     shown_chips: list = [None]
+    show_all = ttk.Label(chips_box, text="", style="Link.TLabel", cursor="hand2")
+    #: What the list shows: only one chip's papers ("filter", the chip's text without its count),
+    #: sorted by a column ("sort", "desc"); "dirty" when the rows need placing again.
+    view: dict = {"filter": None, "sort": None, "desc": False, "dirty": False}
     bar = ttk.Progressbar(frame, mode="determinate", maximum=1000, style="Thin.Horizontal.TProgressbar")
     bar.pack(fill="x", pady=(10, 12))
 
@@ -554,9 +786,10 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
     tree = ttk.Treeview(holder, columns=columns, show="headings", height=8, style="Papers.Treeview")
     widths = {"item": 420 if len(columns) == 3 else 520, "meta": 250 if with_pdfs else 360,
               "status": 300 if with_meta else 360}
-    for col, text in (("item", "Paper"), ("meta", "Metadata"), ("status", "Full text")):
+    headings = {"item": "Paper", "meta": "Metadata", "status": "Full text"}
+    for col, text in headings.items():
         if col in columns:
-            tree.heading(col, text=text, anchor="w")
+            tree.heading(col, text=text, anchor="w", command=lambda c=col: on_sort(c))
             tree.column(col, width=widths[col], anchor="w", stretch=True)
     tree.tag_configure("ok", foreground=ui["ok"])
     tree.tag_configure("bad", foreground=ui["bad"])
@@ -651,6 +884,43 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
         start(run, dict(run_kwargs, keys=keys, collection=None, new=False, since=None, every=True), False)
         refresh()
 
+    def on_review(keys: list[str] | None = None) -> None:
+        keys = keys or [k for k in prog.order if prog.meta.get(k) == "review"]
+        if keys:
+            review_window(keys, master=root, on_decided=decided)
+
+    def decided(key: str, applied: int, rejected: int, left: int) -> None:
+        if left:
+            prog.meta_detail[key] = f"{left} to review"
+            if applied:
+                prog.meta_changed.add(key)
+        elif applied:
+            prog.meta[key] = "updated"
+            prog.meta_detail[key] = "suggestion accepted" if applied == 1 else f"{applied} suggestions accepted"
+            prog.meta_changed.add(key)
+        else:
+            prog.meta[key], prog.meta_detail[key] = "ok", "suggestion rejected, yours kept"
+        redraw(key)
+        refresh()
+
+    def on_sort(column: str) -> None:
+        if view["sort"] == column:
+            view["desc"] = not view["desc"]
+        else:
+            view["sort"], view["desc"] = column, False
+        for col, text in headings.items():
+            if col in columns:
+                arrow = (" ▼" if view["desc"] else " ▲") if col == column else ""
+                tree.heading(col, text=text + arrow)
+        view["dirty"] = True
+        relayout()
+
+    def set_filter(chip: str | None) -> None:
+        view["filter"] = None if view["filter"] == chip else chip
+        shown_chips[0] = None           # redraw the chips (the active one filled)
+        view["dirty"] = True
+        refresh()
+
     def on_report() -> None:
         for path in prog.reports[-2:]:      # the metadata report and the fetch report
             try:
@@ -698,17 +968,47 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
             if chosen and not prog.active_runs:
                 menu.add_command(label="Check anyway" if len(chosen) == 1 else f"Check these {len(chosen)} unchanged anyway",
                                  command=lambda: on_recheck(chosen))
+            to_review = [k for k in tree.selection() if prog.meta.get(k) == "review"]
+            if to_review and not dry_run:
+                menu.add_command(label="Review suggestions…", command=lambda: on_review(to_review))
             menu.add_command(label="Show in Zotero", command=on_open)
             menu.tk_popup(event.x_root, event.y_root)
 
         tree.bind("<Button-3>", on_menu)
     root.protocol("WM_DELETE_WINDOW", on_close)
 
-    def select(keys: list[str]) -> None:
-        keys = [k for k in keys if tree.exists(k)]
-        if keys:
-            tree.selection_set(keys)
-            tree.see(keys[0])
+    def chip_keys() -> dict[str, list[str]]:
+        import re
+
+        return {re.sub(r"\d+ ", "", text, count=1): keys
+                for _name, chips in prog.chip_groups() for _style, text, keys, _tip in chips}
+
+    def relayout() -> None:
+        """Place the rows: only the chosen chip's papers, in the chosen order, striped anew."""
+        view["dirty"] = False
+        keys = list(prog.order)
+        if view["filter"] is not None:
+            wanted = set(chip_keys().get(view["filter"], []))
+            keys = [k for k in keys if k in wanted]
+        if view["sort"]:
+            keys.sort(key=lambda k: prog.sort_key(k, view["sort"]), reverse=view["desc"])
+        keep = set(keys)
+        for k in tree.get_children():
+            if k not in keep:
+                tree.detach(k)
+        for i, k in enumerate(keys):
+            if not tree.exists(k):
+                continue
+            tree.move(k, "", i)
+            tone = [t for t in tree.item(k, "tags") if t != "stripe"]
+            tree.item(k, tags=tuple(tone) + (("stripe",) if i % 2 else ()))
+        if view["filter"] is not None:
+            show_all.configure(text=f"Showing {len(keys)} of {len(prog.order)} · Show all")
+            show_all.pack(side="right")
+        else:
+            show_all.pack_forget()
+
+    show_all.bind("<Button-1>", lambda _e: set_filter(None))
 
     def redraw(key: str) -> None:
         values = [prog.labels.get(key, key)]
@@ -723,6 +1023,8 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
         else:
             stripe = len(tree.get_children()) % 2 == 1
             tree.insert("", "end", iid=key, values=values, tags=(tone, "stripe") if stripe else (tone,))
+        if view["filter"] is not None or view["sort"]:
+            view["dirty"] = True            # placed again at the next refresh
 
     def refresh() -> None:
         head.configure(text=prog.headline())
@@ -742,12 +1044,20 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
             for w in chip_widgets:
                 w.destroy()
             chip_widgets.clear()
+            import re
+
+            if view["filter"] is not None and view["filter"] not in chip_keys():
+                view["filter"], view["dirty"] = None, True      # its papers are gone (all reviewed, say)
             for g, (_name, chips) in enumerate(groups):
-                for c, (style, text, keys, explanation) in enumerate(chips):
-                    chip = ttk.Label(chips_box, text=text, style=f"{style}.TLabel", cursor="hand2")
+                for c, (style, text, _keys, explanation) in enumerate(chips):
+                    cid = re.sub(r"\d+ ", "", text, count=1)
+                    active = view["filter"] == cid
+                    chip = ttk.Label(chips_box, text=text, style=f"{style}{'Active' if active else ''}.TLabel",
+                                     cursor="hand2")
                     chip.pack(side="left", padx=(16 if g and not c else 0, 6))   # a gap between metadata and PDFs
-                    chip.bind("<Button-1>", lambda _e, ks=keys: select(ks))
-                    _Tooltip(chip, explanation + " Click to select these papers.")
+                    chip.bind("<Button-1>", lambda _e, cid=cid: set_filter(cid))
+                    _Tooltip(chip, explanation + (" Click to show all papers again." if active
+                                                  else " Click to show only these."))
                     chip_widgets.append(chip)
         unchanged = [k for k in prog.order if prog.meta.get(k) == "unchanged"]
         if unchanged and not prog.active_runs:
@@ -777,11 +1087,15 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
                                state="disabled" if prog.browser_busy else "normal").pack(side="right")
                 elif action == "report":
                     ttk.Button(row, text="Show report", command=on_report, style="Soft.TButton").pack(side="right")
+                elif action == "review" and not dry_run:
+                    ttk.Button(row, text="Review", command=on_review, style="SmallAccent.TButton").pack(side="right")
                 todo_rows.append(row)
             if items:
                 todo_card.pack(side="bottom", fill="x", pady=(12, 0), before=holder)
             else:
                 todo_card.pack_forget()
+        if view["dirty"]:
+            relayout()
 
     def poll() -> None:
         finished_now = False

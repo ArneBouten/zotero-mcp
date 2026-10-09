@@ -263,8 +263,11 @@ def test_the_check_and_complete_window_follows_the_steps():
     assert p.chips() == [("ChipInfo", "✎ 1 fixed"), ("ChipReview", "⚑ 1 to review"), ("ChipOk", "✓ 1 attached")]
     assert [(name, [c[2] for c in chips]) for name, chips in p.chip_groups()] == [
         ("Metadata", [["A"], ["B"]]), ("PDFs", [["B"]])]
-    assert [(t[0], t[2]) for t in p.todo()] == [("review", None)]
-    assert "saved search 'Metadata to review'" in p.todo()[0][3]
+    assert [(t[0], t[2]) for t in p.todo()] == [("review", "review")]          # with a Review button
+    assert "Review suggested metadata" in p.todo()[0][3]
+    # Sorting by a column: the most pressing first; by paper: alphabetical.
+    assert sorted(["A", "B"], key=lambda k: p.sort_key(k, "meta")) == ["B", "A"]
+    assert sorted(["B", "A"], key=lambda k: p.sort_key(k, "item")) == ["A", "B"]
 
     # A wrong PDF that the fetcher replaced.
     p.apply({"key": "C", "label": "C", "phase": "metadata", "status": "wrong pdf", "detail": "the PDF is a proof"})
@@ -275,7 +278,7 @@ def test_the_check_and_complete_window_follows_the_steps():
     assert p.headline() == "Done · 3 papers" and p.fraction() == 1.0
     p.apply({"key": "D", "label": "D", "status": "not found", "detail": ""})
     assert [(t[1], t[2]) for t in p.todo()] == [("✗ 1 not found", "browser"),
-                                                 ("⚑ 1 with changes to review  ⓘ", None)]
+                                                 ("⚑ 1 with suggested changes", "review")]
 
 
 def test_a_chapter_pdf_that_opens_with_its_books_title_is_not_another_work():

@@ -132,8 +132,8 @@ button offers the browser step for the papers not found so far; it stays there
 at the end, with a summary and the run's report. Papers behind a bot check get
 a button that opens them in your own browser (see above). Both buttons sit in a
 "To do" panel that appears when something is left for you. Coloured counts
-above the list explain themselves when you hover over them; a click selects
-those papers. Double-clicking a paper shows
+above the list explain themselves when you hover over them; a click shows only
+those papers. Click a column heading to sort. Double-clicking a paper shows
 it in Zotero. The terminal opens minimised and keeps the details.
 
 ## Keys and limits

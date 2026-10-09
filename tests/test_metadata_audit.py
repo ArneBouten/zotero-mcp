@@ -232,6 +232,47 @@ def test_apply_writes_changes_tags_notes_and_proposals():
     assert not writer.proposal_notes("ABCD1234")
 
 
+def test_suggestions_are_decided_one_by_one_in_the_review_window():
+    raw = item(volume="56", title="Self-determination theory and the growth of intrinsic motivation")
+    items = {"ABCD1234": raw}
+    writer = FakeWriter(items)
+    report = ma.run(apply=True, log=lambda m: None, settings=ff.Settings(),
+                    http=FakeHttp({"api.crossref.org": (200, CROSSREF)}), backend=FakeBackend(items),
+                    writer_factory=lambda: writer, pdf_text=lambda k: "", workers=1)
+    assert "Review suggested metadata" in writer.notes["ABCD1234"][-1]["data"]["note"]
+    assert "**Review** in the progress window" in report.markdown()
+    session = ma.ReviewSession(writer, FakeBackend(items))
+    [(key, label, changes)] = session.load()
+    assert key == "ABCD1234" and {c.field for c in changes} == {"volume", "title"}
+
+    # Accept the volume only: the title stays waiting, in a new note, with the review tag.
+    assert session.decide(key, ["volume"], []) == (1, 0, 1)
+    data = raw["data"]
+    assert data["volume"] == "55"
+    assert ma.TAG_REVIEW in {t["tag"] for t in data["tags"]}
+    assert [c.field for n in writer.proposal_notes(key) for c in ma.parse_proposals(n["data"]["note"])] == ["title"]
+    # Reject the title: nothing waits any more, and the title is not suggested again.
+    assert session.decide(key, [], ["title"]) == (0, 1, 0)
+    assert ma.TAG_REVIEW not in {t["tag"] for t in data["tags"]} and not writer.proposal_notes(key)
+    assert ma._load_state()[key]["rejected"]["title"].startswith("Self-determination theory and the facilitation")
+    assert session.load() == []
+
+
+def test_the_report_lists_papers_still_waiting_from_earlier_checks():
+    waiting = item(title="An older paper")
+    waiting["key"] = waiting["data"]["key"] = "OLD00001"
+    waiting["data"]["tags"] = [{"tag": ma.TAG_REVIEW}]
+    raw = item(volume="55", issue="1")
+    items = {"ABCD1234": raw, "OLD00001": waiting}
+    report = ma.run(keys=["ABCD1234"], apply=True, log=lambda m: None, settings=ff.Settings(),
+                    http=FakeHttp({"api.crossref.org": (200, CROSSREF)}), backend=FakeBackend(items),
+                    writer_factory=lambda: FakeWriter(items), pdf_text=lambda k: "", workers=1)
+    text = report.markdown()
+    assert [k for k, _l in report.earlier] == ["OLD00001"]
+    assert "## Still to review from earlier checks (1)" in text and "[OLD00001]" in text
+    assert "from earlier checks: 1 paper" in text or "and 1 paper from earlier checks" in text
+
+
 def test_reject_tag_is_processed_on_the_next_run():
     raw = item(volume="56")
     items = {"ABCD1234": raw}

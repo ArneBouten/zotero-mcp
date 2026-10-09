@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.48] - 2026-10-09
+
+### Added
+
+- **Review suggested metadata with a click**: a window lists each suggested change under its paper (yours, suggested, why); Accept changes the field in Zotero at once, Reject keeps yours. Opened by the progress window's Review button, its right-click menu, or the Actions & Tags action "7 Review suggested metadata" (item, collection and Tools menu); `zotero-mcp metadata-review` in a terminal. Undecided suggestions stay waiting.
+- The report lists the papers still waiting for review from earlier checks.
+
+### Changed
+
+- Progress window: clicking a count shows only those papers (again, or "Show all": all); clicking a column heading sorts by it.
+- `metadata/accept` and `metadata/reject` tags are also carried out by a run in which every paper was unchanged.
+
 ## [0.13.2+arne.47] - 2026-10-09
 
 ### Added

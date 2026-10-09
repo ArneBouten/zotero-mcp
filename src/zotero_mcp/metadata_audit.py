@@ -1426,8 +1426,8 @@ def _note_html(title: str, audit: ItemAudit, changes: list[Change], proposals: b
         rows.append(f"<li><b>{label}</b>: {old} → {new} ({html.escape(', '.join(c.sources))}){why}</li>")
     body = f"<h2>{html.escape(title)}</h2><ul>{''.join(rows)}</ul>"
     if proposals:
-        body += ("<p>Tag this item <b>metadata/accept</b> to apply these, or <b>metadata/reject</b> to "
-                 "discard them; the next metadata run does the rest.</p>")
+        body += ("<p>To accept or reject them: right-click the item › <b>Review suggested metadata</b>. "
+                 "(Or tag it <b>metadata/accept</b> or <b>metadata/reject</b>; the next check applies that.)</p>")
         payload = json.dumps([asdict(c) for c in changes], ensure_ascii=False)
         body += f"<pre>{NOTE_MARK} {html.escape(payload)}</pre>"
     return body
@@ -1755,19 +1755,24 @@ def _pdf_gemini_reader(model: str | None = None, config_path: str | None = None,
     return read
 
 
-def decide(writer, raw: dict, accept: bool, state: dict, fields: list[str] | None = None,
-           log: Callable[[str], None] = print) -> int:
-    """Apply (accept) or discard an item's proposals. ``fields`` limits the
-    acceptance to those fields; the item's other proposals are rejected."""
+def resolve(writer, raw: dict, accept: set[str] | list[str], reject: set[str] | list[str], state: dict,
+            log: Callable[[str], None] = print) -> tuple[int, int, int]:
+    """Accept some of an item's suggestions (by field) and reject others; the rest stay waiting
+    in a new note. Returns (applied, rejected, left)."""
     key = raw.get("key") or raw.get("data", {}).get("key")
     label = ff.ItemInfo.from_zotero(raw).label
     notes = writer.proposal_notes(key)
-    changes = [c for n in notes for c in parse_proposals(n["data"].get("note", ""))]
-    take = [c for c in changes if accept and (not fields or c.field in fields)]
-    drop = [c for c in changes if c not in take]
+    by_field: dict[str, Change] = {}
+    for n in notes:
+        for c in parse_proposals(n["data"].get("note", "")):
+            by_field[c.field] = c                    # one suggestion per field (the newest note wins)
+    changes = list(by_field.values())
+    take = [c for c in changes if c.field in set(accept)]
+    drop = [c for c in changes if c.field in set(reject) and c not in take]
+    left = [c for c in changes if c not in take and c not in drop]
     audit = ItemAudit(key, label, raw.get("data", {}).get("itemType", ""))
-    writer.apply(audit, take, tags_add=[TAG_CORRECTED] if take else [],
-                 tags_remove=[TAG_ACCEPT, TAG_REJECT, TAG_REVIEW])
+    writer.apply(audit, take, tags_add=([TAG_CORRECTED] if take else []) + ([TAG_REVIEW] if left else []),
+                 tags_remove=[TAG_ACCEPT, TAG_REJECT] + ([] if left else [TAG_REVIEW]))
     if take:
         writer.add_note(key, _note_html(f"Metadata changes you accepted ({_today()})",
                                         audit, take, proposals=False))
@@ -1779,8 +1784,65 @@ def decide(writer, raw: dict, accept: bool, state: dict, fields: list[str] | Non
         stats.setdefault(category(c), {"accepted": 0, "rejected": 0})[verdict] += 1
     for n in notes:
         writer.trash(n)
-    log(f"{label} [{key}]: {len(take)} applied, {len(drop)} discarded")
-    return len(take)
+    if left:
+        writer.add_note(key, _note_html(f"Proposed metadata changes ({_today()})", audit, left, proposals=True))
+    log(f"{label} [{key}]: {len(take)} applied, {len(drop)} discarded"
+        + (f", {len(left)} still to review" if left else ""))
+    return len(take), len(drop), len(left)
+
+
+def decide(writer, raw: dict, accept: bool, state: dict, fields: list[str] | None = None,
+           log: Callable[[str], None] = print) -> int:
+    """Apply (accept) or discard all of an item's proposals. ``fields`` limits the
+    acceptance to those fields; the item's other proposals are rejected."""
+    key = raw.get("key") or raw.get("data", {}).get("key")
+    every = {c.field for n in writer.proposal_notes(key) for c in parse_proposals(n["data"].get("note", ""))}
+    take = {f for f in every if accept and (not fields or f in fields)}
+    return resolve(writer, raw, take, every - take, state, log=log)[0]
+
+
+class ReviewSession:
+    """The suggestions waiting for review, for the review window: load them, then accept or
+    reject them one by one."""
+
+    def __init__(self, writer=None, backend=None):
+        self._writer, self._backend = writer, backend
+        self.raws: dict[str, dict] = {}
+
+    @property
+    def writer(self):
+        if self._writer is None:
+            self._writer = MetadataWriter()
+        return self._writer
+
+    @property
+    def backend(self):
+        if self._backend is None:
+            from zotero_mcp import library
+
+            self._backend = library.get_library_backend()
+        return self._backend
+
+    def load(self, keys: list[str] | None = None, collection: str | None = None) -> list[tuple[str, str, list[Change]]]:
+        if collection and not keys:
+            keys = [i.get("key") or i.get("data", {}).get("key") for i in self.backend.collection_items(collection) or []
+                    if TAG_REVIEW in {t.get("tag") for t in i.get("data", {}).get("tags") or []}]
+            if not keys:
+                return []
+        out = []
+        for raw, changes in review_list(self.writer, self.backend, keys):
+            key = raw.get("key") or raw.get("data", {}).get("key")
+            self.raws[key] = raw
+            by_field = {c.field: c for c in changes}
+            out.append((key, ff.ItemInfo.from_zotero(raw).label, list(by_field.values())))
+        return out
+
+    def decide(self, key: str, accept: list[str], reject: list[str]) -> tuple[int, int, int]:
+        state = _load_state()
+        try:
+            return resolve(self.writer, self.raws[key], accept, reject, state, log=lambda m: None)
+        finally:
+            _save_state(state)
 
 
 def process_review(writer, backend, log: Callable[[str], None] = print) -> dict[str, int]:
@@ -1819,6 +1881,8 @@ class AuditReport:
     review_counts: dict[str, int] = field(default_factory=dict)
     report_path: str = ""
     saved_search: str = ""
+    #: Papers still waiting for review from earlier checks: (key, label).
+    earlier: list[tuple[str, str]] = field(default_factory=list)
 
     def totals(self) -> dict[str, int]:
         t = {"items": len(self.audits), "filled": 0, "corrected": 0, "proposals": 0, "items_to_review": 0,
@@ -1877,8 +1941,10 @@ class AuditReport:
         summary = [
             (f"{'Changed' if done else 'To change'} automatically: {n(t['filled'], 'empty field')} filled{fixes}"
              f" on {n(len(changed), 'paper')}" if changed else ""),
-            (f"For you to review: {n(t['proposals'], 'suggested change')} on {n(len(review), 'paper')} "
-             f"(saved search \"{SAVED_SEARCH}\")" if review else ""),
+            (f"For you to review: {n(t['proposals'], 'suggested change')} on {n(len(review), 'paper')}"
+             + (f", and {n(len(self.earlier), 'paper')} from earlier checks" if self.earlier else "")
+             if review else
+             f"Still to review from earlier checks: {n(len(self.earlier), 'paper')}" if self.earlier else ""),
             (f"Wrong PDFs: {len(wrong)} (tag {ff.TAG_CHECK_PDF})" if wrong else ""),
             (f"Right paper, other form: {len(older)} (accepted manuscript, preprint, proof or the whole book; "
              "tagged, nothing to check)" if older else ""),
@@ -1905,14 +1971,21 @@ class AuditReport:
                 return f"- {label}: {c.new[:120]} ({src}){why}"
             return f"- {label}: {c.old[:120]} → {c.new[:120]} ({src}){why}"
 
+        how = ("Accept or reject with a click: **Review** in the progress window, or in Zotero right-click "
+               "› *Review suggested metadata* (Tools menu: all papers).")
         if review:
-            lines += [f"## To review ({len(review)})", "",
-                      f"Tag a paper `{TAG_ACCEPT}` or `{TAG_REJECT}` in Zotero; the next check applies it.", ""]
+            lines += [f"## To review ({len(review)})", "", how, ""]
             shown, rest = cut(review)
             for a in shown:
                 lines.append(f"### {a.label} [{a.key}]")
                 lines += [change_line(c) for c in a.by_kind("propose")] + [""]
             lines += more(rest)
+        if self.earlier:
+            lines += [f"## Still to review from earlier checks ({len(self.earlier)})", ""]
+            if not review:
+                lines += [how, ""]
+            shown, rest = cut(self.earlier)
+            lines += [f"- {label} [{key}]" for key, label in shown] + more(rest) + [""]
         if wrong:
             lines += [f"## Wrong PDFs ({len(wrong)})", ""]
             shown, rest = cut(wrong)
@@ -2153,6 +2226,16 @@ def run(
     report = AuditReport(audits, bool(apply), started, review_counts)
     if writer is not None and any(a.by_kind("propose") for a in audits):
         report.saved_search = writer.ensure_saved_search()
+    if writer is not None:
+        # The overview in the report: papers still waiting from earlier checks (one request).
+        try:
+            here = {a.key for a in audits}
+            for raw in backend.list_items(None, limit=10000, tag=[TAG_REVIEW]) or []:
+                key = raw.get("key") or raw.get("data", {}).get("key")
+                if key not in here:
+                    report.earlier.append((key, ff.ItemInfo.from_zotero(raw).label))
+        except Exception:
+            pass
     try:
         runs = meta_dir() / "runs"
         runs.mkdir(parents=True, exist_ok=True)

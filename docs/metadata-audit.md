@@ -81,10 +81,11 @@ Items with proposals get the tag `metadata/review` and a note "Proposed metadata
 
 To decide:
 
-- **In Zotero:** add the tag `metadata/accept` (apply all proposals of that item) or `metadata/reject` (discard them). The next `metadata-audit --apply` or `metadata-audit --process-review` carries this out, removes the review tag and the proposal note.
+- **With a click (easiest):** the progress window's **Review** button (under "To do"), or in Zotero right-click › **Review suggested metadata** (selected papers, a collection, or from the Tools menu all papers waiting). A window lists each suggestion under its paper, with yours, the suggested value and why. **Accept** changes the field in Zotero at once; **Reject** keeps yours. Select a paper row to decide all its suggestions together; undecided ones stay waiting. In a terminal: `zotero-mcp metadata-review`.
+- **With a tag:** `metadata/accept` (apply all of that item's suggestions) or `metadata/reject` (discard them). This is carried out at the next check of any paper (Check & complete, Check metadata only, or a new paper's import), not at once.
 - **Through Claude:** "show my metadata review list", "accept the volume and pages for item X, reject the title". This uses `zotero_metadata_review`.
 
-A rejected value is remembered (`~/.config/zotero-mcp/metadata/state.json`) and not proposed again. Accepting only some fields counts the rest as rejected.
+A rejected value is remembered (`~/.config/zotero-mcp/metadata/state.json`) and not proposed again. With the tag or through Claude, accepting only some fields counts the rest as rejected.
 
 **Learning from your decisions.** Each proposal has a kind: its field plus its reason, such as "Year | yours is the online year; APA uses the issue year". Once you have decided at least 10 proposals of one kind the same way at least 90 % of the time, later runs decide that kind for you. The change then says "you accepted 12 of 12 like this"; a kind you keep rejecting is no longer proposed. The counts are in `state.json` under `_learned`.
 
