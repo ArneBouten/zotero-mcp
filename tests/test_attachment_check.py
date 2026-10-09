@@ -53,6 +53,11 @@ def test_another_work_is_found_by_its_doi_or_by_gemini_and_named_when_in_the_lib
     assert p.kind == "another work" and p.other_item == "OTHER001" and "Automated and unobtrusive" in p.found_title
     # Gemini reads the item's own title where the rules missed it (odd layout): no problem.
     assert ac.check(i, d, [pdf(OTHER)], reading=lambda: {"title": i.title}) is None
+    # A translated title by the same first author in the same year is the same work.
+    translated = {"title": "Speelruimtes uitbreiden om de spelervaring te verbeteren", "authors": ["Alejandro Moreno"],
+                  "year": "2016"}
+    assert ac.check(i, d, [pdf(OTHER)], reading=lambda: translated) is None
+    assert ac.check(i, d, [pdf(OTHER)], reading=lambda: dict(translated, year="2019")).kind == "another work"
 
 
 def test_supplements_beside_the_right_pdf_and_unreadable_scans_are_left_alone():

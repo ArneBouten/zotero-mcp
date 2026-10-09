@@ -94,6 +94,20 @@ def _pages_range(pages: str) -> tuple[int, int] | None:
     return (first, last) if last >= first else None
 
 
+def _same_work(info: ff.ItemInfo, got: dict) -> bool:
+    """Gemini's reading names the item's DOI, or its first author and year (a translated title)."""
+    doi = (got.get("doi") or "").lower().strip()
+    if doi and info.doi and doi == info.doi.lower():
+        return True
+    authors = got.get("authors") or []
+    first = authors[0] if authors and isinstance(authors[0], str) else ""
+    mine = (ff._fold(info.first_author or "").split() or [""])[-1]
+    theirs = ff._fold(first).split()
+    year = str(got.get("year") or "").strip()[:4]
+    return bool(mine and theirs and info.year and year == info.year[:4]
+                and (mine == theirs[-1] or mine == theirs[0]))
+
+
 def check(info: ff.ItemInfo, data: dict, pdfs: list[dict], reading: Callable[[], dict | None] | None = None,
           index: dict | None = None) -> Problem | None:
     """The problem with the item's PDF, or None.
@@ -116,6 +130,8 @@ def check(info: ff.ItemInfo, data: dict, pdfs: list[dict], reading: Callable[[],
 
             if title_match(info.title, got["title"]) >= 0.8:
                 return None         # Gemini sees the item's title (the rules missed it: layout, OCR)
+            if _same_work(info, got):
+                return None         # same DOI, or same first author and year: a translated or reworded title
             found_title, found_doi = got.get("title", ""), (got.get("doi") or "").lower()
         else:
             dois = [d.rstrip(".,;)").lower() for d in _DOI_RE.findall(first["text"])]

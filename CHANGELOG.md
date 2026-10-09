@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.35] - 2026-10-09
+
+### Added
+
+- **Bot checks only your own browser passes** (Cloudflare's "Performing security verification" on Taylor & Francis and others): the fetcher's Chrome no longer waits five minutes on a check that restarts after every attempt. After a few seconds the paper is marked "needs your browser" (not tagged not found) and the site is not opened again in that run. The progress window's **Open N in my own browser** opens the links as ordinary tabs in your default browser and attaches the PDFs you save to Downloads once they match the paper (title, first author, DOI). Without the window: `fetch-fulltext --from-downloads --items ...`.
+- Links that refused a plain download are remembered, so a later browser-only run starts with them.
+
+### Fixed
+
+- A browser-only run (`--steps browser`, the window's browser button) tried each paper with the browser twice.
+- The "Fetch full text with browser" action runs only the browser step; it also ran all the other steps first (change in `zotero-fetch.ps1`).
+- The attachment check no longer reports "another work" when Gemini reads a different title but the item's DOI, or its first author and year: a translated or reworded title of the same work.
+
 ## [0.13.2+arne.34] - 2026-10-09
 
 ### Added

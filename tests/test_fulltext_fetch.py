@@ -1,8 +1,8 @@
 """The full-text fetcher: matching, PDF checks, the step cascade and the run."""
 
+import json
 from pathlib import Path
 
-import json
 import pytest
 
 from zotero_mcp import fulltext_fetch as ff
@@ -487,3 +487,108 @@ def test_a_pdf_marked_wrong_is_replaced_and_a_manuscript_only_by_the_published_v
                     writer_factory=lambda: writer, backend=backend, workers=1)
     assert report.results[0].status == "attached" and writer.trashed == [("ABCD1234", "BADPDF01")]
     assert ff.bad_pdf("ABCD1234") == {}
+
+
+# --- bot checks only the user's own browser passes ------------------------------
+
+
+def test_links_blocked_in_a_normal_run_are_remembered_for_a_browser_only_run(tmp_path, monkeypatch):
+    captcha = b"<html><title>Just a moment...</title>cf-chl</html>"
+
+    def web(item, http_, settings, budget):
+        if item.key == "ABCD1234":
+            yield ff.Candidate("https://pub.org/doi/pdf/1", "publisher", "published", by_identifier=True)
+
+    monkeypatch.setattr(ff, "SOURCES", {"web": [web]})
+    http = FakeHttp({"https://pub.org/doi/pdf/1": (403, "text/html", captcha)})
+    http.blocked = {}
+    ff.run(keys=["ABCD1234"], steps=["web"], log=lambda m: None, settings=ff.Settings(host_delay=0), http=http,
+           writer_factory=FakeWriter, backend=_backend(), workers=1)
+    remembered = ff.remembered_blocked("ABCD1234")
+    assert [c.url for c in remembered] == ["https://pub.org/doi/pdf/1"] and remembered[0].by_identifier
+
+    # A browser-only run (the "with browser" action, the window's button) tries each paper once.
+    calls = []
+
+    def browser(item, http_, settings, budget):
+        calls.append(item.key)
+        return iter(())
+
+    monkeypatch.setattr(ff, "SOURCES", {"browser": [browser]})
+    report = ff.run(keys=["ABCD1234", "NOPE0001"], steps=["browser"], log=lambda m: None,
+                    settings=ff.Settings(host_delay=0), http=FakeHttp({}), writer_factory=FakeWriter,
+                    backend=_backend())
+    assert calls == ["ABCD1234", "NOPE0001"]
+    assert [r.status for r in report.results] == ["not found", "not found"]
+
+
+def test_a_bot_check_hands_the_paper_to_the_users_own_browser(tmp_path, monkeypatch):
+    from zotero_mcp import fulltext_browser as fb
+
+    link = "https://www.tandfonline.com/doi/pdf/10.1080/x"
+
+    def refused():
+        raise fb.BrowserUnavailable(f"{fb.OWN_BROWSER}: {link}")
+
+    def browser(item, http_, settings, budget):
+        if item.key == "ABCD1234":
+            yield ff.Candidate(link, "publisher, in your browser", "published", by_identifier=True,
+                               fetcher=fb._fetcher(refused))
+
+    monkeypatch.setattr(ff, "SOURCES", {"browser": [browser]})
+    writer, events = FakeWriter(), []
+    report = ff.run(keys=["ABCD1234", "NOPE0001"], steps=["browser"], log=lambda m: None,
+                    settings=ff.Settings(host_delay=0), http=FakeHttp({}), writer_factory=lambda: writer,
+                    backend=_backend(), progress=events.append)
+    first, second = report.results
+    assert (first.status, first.url) == ("needs your browser", link)
+    assert second.status == "not found"
+    # Only the paper nobody has is tagged not found; the other one is reachable, just not by a script.
+    assert [t[0] for t in writer.tags] == ["NOPE0001"]
+    assert {"key": "ABCD1234", "label": first.label, "status": "needs your browser", "detail": link} in events
+    assert f"open {link} in your own browser" in report.markdown()
+
+
+def test_the_fetchers_chrome_does_not_reopen_a_site_whose_bot_check_refused_it():
+    from zotero_mcp import fulltext_browser as fb
+
+    session = fb.BrowserSession(ff.Settings())
+    session.robot_hosts.add("tandfonline.com")
+    with pytest.raises(fb.BrowserUnavailable, match=fb.OWN_BROWSER):
+        session.goto("https://www.tandfonline.com/doi/full/10.1080/x")
+
+
+def test_pdfs_saved_to_downloads_are_matched_and_attached(tmp_path):
+    good = good_pdf(tmp_path)
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    make_pdf(downloads / "unrelated.pdf", ["A completely different paper", "about something else"])
+    (downloads / "17408989.2026.pdf").write_bytes(good)
+    writer, found, rounds = FakeWriter(), [], []
+
+    def stop():
+        rounds.append(1)
+        return len(rounds) > 4
+
+    got = ff.watch_downloads(["ABCD1234", "NOPE0001"], folder=downloads, since=0, timeout=60, stop=stop,
+                             on_found=lambda key, detail: found.append(key), log=lambda m: None,
+                             backend=_backend(), writer_factory=lambda: writer, sleep=lambda s: None)
+    assert got == ["ABCD1234"] and found == ["ABCD1234"]
+    assert len(writer.attached) == 1 and "your own browser" in writer.attached[0][3]
+    assert len(writer.tags) == 1 and writer.tags[0][0] == "ABCD1234" and ff.TAG_FETCHED in writer.tags[0][1]
+    assert writer.tags[0][2] == [ff.TAG_NOT_FOUND, ff.TAG_CHECK_PDF]
+
+
+def test_the_window_offers_papers_behind_a_bot_check_to_the_users_own_browser():
+    from zotero_mcp.fulltext_window import Progress
+
+    p = Progress()
+    p.apply({"key": "A", "label": "A", "status": "needs your browser", "detail": "https://pub.org/a"})
+    p.apply({"key": "B", "label": "B", "status": "not found", "detail": ""})
+    assert p.for_own_browser() == ["A"] and p.own_links["A"] == "https://pub.org/a"
+    assert p.summary() == "Done: 0 attached, 1 not found, 1 for your own browser."
+    assert p.headline() == "Done: 2 papers."
+    p.apply({"key": "A", "label": "A", "status": "waiting for your download", "detail": "https://pub.org/a"})
+    assert p.for_own_browser() == [] and p.fraction() == 0.5
+    p.apply({"key": "A", "label": "A", "status": "attached", "detail": "from your download"})
+    assert p.summary() == "Done: 1 attached, 1 not found."

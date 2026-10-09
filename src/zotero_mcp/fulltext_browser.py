@@ -30,6 +30,12 @@ _VISIBLE_CHALLENGE = (
     "complete the security check", "press & hold", "press and hold", "i'm not a robot",
     "please complete the captcha", "checking your browser",
 )
+#: Challenges that check whether a script drives the browser (Cloudflare Turnstile and the like):
+#: solving them in the fetcher's window starts the same check again, while the user's own browser
+#: passes them. Such pages go to the user's browser instead (OWN_BROWSER).
+_ROBOT_CHECK = ("performing security verification", "checking your browser", "just a moment",
+                "verify you are human", "challenges.cloudflare.com", "cf-turnstile", "ray id")
+OWN_BROWSER = "bot check that only your own browser passes"
 _DOWNLOAD_TEXT = re.compile(r"^\s*(download( full-text)?( pdf)?|pdf|download paper|view pdf)\s*$", re.I)
 
 
@@ -54,6 +60,7 @@ class BrowserSession:
         self._last_nav = 0.0
         self.researchgate_pages = 0
         self.researchgate_flagged = False
+        self.robot_hosts: set[str] = set()     # sites whose bot check refused this window
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -129,11 +136,35 @@ class BrowserSession:
             return "login"
         return None
 
+    def _robot_check(self) -> bool:
+        try:
+            html = (self.page.content() or "")[:200000].lower()
+            text = (self.page.inner_text("body", timeout=3000) or "")[:3000].lower()
+        except Exception:
+            return False
+        return ("cloudflare" in html or "turnstile" in html) and any(m in text or m in html for m in _ROBOT_CHECK)
+
     def wait_if_blocked(self) -> bool:
-        """When a captcha or login page shows, wait for the user. True if clear."""
+        """When a captcha or login page shows, wait for the user. True if clear.
+
+        A check of whether a script drives the browser (Cloudflare) is given a few
+        seconds to pass on its own; after that the page is for the user's own
+        browser, where it passes (BrowserUnavailable with OWN_BROWSER)."""
         reason = self._blocked_reason()
         if not reason:
             return True
+        host = _host(self.page.url)
+        if reason == "captcha" and (host in self.robot_hosts or self._robot_check()):
+            for _ in range(0 if host in self.robot_hosts else 5):
+                time.sleep(3)
+                if not self._blocked_reason():
+                    time.sleep(2)
+                    return True
+            url = self.page.url
+            self.robot_hosts.add(host)
+            self.log("        !! this site's bot check does not accept the fetcher's Chrome; "
+                     "it is left for your own browser")
+            raise BrowserUnavailable(f"{OWN_BROWSER}: {url}")
         self.log(f"        !! a {reason} page is showing in the fetcher's Chrome window. "
                  f"Please deal with it there; waiting up to {self.wait_for_user / 60:.0f} min ...")
         deadline = time.monotonic() + self.wait_for_user
@@ -154,6 +185,8 @@ class BrowserSession:
         return None
 
     def goto(self, url: str) -> bool:
+        if _host(url) in self.robot_hosts:
+            raise BrowserUnavailable(f"{OWN_BROWSER}: {url}")
         if "researchgate.net" in url:
             if self.researchgate_allowed():
                 return False
@@ -310,9 +343,9 @@ def src_browser(item: ff.ItemInfo, http: ff.Http, settings: ff.Settings, budget:
     logins (or library proxy)."""
     seen: set[str] = set()
 
-    # 1. Links that refused a plain request earlier in this run
+    # 1. Links that refused a plain request earlier in this run or in an earlier one
     #    (ResearchGate, Academia.edu, bot-protected sites).
-    for cand in http.blocked.get(item.key, []):
+    for cand in list(http.blocked.get(item.key, [])) + ff.remembered_blocked(item.key):
         if cand.url in seen:
             continue
         seen.add(cand.url)
@@ -419,4 +452,4 @@ def login_session(settings: ff.Settings | None = None, log: Callable[[str], None
 
 
 def _host(url: str) -> str:
-    return urlparse(url).hostname or ""
+    return (urlparse(url or "").hostname or "").removeprefix("www.")

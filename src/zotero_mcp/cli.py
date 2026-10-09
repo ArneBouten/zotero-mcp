@@ -897,6 +897,9 @@ def main():
                               help="Show a progress window (each paper and its status, a button for the browser step)")
     fetch_parser.add_argument("--workers", type=int, default=4,
                               help="Papers searched at the same time (default 4; the browser step takes one at a time)")
+    fetch_parser.add_argument("--from-downloads", action="store_true",
+                              help="Attach the PDFs you saved to Downloads in your own browser (for --items; "
+                                   "looks at the last 24 hours and waits up to 15 minutes for more)")
 
     meta_parser = subparsers.add_parser(
         "metadata-audit",
@@ -1430,6 +1433,15 @@ def main():
                 sys.exit(1)
             return
         keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
+        if args.from_downloads:
+            if not keys:
+                print("--from-downloads needs --items KEY1,KEY2 (the papers whose PDF you downloaded).")
+                sys.exit(1)
+            import time as _time
+
+            got = fulltext_fetch.watch_downloads(keys, since=_time.time() - 86400, timeout=900)
+            print(f"Attached {len(got)} of {len(keys)}.")
+            return
         steps = [x.strip() for x in args.steps.split(",") if x.strip()]
         if args.browser and "browser" not in steps:
             steps.append("browser")
@@ -1454,6 +1466,14 @@ def main():
             sys.exit(1)
         print()
         print(report.markdown())
+        own = [r for r in report.results if r.status == "needs your browser"]
+        if own and not (args.dry_run or args.save_dir):
+            print()
+            print("Behind a bot check that only your own browser passes. Open these, save each PDF to Downloads:")
+            for r in own:
+                print(f"  {r.url}")
+            print("Then attach them with:")
+            print(f"  py -3.12 -m zotero_mcp.cli fetch-fulltext --from-downloads --items {','.join(r.key for r in own)}")
         if args.open_missing:
             import webbrowser
 

@@ -1554,7 +1554,7 @@ class RunReport:
             head + ", ".join(f"{v} {k}" for k, v in sorted(c.items())) if c else "No items to fetch.",
             "",
         ]
-        order = {"attached": 0, "found": 1, "not found": 2, "error": 3, "skipped": 4}
+        order = {"attached": 0, "found": 1, "needs your browser": 2, "not found": 3, "error": 4, "skipped": 5}
         rows = sorted(self.results, key=lambda r: order.get(r.status, 9))
         for r in rows[:limit] if limit else rows:
             if r.status in ("attached", "found"):
@@ -1562,6 +1562,9 @@ class RunReport:
                 host = _host_of(r.url) if r.url else ""
                 lines.append(f"- **{r.status}** {r.label} [{r.key}]: {r.source}"
                              f"{' at ' + host if host else ''}, {VERSION_LABELS.get(r.version, r.version)}{where}")
+            elif r.status == "needs your browser":
+                lines.append(f"- **{r.status}** {r.label} [{r.key}]: {r.reason}; open {r.url} in your own "
+                             "browser and save the PDF to Downloads")
             else:
                 lines.append(f"- **{r.status}** {r.label} [{r.key}]: {r.reason}")
                 for a in r.attempts[-6:]:
@@ -1612,6 +1615,109 @@ def mark_bad_pdf(item_key: str, attachment_key: str, problem: str, want_publishe
         bad.update(problem=problem, want_published=bool(want_published))
         entry["bad_pdf"] = bad
         _save_state(state)
+
+
+def remember_blocked(item_key: str, cands: list) -> None:
+    """Links that refused a plain download, for a later browser run (the progress window's button)."""
+    unique = list({c.url: c for c in cands or []}.values())[:8]
+    if not unique:
+        return
+    _save_item_state(item_key, {"blocked": [
+        {"url": c.url, "source": c.source, "version": c.version, "by_identifier": c.by_identifier}
+        for c in unique]})
+
+
+def remembered_blocked(item_key: str) -> list:
+    out = []
+    for b in (_load_state().get(item_key) or {}).get("blocked") or []:
+        try:
+            out.append(Candidate(b["url"], b.get("source") or "a link", b.get("version"),
+                                 by_identifier=bool(b.get("by_identifier"))))
+        except Exception:
+            continue
+    return out
+
+
+def own_browser_links(attempts: list) -> list[str]:
+    """Links a bot check kept from the fetcher's Chrome: to open in the user's own browser."""
+    from zotero_mcp.fulltext_browser import OWN_BROWSER
+
+    out = []
+    for a in attempts or []:
+        outcome = getattr(a, "outcome", "") or ""
+        if OWN_BROWSER in outcome:
+            url = outcome.split(OWN_BROWSER + ":", 1)[-1].strip() or a.url
+            if url and url not in out:
+                out.append(url)
+    return out
+
+
+def downloads_dir() -> Path:
+    return Path.home() / "Downloads"
+
+
+def watch_downloads(keys: list[str], *, timeout: float = 900, folder: Path | None = None, since: float | None = None,
+                    on_found: Callable[[str, str], None] = lambda key, detail: None,
+                    stop: Callable[[], bool] = lambda: False, log: Callable[[str], None] = print,
+                    backend=None, writer_factory: Callable[[], Any] | None = None,
+                    sleep: Callable[[float], None] = time.sleep) -> list[str]:
+    """Attach PDFs the user downloads in their own browser: every new PDF in the Downloads
+    folder is checked against the waiting items (title, authors, DOI) and attached to the one
+    it matches. Returns the keys attached."""
+    folder = folder or downloads_dir()
+    since = time.time() - 5 if since is None else since
+    items, _skipped = select_items(keys=keys, backend=backend, retry=True)
+    waiting = {i.key: i for i in items}
+    if not waiting:
+        return []
+    writer = (writer_factory or (lambda: ZoteroWriter(log=None)))()
+    seen: dict[str, int] = {}
+    judged: set[str] = set()
+    attached: list[str] = []
+    deadline = time.monotonic() + timeout
+    log(f"Watching {folder} for the PDF(s) you download ({len(waiting)} item(s), up to {timeout / 60:.0f} min) ...")
+    while waiting and time.monotonic() < deadline and not stop():
+        try:
+            files = [f for f in folder.glob("*.pdf") if str(f) not in judged and f.stat().st_mtime >= since]
+        except OSError:
+            files = []
+        for f in files:
+            try:
+                size = f.stat().st_size
+            except OSError:
+                continue                    # renamed or removed meanwhile
+            if not size or seen.get(str(f)) != size:
+                seen[str(f)] = size         # still being written: look again next round
+                continue
+            judged.add(str(f))              # each download is judged once
+            probe = probe_pdf(f)
+            for key, item in list(waiting.items()):
+                check = check_pdf(item, probe, Candidate(f.as_uri(), "your own browser", None), size)
+                if not check.ok:
+                    continue
+                label = VERSION_LABELS.get(check.version, "version unknown")
+                with tempfile.TemporaryDirectory(prefix="zmcp-download-") as tmp:
+                    named = os.path.join(tmp, _safe_filename(item))
+                    with open(f, "rb") as src, open(named, "wb") as out:
+                        out.write(src.read())
+                    note = (f"<p>Downloaded by you in your own browser and attached by zotero-mcp on "
+                            f"{_dt.date.today().isoformat()} ({f.name}). Version: {label}. Check: {check.reason}.</p>")
+                    writer.attach_pdf(item, named, f"Full Text PDF ({label})", note)
+                tags = [TAG_FETCHED] + ([VERSION_TAGS[check.version]] if check.version in VERSION_TAGS else [])
+                writer.set_tags(key, add=tags, remove=[TAG_NOT_FOUND, TAG_CHECK_PDF])
+                for a in bad_pdf(key).get("attachments") or []:
+                    writer.trash_child(key, a)
+                clear_bad_pdf(key)
+                _save_item_state(key, {"last_attempt": _dt.datetime.now().isoformat(timespec="seconds"),
+                                       "status": "attached", "blocked": []})
+                del waiting[key]
+                attached.append(key)
+                log(f"  -> attached {f.name} to {item.label}")
+                on_found(key, f"from your download, {label}")
+                break
+        if waiting:
+            sleep(3)
+    return attached
 
 
 def bad_pdf(item_key: str, state: dict | None = None) -> dict:
@@ -1729,7 +1835,17 @@ def run(
                         "detail": f"{cand.source}, {label}"})
             else:
                 res.status, res.reason = "not found", _not_found_reason(res.attempts)
-                if final:
+                blocked = (getattr(http, "blocked", None) or {}).get(item.key)
+                if blocked and "browser" not in item_steps:
+                    remember_blocked(item.key, blocked)
+                own = own_browser_links(res.attempts) if "browser" in item_steps else []
+                if own and final:
+                    # Not tagged "not found": the paper is reachable, just not by a script.
+                    res.status, res.reason, res.url = "needs your browser", "a bot check only your own browser passes", own[0]
+                    lines.append(f"  -> needs your own browser: {own[0]}")
+                    notify({"key": item.key, "label": item.label, "status": "needs your browser",
+                            "detail": own[0]})
+                elif final:
                     if writer and not bad:      # an item with a wrong PDF keeps it until a right one is found
                         with write_lock:
                             writer.set_tags(item.key, add=[TAG_NOT_FOUND])
@@ -1745,7 +1861,7 @@ def run(
             notify({"key": item.key, "label": item.label, "status": "error", "detail": res.reason})
         if not dry_run and (final or res.status != "not found"):
             _save_item_state(item.key, {"last_attempt": _dt.datetime.now().isoformat(timespec="seconds"),
-                                        "status": res.status})
+                                        "status": res.status, **({"blocked": []} if res.status == "attached" else {})})
             _append_log(res)
         with log_lock:
             for line in lines:
@@ -1764,7 +1880,7 @@ def run(
             else:
                 for i, item in numbered:
                     done[item.key] = one(i, item, first_steps, workdir, final)
-        if "browser" in steps:
+        if browser_later:
             for i, item in numbered:
                 if item.key in done and done[item.key].status != "not found":
                     continue

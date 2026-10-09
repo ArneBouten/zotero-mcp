@@ -42,7 +42,8 @@ later runs.
 
 During a run the window stays visible. It waits 10–20 seconds between
 papers. When a captcha or a login page appears, it stops and waits up to five
-minutes for you to deal with it in the window; it never solves captchas. Do
+minutes for you to deal with it in the window; it never solves captchas
+(a check that only passes in your own browser is handed to it, see below). Do
 not leave the browser step running unattended. Off campus, a library proxy
 prefix can be set as `fulltext_fetch.proxy_prefix` (the part of a proxied
 link before the encoded address, ending in `?url=`).
@@ -50,6 +51,34 @@ link before the encoded address, ending in `?url=`).
 ```
 zotero-mcp fetch-fulltext --browser                 # all steps, browser last
 zotero-mcp fetch-fulltext --retry --steps browser   # only the browser, for what is still missing
+```
+
+A run without the browser remembers the links that refused a plain download,
+so a later browser-only run (the "with browser" action in Zotero, or the
+window's button) starts with them.
+
+### Bot checks only your own browser passes
+
+Some sites (Cloudflare's "Performing security verification", on Taylor &
+Francis among others) check whether a script drives the browser. In the
+fetcher's Chrome that check starts again after every attempt you make, while
+the same link passes in your everyday browser. The fetcher does not try to hide
+that it is a script. It gives such a page a few seconds; after that the paper
+is marked **needs your browser** (not `fulltext/not-found`), and the site is
+not opened again in that run.
+
+The progress window then offers **Open N in my own browser**. That opens the
+links (five at a time) as ordinary tabs in your default browser, with your
+logins. Download the PDF there, into your Downloads folder. The window watches
+Downloads for 15 minutes: a new PDF that matches one of the papers (title,
+first author, DOI) is attached with a note, and tagged like any other. The tab
+stays open and the downloaded file stays in Downloads; Zotero keeps its own copy.
+
+Without the window, the end of the run lists the links and the command for
+afterwards:
+
+```
+zotero-mcp fetch-fulltext --from-downloads --items KEY1,KEY2   # PDFs from the last 24 hours, then waits 15 min
 ```
 
 ## What it checks before attaching
@@ -98,7 +127,8 @@ Chrome window.
 lists every paper with its status, like Zotero's own Find Full Text: searching,
 attached (and from where), no file found. As soon as one paper is not found, a
 button offers the browser step for the papers not found so far; it stays there
-at the end, with a summary and the run's report. Double-clicking a paper shows
+at the end, with a summary and the run's report. Papers behind a bot check get
+a second button that opens them in your own browser (see above). Double-clicking a paper shows
 it in Zotero. The terminal opens minimised and keeps the details.
 
 ## Keys and limits
