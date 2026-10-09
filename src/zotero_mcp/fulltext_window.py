@@ -489,6 +489,91 @@ def ask_check_again(count: int, when: str, title: str = "Check & complete") -> b
     return answer["again"]
 
 
+_NAME_FIELDS = ("creators", "editors")
+
+
+def _names(text: str) -> list[str]:
+    return [a.strip() for a in str(text or "").split(";") if a.strip()]
+
+
+def _middle(old: str, new: str) -> tuple[int, int, int]:
+    """Where two texts differ: (start, end in old, end in new), widened to whole words when
+    the difference starts or ends inside a word."""
+    n = min(len(old), len(new))
+    i = 0
+    while i < n and old[i] == new[i]:
+        i += 1
+    j = 0
+    while j < n - i and old[-1 - j] == new[-1 - j]:
+        j += 1
+    a_end, b_end = len(old) - j, len(new) - j
+
+    def inside(text: str, k: int) -> bool:
+        return 0 < k < len(text) and text[k - 1].isalnum() and text[k].isalnum()
+
+    while i > 0 and (inside(old, i) or inside(new, i)):
+        i -= 1
+    while (a_end < len(old) and inside(old, a_end)) or (b_end < len(new) and inside(new, b_end)):
+        a_end += 1
+        b_end += 1
+    return i, a_end, b_end
+
+
+def describe_change(field: str, old: str, new: str) -> str:
+    """Only what changes, for the list: "2023 → 2025", "Keer, Hilde → Van Keer, Hilde",
+    "+ ": A Systematic Review""."""
+    from difflib import SequenceMatcher
+
+    old, new = str(old or ""), str(new or "")
+    if not old.strip():
+        return f"add {new}"
+    if field in _NAME_FIELDS:
+        a, b = _names(old), _names(new)
+        parts = []
+        for op, i1, i2, j1, j2 in SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+            before, after = "; ".join(a[i1:i2]), "; ".join(b[j1:j2])
+            if op == "replace":
+                parts.append(f"{before} → {after}")
+            elif op == "insert":
+                parts.append(f"+ {after}")
+            elif op == "delete":
+                parts.append(f"− {before}")
+        return "   ·   ".join(parts) or "spacing or punctuation only"
+    if len(old) <= 24 and len(new) <= 24:
+        return f"{old} → {new}"
+    i, a_end, b_end = _middle(old, new)
+    gone, added = old[i:a_end].strip(), new[i:b_end].strip()
+    if not gone and not added:
+        return "spacing only"
+    if not gone:
+        return f'+ "{added}"'
+    if not added:
+        return f'− "{gone}"'
+    return f'"{gone}" → "{added}"'
+
+
+def diff_segments(field: str, old: str, new: str) -> tuple[list[tuple[str, bool]], list[tuple[str, bool]]]:
+    """Both values in pieces, each marked True where it differs: for highlighting."""
+    from difflib import SequenceMatcher
+
+    old, new = str(old or ""), str(new or "")
+    if field not in _NAME_FIELDS:
+        i, a_end, b_end = _middle(old, new)
+        left = [(old[:i], False), (old[i:a_end], True), (old[a_end:], False)]
+        right = [(new[:i], False), (new[i:b_end], True), (new[b_end:], False)]
+        return [p for p in left if p[0]], [p for p in right if p[0]]
+    a, b = _names(old), _names(new)
+    left: list[tuple[str, bool]] = []
+    right: list[tuple[str, bool]] = []
+    for op, i1, i2, j1, j2 in SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        for names, side in ((a[i1:i2], left), (b[j1:j2], right)):
+            for name in names:
+                if side:
+                    side.append(("; ", False))
+                side.append((name, op != "equal"))
+    return left, right
+
+
 def review_window(keys: list[str] | None = None, *, collection: str | None = None, master=None,
                   on_decided: Callable[[str, int, int, int], None] | None = None, session=None) -> None:
     """The suggested metadata changes waiting for review (of ``keys``, a collection, or all), one
@@ -528,10 +613,10 @@ def review_window(keys: list[str] | None = None, *, collection: str | None = Non
     detail.configure(state="disabled")
     holder = ttk.Frame(frame, style="Card.TFrame", padding=1)
     holder.pack(fill="both", expand=True)
-    tree = ttk.Treeview(holder, columns=["yours", "suggested", "why"], show="tree headings", style="Papers.Treeview")
+    tree = ttk.Treeview(holder, columns=["change", "why"], show="tree headings", style="Papers.Treeview")
     tree.heading("#0", text="Paper / field", anchor="w")
-    tree.column("#0", width=400, anchor="w", stretch=True)
-    for col, text, width in (("yours", "Yours", 190), ("suggested", "Suggested", 190), ("why", "Why", 260)):
+    tree.column("#0", width=380, anchor="w", stretch=True)
+    for col, text, width in (("change", "Change", 430), ("why", "Why", 250)):
         tree.heading(col, text=text, anchor="w")
         tree.column(col, width=width, anchor="w", stretch=True)
     tree.tag_configure("paper", font=("TkDefaultFont", 10, "bold"))
@@ -556,8 +641,8 @@ def review_window(keys: list[str] | None = None, *, collection: str | None = Non
                 rid = f"{key}|{c.field}"
                 changes[rid] = c
                 tree.insert(key, "end", iid=rid, text=ma.FIELD_LABELS.get(c.field, c.field),
-                            values=(one_line(c.old) or "(empty)", one_line(c.new),
-                                    one_line(f"{', '.join(c.sources)}{' — ' + c.why if c.why else ''}")),
+                            values=(one_line(describe_change(c.field, c.old, c.new), 110),
+                                    one_line(f"{c.why or ''}{' (' + ', '.join(c.sources) + ')' if c.sources else ''}")),
                             tags=("stripe",) if i % 2 else ())
         counted()
 
@@ -637,18 +722,27 @@ def review_window(keys: list[str] | None = None, *, collection: str | None = Non
         if root.winfo_exists():
             root.after(150, poll)
 
+    detail.tag_configure("label", foreground=ui["muted"])
+    detail.tag_configure("gone", foreground="#b91c1c", background="#fee2e2", overstrike=True)
+    detail.tag_configure("new", foreground="#15803d", background="#dcfce7")
+
     def on_select(_event=None) -> None:
         sel = tree.selection()
-        text = ""
-        if len(sel) == 1 and sel[0] in changes:
-            c = changes[sel[0]]
-            text = (f"{tree.item(tree.parent(sel[0]), 'text')}\nYours: {c.old or '(empty)'}\nSuggested: {c.new}\n"
-                    f"Why: {', '.join(c.sources)}{' — ' + c.why if c.why else ''}")
-        elif len(sel) == 1:
-            text = f"{tree.item(sel[0], 'text')}: {len(tree.get_children(sel[0]))} suggestion(s)."
         detail.configure(state="normal")
         detail.delete("1.0", "end")
-        detail.insert("1.0", text)
+        if len(sel) == 1 and sel[0] in changes:
+            c = changes[sel[0]]
+            left, right = diff_segments(c.field, c.old, c.new)
+            detail.insert("end", tree.item(tree.parent(sel[0]), "text") + "\n", "label")
+            detail.insert("end", "Yours:  ", "label")
+            for text, differs in left or [("(empty)", False)]:
+                detail.insert("end", text, "gone" if differs else ())
+            detail.insert("end", "\nSuggested:  ", "label")
+            for text, differs in right:
+                detail.insert("end", text, "new" if differs else ())
+            detail.insert("end", f"\nWhy:  {c.why or ''} ({', '.join(c.sources)})", "label")
+        elif len(sel) == 1:
+            detail.insert("end", f"{tree.item(sel[0], 'text')}: {len(tree.get_children(sel[0]))} suggestion(s).")
         detail.configure(state="disabled")
 
     def on_open(_event=None) -> None:

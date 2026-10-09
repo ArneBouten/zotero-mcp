@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.54] - 2026-10-09
+
+### Changed
+
+- **The review window shows only what a suggestion changes**: "Keer, Hilde → Van Keer, Hilde", "+ Parker, Philip", "2023 → 2025", '+ ": A Systematic Review"', instead of both full values. The selected suggestion's full values below are marked: what goes struck through in red, what comes in green.
+
 ## [0.13.2+arne.53] - 2026-10-09
 
 ### Added
