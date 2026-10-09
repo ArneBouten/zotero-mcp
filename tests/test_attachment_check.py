@@ -363,12 +363,12 @@ def test_a_whole_book_is_the_right_paper_the_chapter_is_cut_out_or_the_item_is_t
         def attach_file(self, key, path, title):
             self.calls.append(("attach", key, title))
 
-    monkeypatch.setattr(ac, "extract_chapter", lambda book, pages, out: None)
+    monkeypatch.setattr(ac, "extract_chapter", lambda book, pages, out, title="": None)
     w = W()
     assert ma._fix_attachment(w, audit, lambda m: None) is False
     assert w.calls == [("tags", "427BV3EH", [ff.TAG_WHOLE_BOOK], [ff.TAG_CHECK_PDF])]
     assert ff.bad_pdf("427BV3EH") == {}         # the book is not replaced
-    monkeypatch.setattr(ac, "extract_chapter", lambda book, pages, out: (205, 216))
+    monkeypatch.setattr(ac, "extract_chapter", lambda book, pages, out, title="": (205, 216))
     audit.tags = set()
     w = W()
     ma._fix_attachment(w, audit, lambda m: None)
@@ -610,3 +610,33 @@ def test_only_the_chapter_stays_on_a_chapters_item(monkeypatch):
     w = W()
     ma._fix_attachment(w, audit, lambda m: None, pdfs=lambda key: [])
     assert not [c for c in w.calls if c[0] == "trash"] and "annotations" in w.calls[-1][2]
+
+
+def test_a_chapter_is_cut_only_where_its_title_is(tmp_path):
+    # Another edition has another chapter on the same page numbers: no cut there.
+    import pymupdf
+
+    doc = pymupdf.open()
+    for text in ("Contents", "194 Pediatric quality of life ... Van Allen", "195 Several reliable measures ...",
+                 "279 CHAPTER Flow Theory and Research Jeanne Nakamura"):
+        doc.new_page().insert_text((72, 72), text)
+    path = tmp_path / "book.pdf"
+    doc.save(path)
+    assert ac._chapter_start(str(path), 2, "Flow theory and research") is None
+    assert ac._chapter_start(str(path), 3, "Flow theory and research") == 3
+
+
+def test_a_running_head_is_not_the_chapters_start(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Chapter 9 Qualitative data analysis for applied policy research")
+    doc.new_page().insert_text((72, 72), "Applied policy research 187 participants. Qualitative data analysis ...")
+    path = tmp_path / "book.pdf"
+    doc.save(path)
+    title = "Qualitative data analysis for applied policy research"
+    assert ac._chapter_start(str(path), 0, title) == 0
+    # Numbered pages found from the second page on: the cut starts at the title page before it.
+    assert ac._chapter_start(str(path), 1, title) == 0
+    title_elsewhere = "Patterns of crisis behaviour: a qualitative inquiry"
+    assert ac._chapter_start(str(path), 1, title_elsewhere) is None

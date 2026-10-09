@@ -738,6 +738,8 @@ class ItemAudit:
     #: the notices (retractions, corrections) the DOI's record lists, when it was read: a later
     #: retraction check of an unchanged paper then knows them already; None = not read
     notices: list | None = None
+    #: the item's title (a chapter cut from a book is checked against it)
+    title: str = ""
 
     def by_kind(self, kind: str) -> list[Change]:
         return [c for c in self.changes if c.kind == kind]
@@ -838,7 +840,7 @@ def _fields_for(item_type: str) -> list[str]:
 def audit_item(raw: dict, ctx: Context) -> ItemAudit:
     data = raw.get("data", raw)
     info = ff.ItemInfo.from_zotero(raw)
-    audit = ItemAudit(info.key, info.label, info.item_type)
+    audit = ItemAudit(info.key, info.label, info.item_type, title=info.title)
     settings = ctx.settings
     http = _Recorder(ctx.http)
     audit.tags = {t.get("tag") for t in data.get("tags") or [] if isinstance(t, dict)}
@@ -2405,7 +2407,8 @@ def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
                 return False                # tried before
             folder = tempfile.mkdtemp(prefix="zmcp-chapter-")
             out = os.path.join(folder, "chapter.pdf")
-            span = attachment_check.extract_chapter(problem.path, writer.item_pages(audit.key), out)
+            span = attachment_check.extract_chapter(problem.path, writer.item_pages(audit.key), out,
+                                                    title=audit.title or "")
             remove = [ff.TAG_CHECK_PDF] if ff.TAG_CHECK_PDF in audit.tags else []
             if span:
                 writer.attach_file(audit.key, out, f"Chapter PDF (from the book, PDF pages {span[0]}-{span[1]})")

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Replayed on all 93 PDFs the fetcher attached: every wrong one is rejected, every right one still passes.
 - A PDF the fetcher attached and you moved to the trash is not attached again: its link is remembered as wrong at the next run.
 - When a wrong PDF is replaced, its "PDF to check" note goes too; a `fulltext/check-pdf` finding whose PDF is gone is cleared at the next check.
+- **The chapter cutter cuts only when it is sure of the pages.** At least 80 % of the chapter's page numbers must be printed in the book, and the chapter's title must stand at the top of the cut's first page (or of the page before it, a title page of its own, which is then included). Otherwise nothing is cut and the item is tagged `fulltext/whole-book`. Before, another edition of a handbook gave another chapter on the same page numbers (Nakamura & Csikszentmihalyi got Van Allen's chapter, three times), a wrong Pages field gave a chapter cut mid-way (Ritchie & Spencer), and a chapter starting on an unnumbered title page lost that page (Renninger & Hidi). Tried on those books: each one is now cut right or left alone.
 - Metadata check: BMJ's habit of registering an article as "<title>: Table 1" no longer reads as a table's DOI, and an Oxford Handbooks chapter (registered as a "book" under the chapter's own title) no longer reads as the whole book's DOI. A DOI ending in `.supp`, `.t001` and the like is still a part's.
 
 ## [0.13.2+arne.58] - 2026-10-09

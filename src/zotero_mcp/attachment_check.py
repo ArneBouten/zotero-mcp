@@ -289,9 +289,13 @@ def pdf_reader() -> Callable[[str], list[dict]]:
     return read
 
 
-def extract_chapter(book_pdf: str, pages_field: str, out_path: str) -> tuple[int, int] | None:
+def extract_chapter(book_pdf: str, pages_field: str, out_path: str, title: str = "") -> tuple[int, int] | None:
     """Cut a chapter's printed pages (the item's Pages field) out of the whole book, using the
-    book's printed page numbers. Returns the PDF page range (1-based) or None."""
+    book's printed page numbers. Returns the PDF page range (1-based) or None.
+
+    Cut only when sure: at least 80 % of the chapter's page numbers are found printed in the book,
+    and (with ``title``) the cut's first page, or the page before it, shows the chapter's title:
+    another edition of the book has other chapters on those page numbers."""
     from zotero_mcp import structure
 
     rng = _pages_range(pages_field)
@@ -303,9 +307,32 @@ def extract_chapter(book_pdf: str, pages_field: str, out_path: str) -> tuple[int
         return None
     want = {str(n) for n in range(rng[0], rng[1] + 1)}
     idx = [i for i, lab in enumerate(labels) if lab in want]
-    if not idx or len(idx) < 0.6 * len(want):
-        return None
+    if not idx or len(idx) < 0.8 * len(want):
+        return None             # not sure where the chapter's pages are: no cut
     first, last = min(idx), max(idx)
+    if title:
+        start = _chapter_start(book_pdf, first, title)
+        if start is None:
+            return None
+        first = start
     if not structure.extract_pages(book_pdf, out_path, first, last):
         return None
     return first + 1, last + 1
+
+
+def _chapter_start(book_pdf: str, first: int, title: str) -> int | None:
+    """Where the chapter starts (0-based): its title as a phrase at the top of the first numbered
+    page, or of the page before it (a title page of its own, then included). Not merely its words:
+    a running head, or a chapter cut mid-way, has those too. None when it is on neither."""
+    try:
+        import pymupdf
+
+        with pymupdf.open(book_pdf) as doc:
+            for i in (first, first - 1):
+                if 0 <= i < doc.page_count:
+                    top = doc[i].get_text()[:1500]
+                    if top.strip() and ff.title_near_top(title, top, 1500):
+                        return i
+    except Exception:
+        pass
+    return None             # cannot confirm it: no cut (the item is tagged whole-book instead)
