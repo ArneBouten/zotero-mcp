@@ -195,6 +195,7 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
 
     log(f"1/{n} Metadata ...")
     stage(0)
+    every = every or len(keys) <= SMALL_SELECTION
     changed, unchanged = (keys, []) if every or not apply else split_unchanged(backend, keys)
     if unchanged:
         log(f"{len(unchanged)} paper(s) unchanged since their last check: only a retraction check "
@@ -202,10 +203,13 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         from zotero_mcp.fulltext_fetch import ItemInfo
 
         known = backend.get_items(unchanged) or {}
+        seen = _load().get("checked_modified") or {}
         for key in unchanged:
             label = ItemInfo.from_zotero(known[key]).label if key in known else key
+            when = (seen.get(key) or {}).get("date", "")
+            when = f", checked {_dt.date.fromisoformat(when).strftime('%d-%m-%Y')}" if when else ""
             notify({"key": key, "label": label, "phase": "metadata", "status": "unchanged",
-                    "detail": "unchanged since its last check"})
+                    "detail": f"unchanged{when}"})
         if writer_factory is None:
             from zotero_mcp.metadata_audit import MetadataWriter
 
@@ -263,6 +267,8 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
 #: The checking rules' version. A paper checked under older rules counts as changed, so
 #: the next run checks it again; raised when the rules improve enough to be worth that.
 RULES = 1
+#: A selection this small is always checked fully: clicking a few papers means "check these".
+SMALL_SELECTION = 5
 #: Days between retraction checks of an unchanged paper.
 RETRACTION_DAYS = 30
 #: Days after which a recent article still without volume or pages (online first) is checked

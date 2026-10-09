@@ -281,6 +281,11 @@ class Progress:
                         "A note on the paper says what is wrong (tag: fulltext/check-pdf). "
                         + ("'Check & complete' looks for the right one." if self.stages == ["Metadata"]
                            else "It stays attached until the right one is found.")))
+        unchanged = self._keys(lambda k: meta(k) == "unchanged")
+        if unchanged and not self.active_runs:
+            out.append(("busy", f"– {len(unchanged)} unchanged since their last check, not checked again  ⓘ",
+                        "recheck", "Nothing changed in Zotero since their last check, so only retractions were "
+                        "checked. 'Check anyway' runs the full check for them too."))
         errors = self._keys(lambda k: meta(k) == "error" or status(k) == "error")
         if errors:
             out.append(("bad", f"✗ {len(errors)} error{'s' if len(errors) != 1 else ''}", "report",
@@ -602,6 +607,17 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
         threading.Thread(target=watch, daemon=True).start()
         refresh()
 
+    def on_recheck() -> None:
+        keys = [k for k in prog.order if prog.meta.get(k) == "unchanged"]
+        if not keys:
+            return
+        for k in keys:
+            prog.apply({"key": k, "label": prog.labels.get(k, k), "phase": "metadata", "status": "waiting",
+                        "detail": ""})
+            redraw(k)
+        start(run, dict(run_kwargs, keys=keys, collection=None, new=False, since=None, every=True), False)
+        refresh()
+
     def on_report() -> None:
         for path in prog.reports[-2:]:      # the metadata report and the fetch report
             try:
@@ -697,6 +713,8 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
                                state="disabled" if prog.browser_busy else "normal").pack(side="right")
                 elif action == "report":
                     ttk.Button(row, text="Show report", command=on_report, style="Soft.TButton").pack(side="right")
+                elif action == "recheck":
+                    ttk.Button(row, text="Check anyway", command=on_recheck, style="Soft.TButton").pack(side="right")
                 todo_rows.append(row)
             if items:
                 todo_card.pack(side="bottom", fill="x", pady=(12, 0), before=holder)

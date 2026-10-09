@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.44] - 2026-10-09
+
+### Changed
+
+- Up to 5 selected papers are always checked fully (clicking a paper means "check this one"). In a larger run the window says which papers were unchanged and when they were last checked, with a "Check anyway" button.
+
 ## [0.13.2+arne.43] - 2026-10-09
 
 ### Changed

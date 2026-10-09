@@ -51,7 +51,7 @@ Select papers (or a whole collection, or all of My Library) and run **Check & co
 - **Unchanged papers**: only Crossref's retraction and correction notices, at most once a month per paper. A new retraction gets the tag `retracted` and a note; a correction, erratum or expression of concern from the last year gets a note.
 - **PDFs put online later**: a paper searched in vain (no PDF, or no published version of an attached manuscript) is searched again when the last search is more than 30 days old, since authors and publishers upload PDFs later. Within those 30 days it is not, so Scholar and web-search credits are not spent twice.
 
-`zotero-mcp maintain --all` checks every paper fully, unchanged ones too.
+Up to 5 papers selected are always checked fully: clicking a paper means "check this one". In a larger run, unchanged papers show "Unchanged, checked <date>" in the window, and "To do" offers **Check anyway** for them. In a terminal, `zotero-mcp maintain --all` checks every paper fully.
 
 **At Claude Desktop's start instead** (older option, without the import action): with `"maintenance": {"new_items": true}` in config.json, every start first maintains the items added since the last start, then updates the index. Add `"fetch": false` for metadata only.
 
