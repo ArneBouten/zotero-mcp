@@ -86,7 +86,7 @@ Duplicates without a DOI or ISBN are left to Zotero's own "Duplicate Items" view
 
 For every item with a PDF, the first pages are compared with the item (free; Gemini only reads a PDF when the rules find neither the item's DOI nor its title there). Two kinds of findings:
 
-**Wrong PDF: another paper.** The item's DOI and title are not on the first pages; another DOI is, or Gemini reads another title. If the PDF belongs to another item in the library that has no PDF, it is moved there. Otherwise the item gets the tag `fulltext/check-pdf` and a note, and the right PDF is searched for; once found and checked it replaces the wrong one, which goes to Zotero's trash.
+**Wrong PDF: another paper.** The item's DOI or title is not printed at the top of the first page (the title's words further down are not enough: a review or a later paper by the same author has them too); another DOI is, or Gemini reads another title. If the PDF belongs to another item in the library that has no PDF, it is moved there. Otherwise the item gets the tag `fulltext/check-pdf` and a note, and the right PDF is searched for; once found and checked it replaces the wrong one, which goes to Zotero's trash.
 
 **The right paper in another form.** Nothing to check, so no note and no warning, only a tag:
 

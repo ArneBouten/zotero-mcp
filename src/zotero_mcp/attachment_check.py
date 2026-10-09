@@ -139,7 +139,11 @@ def check(info: ff.ItemInfo, data: dict, pdfs: list[dict], reading: Callable[[],
     readable = [p for p in pdfs if (p.get("text") or "").strip()]
     if not readable:
         return None                 # a scan without text: nothing to compare
-    matching = [p for p in readable if _doi_on_pages(info.doi, p["text"]) or title_on_pages(info.title, p["text"])]
+    # This work: its DOI or its title printed at the top of the first page. The title's words further
+    # down are not enough: a review, a protocol or a later paper by the same author has them too.
+    limit = 8000 if info.item_type in ff.BOOK_TYPES else 2500
+    matching = [p for p in readable if ff.doi_printed(info.doi, p["text"])
+                or ff.title_near_top(info.title, p["text"], limit)]
     book = (data.get("bookTitle") or "") if info.item_type == "bookSection" else ""
     if not matching and book:
         # A chapter's PDF often opens with the book's title page: the chapter itself, or the whole book.

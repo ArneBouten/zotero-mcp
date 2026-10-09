@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.56] - 2026-10-09
+
+### Fixed
+
+- **The metadata check's attachment check was as lenient as the web search** (most of the title's words on the first pages counted as "this paper"). Every attached PDF, whoever attached it, now counts as this work only with its title printed at the top of the first page or its DOI there. Otherwise Gemini reads its first page (once; cached), or a different DOI on top shows it is another work: tag `fulltext/check-pdf`, a note, and the right PDF is searched for.
+- The checking rules' version is raised, so the next Check & complete checks every paper's PDF again with these rules.
+
 ## [0.13.2+arne.55] - 2026-10-09
 
 ### Fixed

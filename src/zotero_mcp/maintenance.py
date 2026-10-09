@@ -356,7 +356,7 @@ def recent_reports(limit: int = 10, within_minutes: int = 30) -> list[dict]:
 
 #: The checking rules' version. A paper checked under older rules counts as changed, so
 #: the next run checks it again; raised when the rules improve enough to be worth that.
-RULES = 2      # 2: the online year is corrected to the issue year by rule (arne.51)
+RULES = 3      # 2: online year to issue year by rule (arne.51); 3: the attached PDF must carry the title or DOI at the top (arne.56)
 #: Days between retraction checks of an unchanged paper.
 RETRACTION_DAYS = 30
 #: Days after which a recent article still without volume or pages (online first) is checked
