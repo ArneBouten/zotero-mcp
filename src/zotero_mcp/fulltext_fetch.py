@@ -152,6 +152,9 @@ class Settings:
     #: URL ending in ``?url=``), Chrome channel and the pause between papers.
     proxy_prefix: str = ""
     browser_channel: str = "chrome"
+    #: The fetcher's Chrome stays minimised and comes forward (with a sound) only when a captcha or
+    #: login page needs you.
+    browser_minimized: bool = True
     browser_delay: tuple[float, float] = (10.0, 20.0)
     #: ResearchGate flags a network that opens many of its pages; the browser
     #: step opens at most this many per run, slower than other sites.
@@ -195,6 +198,8 @@ class Settings:
             s.researchgate_per_run = section["researchgate_per_run"]
         if isinstance(section.get("proxy_prefix"), str):
             s.proxy_prefix = section["proxy_prefix"].strip()
+        if isinstance(section.get("browser_minimized"), bool):
+            s.browser_minimized = section["browser_minimized"]
         if isinstance(section.get("browser_channel"), str):
             s.browser_channel = section["browser_channel"].strip()
         delay = section.get("browser_delay")

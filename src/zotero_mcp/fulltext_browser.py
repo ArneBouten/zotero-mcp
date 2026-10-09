@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import random
 import re
+import sys
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -78,8 +79,12 @@ class BrowserSession:
         channel = self.settings.browser_channel or "chrome"
         # Keep Chrome's sandbox on: Playwright's default --no-sandbox is a
         # security downgrade this window does not need.
+        # Minimised, a window's pages would be throttled like background tabs: these switches keep
+        # them loading at full speed.
+        args = ["--start-maximized", "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows"]
         kwargs = dict(user_data_dir=str(profile_dir()), headless=False, accept_downloads=True,
-                      viewport=None, args=["--start-maximized"], ignore_default_args=["--no-sandbox"])
+                      viewport=None, args=args, ignore_default_args=["--no-sandbox"])
         try:
             if channel == "chromium":
                 self.ctx = self._pw.chromium.launch_persistent_context(**kwargs)
@@ -94,7 +99,50 @@ class BrowserSession:
                 "`py -3.12 -m playwright install chromium`"
             ) from e
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+        if self.settings.browser_minimized:
+            self.set_window("minimized")
         return self
+
+    # -- the window ------------------------------------------------------------
+
+    def set_window(self, state: str) -> bool:
+        """"minimized", "maximized" or "normal", through Chrome's DevTools protocol. False when
+        that is not possible (the window then stays as it is)."""
+        try:
+            cdp = self.ctx.new_cdp_session(self.page)
+            window = cdp.send("Browser.getWindowForTarget")["windowId"]
+            cdp.send("Browser.setWindowBounds", {"windowId": window, "bounds": {"windowState": state}})
+            return True
+        except Exception:
+            return False
+
+    def window_state(self) -> str:
+        try:
+            cdp = self.ctx.new_cdp_session(self.page)
+            window = cdp.send("Browser.getWindowForTarget")["windowId"]
+            return cdp.send("Browser.getWindowBounds", {"windowId": window})["bounds"].get("windowState", "")
+        except Exception:
+            return ""
+
+    def call_user(self) -> None:
+        """Bring the window forward, with a sound: a captcha or login page needs the user."""
+        self.set_window("normal")          # a minimised window cannot go straight to maximised
+        self.set_window("maximized")
+        try:
+            self.page.bring_to_front()
+        except Exception:
+            pass
+        try:
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception:
+            sys.stderr.write("\a")
+
+    def dismiss(self) -> None:
+        """Back to the taskbar once the user is done."""
+        if self.settings.browser_minimized:
+            self.set_window("minimized")
 
     def close(self) -> None:
         try:
@@ -167,14 +215,18 @@ class BrowserSession:
             raise BrowserUnavailable(f"{OWN_BROWSER}: {url}")
         self.log(f"        !! a {reason} page is showing in the fetcher's Chrome window. "
                  f"Please deal with it there; waiting up to {self.wait_for_user / 60:.0f} min ...")
+        self.call_user()
         deadline = time.monotonic() + self.wait_for_user
-        while time.monotonic() < deadline:
-            time.sleep(4)
-            if not self._blocked_reason():
-                self.log("        ok, continuing")
-                time.sleep(2)
-                return True
-        return False
+        try:
+            while time.monotonic() < deadline:
+                time.sleep(4)
+                if not self._blocked_reason():
+                    self.log("        ok, continuing")
+                    time.sleep(2)
+                    return True
+            return False
+        finally:
+            self.dismiss()
 
     def researchgate_allowed(self) -> str | None:
         """Why ResearchGate is off for the rest of this run, or None."""
@@ -431,6 +483,8 @@ def login_session(settings: ff.Settings | None = None, log: Callable[[str], None
         proc.wait()
         return
     b = BrowserSession(settings, log=log).start()
+    b.set_window("normal")                 # logging in needs the window, also when runs keep it minimised
+    b.set_window("maximized")
     pages = ["https://www.researchgate.net/login", "https://www.academia.edu/login"]
     if settings.proxy_prefix:
         pages.append(settings.proxy_prefix + quote("https://www.sciencedirect.com/", safe=""))

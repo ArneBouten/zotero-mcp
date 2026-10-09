@@ -957,6 +957,22 @@ def main():
                                  help="Then update the search index for new and changed items (as at Claude "
                                       "Desktop's start; skipped while another update runs)")
 
+    cit_parser = subparsers.add_parser(
+        "citations",
+        help="The library's citation graph from OpenAlex: add papers to it, or ask what cites what",
+    )
+    cit_parser.add_argument("--update", action="store_true",
+                            help="Add the papers not in the graph yet (the whole library, or --collection/--items)")
+    cit_parser.add_argument("--refresh", action="store_true", help="With --update: fetch every paper again")
+    cit_parser.add_argument("--items", help="Comma-separated item keys")
+    cit_parser.add_argument("--collection", help="A collection (key)")
+    cit_parser.add_argument("--references", metavar="KEY", help="What this paper cites")
+    cit_parser.add_argument("--cited-by", metavar="KEY_OR_DOI", help="Which papers in the library cite this one")
+    cit_parser.add_argument("--related", metavar="KEY", help="Papers sharing references with this one")
+    cit_parser.add_argument("--overview", action="store_true",
+                            help="Most cited within the library (or --collection/--items), and gaps")
+    cit_parser.add_argument("--limit", type=int, help="How many outside works to list")
+
     compare_parser = subparsers.add_parser(
         "compare-gemini",
         help="Run several Gemini models on the same items (headings and PDF reading) and compare quality and cost",
@@ -1561,6 +1577,28 @@ def main():
                 print(f"No progress window ({e}); showing the progress here instead.")
         try:
             maintenance.run(fetch=not args.no_fetch, **kwargs)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    elif args.command == "citations":
+        setup_zotero_environment()
+        from zotero_mcp import citations
+
+        keys = [k.strip() for k in (args.items or "").split(",") if k.strip()] or None
+        try:
+            if args.update or not (args.references or args.cited_by or args.related or args.overview):
+                totals = citations.update(keys, collection=args.collection, refresh=args.refresh)
+                if not (totals["added"] or totals["not_found"] or totals["stopped"]):
+                    print("The citation graph is up to date.")
+            if args.references:
+                print(citations.references(args.references, limit=args.limit or 25, seconds=600))
+            if args.cited_by:
+                print(citations.cited_by(args.cited_by, limit=10 if args.limit is None else args.limit, seconds=600))
+            if args.related:
+                print(citations.related(args.related, limit=args.limit or 10, seconds=600))
+            if args.overview:
+                print(citations.overview(keys=keys, collection=args.collection, limit=args.limit or 15, seconds=600))
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)

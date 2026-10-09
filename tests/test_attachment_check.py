@@ -12,6 +12,10 @@ from zotero_mcp import metadata_audit as ma
 @pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from zotero_mcp import citations
+
+    # Maintenance runs end with the citation graph; no OpenAlex requests from these tests.
+    monkeypatch.setattr(citations, "update", lambda *a, **k: {})
     return tmp_path
 
 
@@ -530,3 +534,10 @@ def test_new_retractions_are_tagged_once_and_old_corrections_stay_quiet(tmp_path
     maintenance.check_retractions(["R1"], backend=lib, http=http, settings=ff.Settings(), writer=w2,
                                   log=lambda m: None, sleep=lambda s: None)
     assert w2.calls == []                                   # known since the last check
+
+
+def test_a_published_pdf_beside_a_manuscript_is_fine():
+    i, d = info_data(raw())
+    aam = OWN + "\nThis is an Author's Accepted Manuscript of: Moreno (2016)."
+    assert ac.check(i, d, [pdf(aam, "AAM")]).kind == "manuscript"
+    assert ac.check(i, d, [pdf(aam, "AAM"), pdf(OWN, "PUB")]) is None

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.47] - 2026-10-09
+
+### Added
+
+- **Citation graph**: each paper's references from OpenAlex, kept in `citations.json`. Claude's tool `zotero_citations` answers what a paper cites, which papers in the library cite it, which share its references, and which works a collection cites often that are not in the library. New papers are added on import and by Check & complete; `zotero-mcp citations --update` adds the rest of the library. See `docs/citations.md`.
+- **Merge certain duplicates** (Actions & Tags, Tools menu): merges papers with the same DOI or ISBN, type and title with Zotero's own merge, after a preview; keeps the checked or oldest copy and fills its empty fields. Other pairs with the same DOI get the tag `duplicate/check`.
+
+### Changed
+
+- The fetcher's Chrome window stays minimised and comes forward, with a sound, only when a captcha or login needs you (`"browser_minimized": false` keeps it visible).
+- An item with several PDFs (a supplement, or a manuscript beside the published version) is fine when one of them is the right paper in its published form.
+
 ## [0.13.2+arne.46] - 2026-10-09
 
 ### Changed

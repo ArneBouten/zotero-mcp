@@ -40,11 +40,13 @@ pages; log in there, and on any publisher site you use through your
 university ("Access through your institution"). The logins are kept for
 later runs.
 
-During a run the window stays visible. It waits 10–20 seconds between
-papers. When a captcha or a login page appears, it stops and waits up to five
-minutes for you to deal with it in the window; it never solves captchas
-(a check that only passes in your own browser is handed to it, see below). Do
-not leave the browser step running unattended. Off campus, a library proxy
+During a run the window stays minimised in the taskbar, so it does not get in
+your way; it waits 10–20 seconds between papers. When a captcha or a login
+page appears, the window comes forward, maximised, with a sound, and waits up
+to five minutes for you to deal with it; afterwards it goes back to the
+taskbar. It never solves captchas (a check that only passes in your own
+browser is handed to it, see below). `"browser_minimized": false` in the
+`fulltext_fetch` section of `config.json` keeps the window visible throughout. Off campus, a library proxy
 prefix can be set as `fulltext_fetch.proxy_prefix` (the part of a proxied
 link before the encoded address, ending in `?url=`).
 

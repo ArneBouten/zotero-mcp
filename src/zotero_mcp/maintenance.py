@@ -9,7 +9,8 @@
 3. **Audit again** the items that no registry knew and now have a PDF: its first
    pages (a DOI printed there, or Gemini's reading) are a source now.
 
-The search index and the passage labels follow at the next index update.
+The search index and the passage labels follow at the next index update. The papers not in
+the citation graph yet (``citations.py``) are added at the end.
 
 ``index=True`` adds the search index's incremental update as a last step (the import trigger).
 
@@ -145,7 +146,7 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         apply: bool = True, fetch: bool = True, index: bool = False, log: Callable[[str], None] = print,
         progress: Callable[[dict], None] | None = None, backend=None, audit_run=None, fetch_run=None,
         index_run: Callable[..., bool] | None = None, every: bool = False, retraction_run=None,
-        writer_factory=None) -> dict:
+        writer_factory=None, citations_run=None) -> dict:
     """Audit, fetch, audit again. Returns a summary. ``progress`` receives the audit's and the
     fetcher's events and {"status": "stage", "detail": name, "index": i} at each step.
 
@@ -248,6 +249,21 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
             log(f"3/{n} Nothing to check again.")
     if apply:
         remember_checked(backend, keys or [])
+        if keys:
+            # The papers not in the citation graph yet (new ones, or a DOI added just now).
+            # At most two minutes here; a large first run continues in the background.
+            import time
+
+            from zotero_mcp import citations
+
+            try:
+                done = (citations_run or citations.update)(keys, backend=backend, log=log,
+                                                           deadline=time.monotonic() + 120)
+                summary["citations"] = done
+                if (done or {}).get("left"):
+                    citations.start_background()
+            except Exception as e:
+                log(f"Citation graph not updated: {type(e).__name__}: {e}")
     if index and apply:
         log(f"{n}/{n} Search index ...")
         stage(n - 1)

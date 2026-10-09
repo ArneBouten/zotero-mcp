@@ -620,3 +620,18 @@ def test_no_second_pdf_when_zotero_attached_one_meanwhile(tmp_path, monkeypatch)
                     writer_factory=lambda: writer, backend=Late({"ABCD1234": ITEM}, {}), workers=1)
     assert [(r.status, r.reason) for r in report.results] == [("skipped", "a PDF arrived meanwhile")]
     assert writer.attached == []
+
+
+def test_the_fetchers_chrome_comes_forward_only_while_a_page_needs_you(monkeypatch):
+    from zotero_mcp import fulltext_browser as fb
+
+    session = fb.BrowserSession(ff.Settings(), log=lambda m: None, wait_for_user=30)
+    calls, pages = [], iter(["login", "login", None])
+    monkeypatch.setattr(session, "set_window", lambda state: calls.append(state) or True)
+    monkeypatch.setattr(session, "_blocked_reason", lambda: next(pages))
+    monkeypatch.setattr(session, "_robot_check", lambda: False)
+    session.page = type("Page", (), {"url": "https://login.example.org/", "bring_to_front": lambda self: None})()
+    monkeypatch.setattr(fb.time, "sleep", lambda s: None)
+    assert session.wait_if_blocked() is True
+    assert calls == ["normal", "maximized", "minimized"]          # forward for the login, then back
+    assert ff.Settings().browser_minimized is True

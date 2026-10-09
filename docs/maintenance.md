@@ -6,7 +6,7 @@
 2. **PDFs** for the items still without one (`fetch-fulltext`, the normal steps; the browser step stays a button in the progress window).
 3. **Metadata again** for the items no registry knew that now have a PDF: a DOI printed on it, or Gemini's reading of its first pages, is a source now.
 
-The search index and the passage labels follow at the next index update.
+The search index and the passage labels follow at the next index update. Papers not yet in the [citation graph](citations.md) are added at the end (a large first run continues in the background after two minutes).
 
 ```powershell
 py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2
@@ -28,8 +28,9 @@ py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2 --no-fetch  # metadata onl
 | **Check metadata only** | metadata, no PDF downloads | When you want no new PDFs |
 | **Fetch PDF only** | PDFs, no metadata changes | Quick, when the metadata is fine |
 | **Check PDF (browser only)** | only the browser step, starting with the links an earlier run could not download | Papers an earlier run did not find |
+| **Merge certain duplicates** (Tools menu) | Zotero's own merge for papers that are certainly the same | See below |
 
-Each works on the selected papers (item menu) or a whole collection (collection menu). To add all four at once: Zotero → Settings → Actions & Tags → Import, and choose `zotero-actions/zotero-mcp-actions.yml` (importing it again later updates them). For the order above, set "Sort menu by" to Name in the same settings. The separate scripts are in `zotero-actions/` too. They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`.
+The first four work on the selected papers (item menu) or a whole collection (collection menu). To add them all at once: Zotero → Settings → Actions & Tags → Import, and choose `zotero-actions/zotero-mcp-actions.yml` (importing it again later updates them). For the order above, set "Sort menu by" to Name in the same settings. The separate scripts are in `zotero-actions/` too. They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`.
 
 ## New papers, automatically
 
@@ -54,6 +55,16 @@ Select papers (or a whole collection, or all of My Library) and run **Check & co
 If every paper you chose is unchanged, a small window says when it was last checked, with **Check again** and **Cancel**. Otherwise the progress window opens; unchanged papers show "Unchanged, checked <date>", the button **Check all unchanged anyway** checks them all, and right-clicking a paper (**Check anyway**), or a selection of several (**Check these N unchanged anyway**), checks only those. In a terminal, `zotero-mcp maintain --all` checks every paper fully.
 
 **At Claude Desktop's start instead** (older option, without the import action): with `"maintenance": {"new_items": true}` in config.json, every start first maintains the items added since the last start, then updates the index. Add `"fetch": false` for metadata only.
+
+## Duplicates
+
+**Tools → Merge certain duplicates** merges papers that are in My Library more than once and certainly the same work: the same DOI (or, for books, the same ISBN), the same item type, and titles that agree (a missing subtitle is fine). It first shows what it will merge, with **Merge** and **Cancel**.
+
+- It uses Zotero's own merge, as the "Merge items" button does: PDFs, notes, tags and collections move to the copy that stays, the others go to the trash (recoverable), and Word documents citing a merged copy keep working.
+- The copy that stays is the one zotero-mcp already checked, else the oldest. Its empty fields are filled from the other copies, and the merged papers then get Check & complete (minimised), which settles fields where the copies disagreed.
+- Papers with the same DOI but another type or a different title (a book and its chapter, an article and its erratum) are not merged; they get the tag `duplicate/check`.
+
+Duplicates without a DOI or ISBN are left to Zotero's own "Duplicate Items" view.
 
 ## The attached PDF
 

@@ -174,7 +174,14 @@ def check(info: ff.ItemInfo, data: dict, pdfs: list[dict], reading: Callable[[],
         detail = f"its first pages show \"{found_title[:90]}\"" if found_title else f"its first pages show DOI {found_doi}"
         return Problem("another work", first["key"], first["path"], detail, found_title, found_doi, other_item)
 
-    pdf = matching[0]
+    # Several PDFs of the item (a merged duplicate, a manuscript beside the published version):
+    # fine as soon as one of them is.
+    problems = [_form_problem(info, data, pdf) for pdf in matching]
+    return None if any(p is None for p in problems) else problems[0]
+
+
+def _form_problem(info: ff.ItemInfo, data: dict, pdf: dict) -> Problem | None:
+    """The item's own PDF in another form (whole book, proof, manuscript, preprint), or None."""
     text = _NOT_A_STATEMENT_RE.sub(" ", pdf["text"][:12000])
     if info.item_type == "bookSection":
         return _whole_book(info, data, pdf)

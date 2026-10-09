@@ -118,6 +118,7 @@ All add tools take a `collections` parameter accepting collection keys, names, o
 - `zotero_fetch_fulltext_status`: Progress or result of a `zotero_fetch_fulltext` run still going in the background
 - `zotero_metadata_audit`: Check up to 15 items against Crossref/DataCite, Open Library, OpenAlex, PubMed and the item's PDF; fill empty fields and correct those two sources agree on (`apply=true`), propose the rest — see [Checking and fixing metadata](metadata-audit.md)
 - `zotero_metadata_review`: List, accept or reject the metadata proposals waiting in the review list
+- `zotero_citations`: The library's citation graph (OpenAlex reference lists, stored): what a paper cites, which papers in the library cite it, papers sharing its references, and a collection's most-cited papers and gaps — see [The citation graph](citations.md)
 - `zotero_attach_file`: Attach a local file or a PDF URL to an existing item by key (no new item created; returns the attachment key; idempotent per filename and content hash)
 - `zotero_set_item_parent`: Set, change, or clear an item's parent (`parent_key=null` makes it top-level)
 - `zotero_create_collection`: Create a new collection (folder/project) in your library
