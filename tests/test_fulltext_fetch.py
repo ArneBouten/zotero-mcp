@@ -708,3 +708,14 @@ def test_recheck_moves_a_wrong_pdf_found_by_title_to_the_trash(tmp_path):
     assert totals == {"checked": 1, "wrong": 1, "gone": 0}          # only the copy found by title
     assert writer.trashed == [("TITLE001", "ATTWRONG")]
     assert ff._load_state()["TITLE001"]["rejected_urls"] == ["https://school.org/x.pdf"]
+
+
+def test_a_scans_misread_title_still_counts():
+    item = _title_item(itemType="thesis", DOI="", date="1985",
+                       title="Control of level of challenge and its effect on task persistence: "
+                             "A study of Csikszentmihalyi's concept of flow",
+                       creators=[{"creatorType": "author", "lastName": "Kidd"}])
+    scan = (",$ontnol of Level of challenge and Its Effect On Task Pensistence; A Study of csikszentmihalyi's "
+            "concept of Flow by Karen Denise Kidd Thesis submitted to the Faculty ... " * 4)
+    assert ff.title_near_top(item.title, scan)
+    assert not ff.title_near_top(item.title, "Mastery motivation among students of the department of history " * 20)

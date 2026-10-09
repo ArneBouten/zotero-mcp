@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.57] - 2026-10-09
+
+### Fixed
+
+- A scanned thesis whose OCR misreads letters of its title ("Pensistence") counted as another work in `fetch-fulltext --recheck`. A title nearly letter for letter at the top (90 %) now counts too.
+
 ## [0.13.2+arne.56] - 2026-10-09
 
 ### Fixed

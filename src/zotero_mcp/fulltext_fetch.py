@@ -371,6 +371,16 @@ def title_near_top(title: str, text: str, limit: int = 6000) -> bool:
     for phrase in phrases:
         if phrase and (f" {phrase} " in f" {hay} " or phrase.replace(" ", "") in hay_nospace):
             return True
+    # A scan's OCR misreads letters ("Pensistence", "$ontnol"): the title nearly letter for letter.
+    words = hay.split()
+    for phrase in phrases:
+        n = len(phrase.split())
+        if n < 4:
+            continue
+        for i in range(0, max(1, len(words) - n + 1)):
+            window = " ".join(words[i:i + n])
+            if difflib.SequenceMatcher(None, phrase, window, autojunk=False).ratio() >= 0.9:
+                return True
     return False
 
 
