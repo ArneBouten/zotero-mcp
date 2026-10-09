@@ -171,6 +171,8 @@ class Progress:
         """The short line under the title: what is running and how far, or "Done"."""
         if self.stages and not self.main_done and self.stage_index >= 0:
             done, total = self._stage_progress()
+            if self.stages[self.stage_index] == "Search index":
+                return "Updating the search index…"
             what = "Checking metadata" if self._stage_is_metadata() else "Fetching PDFs"
             return f"{what} · {done} of {total}"
         finished, total = self._fetch_progress()
@@ -417,12 +419,14 @@ def _style(root, ttk) -> dict:
 
 
 def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mode: str = "fetch",
-               fetch: Callable[..., object] | None = None) -> None:
+               fetch: Callable[..., object] | None = None, quiet: bool = False) -> None:
     """Run in a background thread and show the progress until the window is closed.
 
     ``mode``: "fetch" (``fulltext_fetch.run``), "maintain" (metadata, PDFs, metadata
     again: ``maintenance.run``) or "metadata" (``maintenance.run`` without fetching).
-    ``fetch`` is what the browser button runs (``fulltext_fetch.run``).
+    ``fetch`` is what the browser button runs (``fulltext_fetch.run``). ``quiet`` (the import
+    trigger): the window starts minimised, comes forward at the end only when something is left
+    for the user, and otherwise closes by itself.
     """
     import tkinter as tk
     from tkinter import messagebox, ttk
@@ -444,7 +448,7 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
     with_pdfs = mode != "metadata"
     with_meta = mode != "fetch"
 
-    prog = Progress(maintenance.stages(mode == "maintain") if with_meta else None)
+    prog = Progress(maintenance.stages(mode == "maintain", bool(run_kwargs.get("index"))) if with_meta else None)
     events: queue.Queue = queue.Queue()
     main_uses_browser = mode == "fetch" and "browser" in (run_kwargs.get("steps") or [])
     dry_run = bool(run_kwargs.get("dry_run", not run_kwargs.get("apply", True)))
@@ -708,6 +712,9 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
         except queue.Empty:
             pass
         refresh()
+        if finished_now and quiet and not prog.todo():
+            root.after(5000, root.destroy)     # nothing for the user: done without a word
+            finished_now = False
         if finished_now:
             # The end: bring the window forward with the summary and the buttons.
             root.deiconify()
@@ -717,6 +724,8 @@ def run_window(run_kwargs: dict, run: Callable[..., object] | None = None, *, mo
             root.bell()
         root.after(200, poll)
 
+    if quiet:
+        root.iconify()
     start(run, dict(run_kwargs), main_uses_browser, main=True)
     root.after(200, poll)
     root.mainloop()

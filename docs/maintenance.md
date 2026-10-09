@@ -31,13 +31,19 @@ py -3.12 -m zotero_mcp.cli maintain --items KEY1,KEY2 --no-fetch  # metadata onl
 
 Each works on the selected papers (item menu) or a whole collection (collection menu). To add all four at once: Zotero → Settings → Actions & Tags → Import, and choose `zotero-actions/zotero-mcp-actions.yml` (importing it again later updates them). For the order above, set "Sort menu by" to Name in the same settings. The separate scripts are in `zotero-actions/` too. They start `~/.config/zotero-mcp/zotero-maintain.ps1` or `zotero-fetch.ps1`.
 
-**Automatically for new items:** with
+## New papers, automatically
 
-```json
-"maintenance": {"new_items": true}
-```
+The action **Check & complete new papers** (in `zotero-mcp-actions.yml`, event "Create Item", no menu entry) runs when papers are added to My Library: by the Zotero Connector, an import, "Add by identifier", or sync from another computer. Claude Desktop does not have to be open.
 
-in config.json, every start of Claude Desktop first maintains the items added since the last start, then updates the index. The first start only remembers the time. Add `"fetch": false` for metadata only.
+1. It waits until no paper has been added for a minute (the Connector attaches the page's PDF a little after the item), and checks the papers added together in one run.
+2. Metadata, then a PDF if Zotero did not attach one (a PDF that Zotero attaches while the search runs is kept, no second copy), then the metadata again.
+3. Then the search index is updated for the new papers, with their passage labels, as at Claude Desktop's start. The index's update lock keeps it from running at the same time as Claude Desktop's own update (then the next start catches up), and a running Claude Desktop sees the new passages at its next search.
+
+The window stays minimised in the taskbar. It comes forward at the end only when something is left for you (a bot check, changes to review, another paper attached); otherwise it closes by itself. To stop it, disable the action in Actions & Tags.
+
+`maintain --index` adds the index update to a run in a terminal; `--quiet` (with `--window`) is the minimised window.
+
+**At Claude Desktop's start instead** (older option, without the import action): with `"maintenance": {"new_items": true}` in config.json, every start first maintains the items added since the last start, then updates the index. Add `"fetch": false` for metadata only.
 
 ## The attached PDF
 

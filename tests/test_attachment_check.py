@@ -360,3 +360,38 @@ def test_the_window_counts_the_right_paper_in_another_form_apart_from_wrong_pdfs
     assert p.chips() == [("ChipWarn", "⚠ 1 wrong PDF"), ("ChipNeutral", "◐ 1 other form")]
     assert p.meta_text("A") == "◐ Accepted manuscript" and p.tone("A") == "ok"
     assert [t[1].split("  ")[0] for t in p.todo()] == ["⚠ 1 with another paper attached"]
+
+
+def test_maintenance_can_update_the_search_index_last(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from zotero_mcp import maintenance
+    from zotero_mcp.fulltext_window import Progress
+
+    monkeypatch.setattr(maintenance, "_state_path", lambda: tmp_path / "maintenance.json")
+    order, events = [], []
+
+    def audit_run(keys=None, **kw):
+        order.append("audit")
+        return SimpleNamespace(audits=[SimpleNamespace(key=k, flags=[]) for k in keys], totals=lambda: {})
+
+    def fetch_run(keys=None, **kw):
+        order.append("fetch")
+        return SimpleNamespace(results=[])
+
+    def index_run(log=None):
+        order.append("index")
+        return True
+
+    out = maintenance.run(keys=["A"], index=True, backend=object(), audit_run=audit_run, fetch_run=fetch_run,
+                          index_run=index_run, progress=events.append, log=lambda m: None)
+    assert order == ["audit", "fetch", "index"] and out["indexed"] is True
+    assert [e["detail"] for e in events if e["status"] == "stage"][-1] == "Search index"
+    p = Progress(maintenance.stages(True, True))
+    p.active_runs = 1
+    p.apply({"key": "", "status": "stage", "detail": "Search index", "index": 3})
+    assert p.headline() == "Updating the search index…"
+    order.clear()
+    maintenance.run(keys=["A"], index=True, apply=False, backend=object(), audit_run=audit_run,
+                    fetch_run=fetch_run, index_run=index_run, log=lambda m: None)
+    assert "index" not in order                  # a report-only run changes nothing, the index neither

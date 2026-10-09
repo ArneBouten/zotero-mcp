@@ -1626,6 +1626,20 @@ def mark_bad_pdf(item_key: str, attachment_key: str, problem: str, want_publishe
         _save_state(state)
 
 
+def _pdf_arrived(item_key: str, backend, bad: dict) -> bool:
+    """Whether the item has a PDF or EPUB now (other than one marked wrong)."""
+    try:
+        if backend is None:
+            from zotero_mcp import library as _library
+
+            backend = _library.get_library_backend()
+        children = (backend.get_children([item_key]) or {}).get(item_key, [])
+    except Exception:
+        return False
+    wrong = set(bad.get("attachments") or [])
+    return _has_file([c for c in children if (c.get("key") or c.get("data", {}).get("key")) not in wrong])
+
+
 def remember_blocked(item_key: str, cands: list) -> None:
     """Links that refused a plain download, for a later browser run (the progress window's button)."""
     unique = list({c.url: c for c in cands or []}.values())[:8]
@@ -1817,6 +1831,10 @@ def run(
                     res.status, res.saved_to = "found", dest
                 elif dry_run:
                     res.status = "found"
+                elif _pdf_arrived(item.key, backend, bad):
+                    # Zotero attached one meanwhile (the Connector saves the page's PDF a little after
+                    # the item): no second copy.
+                    res.status = "skipped"
                 else:
                     # A folder per paper: papers searched at once may share a file name.
                     os.makedirs(os.path.join(workdir, item.key), exist_ok=True)
@@ -1838,11 +1856,16 @@ def run(
                     if replaced:
                         lines.append(f"  replaced the wrong PDF ({bad.get('problem', '')}); it is in Zotero's trash")
                     res.status = "attached"
-                res.reason = ""
-                lines.append(f"  -> {res.status}: {cand.source} at {_host_of(cand.url)}, {label}"
-                             + (f" -> {res.saved_to}" if res.saved_to else ""))
-                notify({"key": item.key, "label": item.label, "status": res.status,
-                        "detail": f"{cand.source}, {label}"})
+                if res.status == "skipped":
+                    res.reason = "a PDF arrived meanwhile"
+                    lines.append("  -> skipped: Zotero attached a PDF meanwhile")
+                    notify({"key": item.key, "label": item.label, "status": "skipped", "detail": res.reason})
+                else:
+                    res.reason = ""
+                    lines.append(f"  -> {res.status}: {cand.source} at {_host_of(cand.url)}, {label}"
+                                 + (f" -> {res.saved_to}" if res.saved_to else ""))
+                    notify({"key": item.key, "label": item.label, "status": res.status,
+                            "detail": f"{cand.source}, {label}"})
             else:
                 res.status, res.reason = "not found", _not_found_reason(res.attempts)
                 blocked = (getattr(http, "blocked", None) or {}).get(item.key)

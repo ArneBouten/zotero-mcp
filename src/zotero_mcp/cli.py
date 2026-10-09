@@ -946,6 +946,12 @@ def main():
     maintain_parser.add_argument("--no-fetch", action="store_true", help="Metadata only, no PDF fetching")
     maintain_parser.add_argument("--window", action="store_true",
                                  help="Show a progress window (the steps, each paper's metadata and PDF)")
+    maintain_parser.add_argument("--quiet", action="store_true",
+                                 help="With --window: start it minimised; it comes forward at the end only when "
+                                      "something is left for you, else closes by itself (the import trigger)")
+    maintain_parser.add_argument("--index", action="store_true",
+                                 help="Then update the search index for new and changed items (as at Claude "
+                                      "Desktop's start; skipped while another update runs)")
 
     compare_parser = subparsers.add_parser(
         "compare-gemini",
@@ -1526,12 +1532,13 @@ def main():
             print("Choose what to maintain: --items, --collection, --new or --since YYYY-MM-DD.")
             sys.exit(1)
         kwargs = dict(keys=keys, collection=args.collection, new=args.new,
-                      since=f"{args.since}T00:00:00" if args.since else None, apply=not args.report_only)
+                      since=f"{args.since}T00:00:00" if args.since else None, apply=not args.report_only,
+                      index=args.index)
         if args.window:
             try:
                 from zotero_mcp import fulltext_window
 
-                fulltext_window.run_window(kwargs, mode="metadata" if args.no_fetch else "maintain")
+                fulltext_window.run_window(kwargs, mode="metadata" if args.no_fetch else "maintain", quiet=args.quiet)
                 return
             except ImportError as e:
                 print(f"No progress window ({e}); showing the progress here instead.")

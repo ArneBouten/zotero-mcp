@@ -11,6 +11,8 @@
 
 The search index and the passage labels follow at the next index update.
 
+``index=True`` adds the search index's incremental update as a last step (the import trigger).
+
 ``fetch=False`` keeps it to step 1 (metadata only: no PDFs downloaded, wrong PDFs
 are tagged but not replaced).
 
@@ -87,13 +89,38 @@ def config_fetch(config_path: str | Path | None = None) -> bool:
     return _config(config_path).get("fetch", True) is not False
 
 
-def stages(fetch: bool) -> list[str]:
-    return ["Metadata", "PDFs", "Metadata again"] if fetch else ["Metadata"]
+INDEX_STAGE = "Search index"
+
+
+def stages(fetch: bool, index: bool = False) -> list[str]:
+    return (["Metadata", "PDFs", "Metadata again"] if fetch else ["Metadata"]) + ([INDEX_STAGE] if index else [])
+
+
+def update_index(log: Callable[[str], None] = print) -> bool:
+    """The search index's incremental update (new and changed items, then their passage labels),
+    in its own process at low priority, as at Claude Desktop's start. It takes the index's update
+    lock, so it waits for nobody and skips when another update (Claude Desktop's) is running."""
+    import subprocess
+    import sys
+
+    kwargs: dict = {"stdin": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                                   | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000))
+    try:
+        done = subprocess.run([sys.executable, "-m", "zotero_mcp.background_update"], timeout=3600, **kwargs)
+    except Exception as e:
+        log(f"The search index could not be updated: {type(e).__name__}: {e}")
+        return False
+    log("Search index updated." if done.returncode == 0 else
+        f"The search index update ended with code {done.returncode}; the next start of Claude Desktop catches up.")
+    return done.returncode == 0
 
 
 def run(*, keys: list[str] | None = None, collection: str | None = None, new: bool = False, since: str | None = None,
-        apply: bool = True, fetch: bool = True, log: Callable[[str], None] = print,
-        progress: Callable[[dict], None] | None = None, backend=None, audit_run=None, fetch_run=None) -> dict:
+        apply: bool = True, fetch: bool = True, index: bool = False, log: Callable[[str], None] = print,
+        progress: Callable[[dict], None] | None = None, backend=None, audit_run=None, fetch_run=None,
+        index_run: Callable[..., bool] | None = None) -> dict:
     """Audit, fetch, audit again. Returns a summary. ``progress`` receives the audit's and the
     fetcher's events and {"status": "stage", "detail": name, "index": i} at each step."""
     from zotero_mcp import fulltext_fetch as ff
@@ -106,7 +133,7 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
     audit_run = audit_run or ma.run
     fetch_run = fetch_run or ff.run
     notify = progress or (lambda event: None)
-    names = stages(fetch)
+    names = stages(fetch, index)
     n = len(names)
 
     def stage(i: int) -> None:
@@ -145,7 +172,7 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
 
     attached: set[str] = set()
     if fetch and keys:
-        log("2/3 Full text for the items without a PDF ...")
+        log(f"2/{n} Full text for the items without a PDF ...")
         stage(1)
         fetched = fetch_run(keys=keys, log=log, dry_run=not apply, progress=progress)
         attached = {r.key for r in getattr(fetched, "results", []) if r.status == "attached"}
@@ -155,13 +182,17 @@ def run(*, keys: list[str] | None = None, collection: str | None = None, new: bo
         again = [k for k in unknown if k in attached]
         stage(2)
         if again:
-            log(f"3/3 Metadata again for {len(again)} item(s) no registry knew, now with their PDF ...")
+            log(f"3/{n} Metadata again for {len(again)} item(s) no registry knew, now with their PDF ...")
             report2 = audit_run(keys=again, apply=apply, log=log, progress=progress)
             summary["audit_again"] = report2.totals() if hasattr(report2, "totals") else {}
             if getattr(report2, "report_path", ""):
                 notify({"key": "", "status": "done", "detail": report2.report_path})
         else:
-            log("3/3 Nothing to check again.")
+            log(f"3/{n} Nothing to check again.")
+    if index and apply:
+        log(f"{n}/{n} Search index ...")
+        stage(n - 1)
+        summary["indexed"] = (index_run or update_index)(log=log)
     if new or since:
         state["last_new_items"] = now
         _save(state)

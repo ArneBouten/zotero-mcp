@@ -595,3 +595,28 @@ def test_the_window_offers_papers_behind_a_bot_check_to_the_users_own_browser():
     assert p.for_own_browser() == [] and p.fraction() == 0.5
     p.apply({"key": "A", "label": "A", "status": "attached", "detail": "from your download"})
     assert p.summary() == "Done: 1 attached, 1 not found."
+
+
+def test_no_second_pdf_when_zotero_attached_one_meanwhile(tmp_path, monkeypatch):
+    good = good_pdf(tmp_path)
+
+    class Late(FakeBackend):
+        calls = 0
+
+        def get_children(self, keys, item_type=None):
+            Late.calls += 1
+            if Late.calls == 1:
+                return {k: [] for k in keys}        # at selection: no PDF yet
+            return {k: [{"data": {"itemType": "attachment", "contentType": "application/pdf",
+                                  "linkMode": "imported_file"}}] for k in keys}
+
+    def source(item, http_, settings, budget):
+        yield ff.Candidate("https://repo.org/x.pdf", "Unpaywall (repository)", "published", by_identifier=True)
+
+    monkeypatch.setattr(ff, "SOURCES", {"open-access": [source]})
+    writer = FakeWriter()
+    report = ff.run(keys=["ABCD1234"], steps=["open-access"], log=lambda m: None, settings=ff.Settings(host_delay=0),
+                    http=FakeHttp({"https://repo.org/x.pdf": (200, "application/pdf", good)}),
+                    writer_factory=lambda: writer, backend=Late({"ABCD1234": ITEM}, {}), workers=1)
+    assert [(r.status, r.reason) for r in report.results] == [("skipped", "a PDF arrived meanwhile")]
+    assert writer.attached == []

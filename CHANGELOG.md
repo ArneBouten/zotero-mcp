@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.40] - 2026-10-09
+
+### Added
+
+- **New papers are checked when they are added**, without Claude: the Actions & Tags action "Check & complete new papers" (event Create Item) waits until no paper has been added for a minute, then checks the metadata, fetches a PDF if Zotero did not attach one, checks again, and updates the search index with passage labels. Papers added together share one run; the window stays minimised unless something is left for you.
+- `maintain --index` (the index update as a last step, under the index's update lock) and `--quiet` (the minimised window that closes itself when nothing is left).
+
+### Fixed
+
+- No second PDF when Zotero attaches one while the fetcher is still searching (the Connector saves the page's PDF a little after the item).
+
 ## [0.13.2+arne.39] - 2026-10-09
 
 ### Changed
