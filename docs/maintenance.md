@@ -41,16 +41,19 @@ in config.json, every start of Claude Desktop first maintains the items added si
 
 ## The attached PDF
 
-For every item with a PDF, the first pages are compared with the item (free; Gemini only reads a PDF when the rules find neither the item's DOI nor its title there):
+For every item with a PDF, the first pages are compared with the item (free; Gemini only reads a PDF when the rules find neither the item's DOI nor its title there). Two kinds of findings:
 
-| Problem | Found by | With `--apply` |
-|---|---|---|
-| **Another work** | the item's DOI and title are not on the first pages; another DOI is, or Gemini reads another title | If the PDF belongs to another item in the library that has no PDF, it is moved there. Otherwise the right PDF is searched for; once found and checked it replaces the wrong one, which goes to Zotero's trash. |
-| **Accepted manuscript or preprint** of a published article | the PDF says so | Replaced by the published version once that is found; until then it stays. |
-| **Proof** | page numbers "000-000", "uncorrected proof", volume "XX" | As a manuscript. |
-| **Whole book** attached to a chapter | far more pages than the chapter's page range | The chapter's pages are cut out (by the book's printed page numbers) and attached as the chapter's own PDF; the book stays. |
+**Wrong PDF: another paper.** The item's DOI and title are not on the first pages; another DOI is, or Gemini reads another title. If the PDF belongs to another item in the library that has no PDF, it is moved there. Otherwise the item gets the tag `fulltext/check-pdf` and a note, and the right PDF is searched for; once found and checked it replaces the wrong one, which goes to Zotero's trash.
 
-Such items get the tag `fulltext/check-pdf` and a note saying what was found, until the problem is solved. When one of an item's PDFs matches it, its other PDFs (supplements) are not questioned. A scan without text is left alone. `metadata-audit --no-attachments` skips the check.
+**The right paper in another form.** Nothing to check, so no note and no warning, only a tag:
+
+| Form | Found by | Tag | What happens |
+|---|---|---|---|
+| Accepted manuscript or preprint of a published article | the PDF says so outright ("This is an Accepted Manuscript of ...") | `fulltext/accepted-manuscript`, `fulltext/preprint` | A fetch swaps in the published version when it finds it. |
+| Proof | page numbers "000-000", "uncorrected proof", volume "XX" | `fulltext/proof` | As a manuscript. |
+| Whole book attached to a chapter | far more pages than the chapter's page range | `fulltext/whole-book` if the chapter cannot be cut out | The chapter's pages are cut out (by the book's printed page numbers) and attached as the chapter's own PDF; the book stays. |
+
+A publisher's cover page ("To cite this article", "Journal homepage") counts as the published version, also when its licence text mentions "the Accepted Manuscript". When one of an item's PDFs matches it, its other PDFs (supplements) are not questioned. A scan without text is left alone. An earlier finding that no longer holds is cleared, with a note. `metadata-audit --no-attachments` skips the check.
 
 ## Saved web pages
 

@@ -1822,7 +1822,8 @@ class AuditReport:
 
     def totals(self) -> dict[str, int]:
         t = {"items": len(self.audits), "filled": 0, "corrected": 0, "proposals": 0, "items_to_review": 0,
-             "flags": 0, "no_source": 0, "errors": 0, "retracted": 0, "not_checked": 0, "attachments": 0}
+             "flags": 0, "no_source": 0, "errors": 0, "retracted": 0, "not_checked": 0, "attachments": 0,
+             "other_versions": 0}
         for a in self.audits:
             t["filled"] += len(a.by_kind("fill"))
             t["corrected"] += len(a.by_kind("correct"))
@@ -1831,7 +1832,8 @@ class AuditReport:
             t["flags"] += len(a.flags)
             t["no_source"] += any("no registry record" in f for f in a.flags)
             t["not_checked"] += any(f.startswith(NOT_CHECKED) for f in a.flags)
-            t["attachments"] += a.attachment is not None
+            t["attachments"] += a.attachment is not None and a.attachment.wrong
+            t["other_versions"] += a.attachment is not None and not a.attachment.wrong
             t["errors"] += bool(a.error)
             t["retracted"] += a.retracted
         return t
@@ -1848,7 +1850,8 @@ class AuditReport:
             pass
         changed = [a for a in self.audits if a.by_kind("fill") or a.by_kind("correct")]
         review = [a for a in self.audits if a.by_kind("propose")]
-        wrong = [a for a in self.audits if a.attachment is not None]
+        wrong = [a for a in self.audits if a.attachment is not None and a.attachment.wrong]
+        older = [a for a in self.audits if a.attachment is not None and not a.attachment.wrong]
         not_checked = [a for a in self.audits if any(f.startswith(NOT_CHECKED) for f in a.flags)]
         unknown = [a for a in self.audits if any("no registry record" in f for f in a.flags)]
         errors = [a for a in self.audits if a.error]
@@ -1877,6 +1880,8 @@ class AuditReport:
             (f"For you to review: {n(t['proposals'], 'suggested change')} on {n(len(review), 'paper')} "
              f"(saved search \"{SAVED_SEARCH}\")" if review else ""),
             (f"Wrong PDFs: {len(wrong)} (tag {ff.TAG_CHECK_PDF})" if wrong else ""),
+            (f"Right paper, other form: {len(older)} (accepted manuscript, preprint, proof or the whole book; "
+             "tagged, nothing to check)" if older else ""),
             (f"Retracted: {t['retracted']} (tag {TAG_RETRACTED})" if t["retracted"] else ""),
             (f"Not checked: {len(not_checked)}, because a registry did not answer; run again later"
              if not_checked else ""),
@@ -1920,6 +1925,12 @@ class AuditReport:
                 lines.append(f"- {a.label} [{a.key}]: {what}{extra}"
                              + (f", which belongs to item {p.other_item}" if p.other_item else ""))
             lines += more(rest) + [""]
+        if older:
+            lines += [f"## Right paper, other form ({len(older)})", ""]
+            shown, rest = cut(older)
+            for a in shown:
+                lines.append(f"- {a.label} [{a.key}]: {_PDF_PROBLEM.get(a.attachment.kind, a.attachment.kind)}")
+            lines += more(rest) + [""]
         for title, group, why in ((f"Not checked ({len(not_checked)})", not_checked, None),
                                   (f"Unknown to every registry ({len(unknown)})", unknown, None),
                                   (f"Errors ({len(errors)})", errors, "error")):
@@ -1961,9 +1972,9 @@ class AuditReport:
             lines += ["", f"Full report: {self.report_path}"]
         return "\n".join(lines).rstrip() + "\n"
 
-_PDF_PROBLEM = {"another work": "the PDF is another paper", "manuscript": "the PDF is the accepted manuscript",
-                "preprint": "the PDF is a preprint", "proof": "the PDF is a proof",
-                "whole book": "the whole book is attached"}
+_PDF_PROBLEM = {"another work": "the PDF is another paper", "manuscript": "accepted manuscript",
+                "preprint": "preprint", "proof": "proof (page numbers not final)",
+                "whole book": "the whole book (the chapter is in it)"}
 
 
 def audit_event(audit: ItemAudit, applied: bool) -> dict:
@@ -1981,6 +1992,7 @@ def audit_event(audit: ItemAudit, applied: bool) -> dict:
         parts.append(f"{props} to review")
     if audit.attachment is not None:
         parts.append(_PDF_PROBLEM.get(getattr(audit.attachment, "kind", ""), "the PDF needs a check"))
+    wrong_pdf = audit.attachment is not None and getattr(audit.attachment, "wrong", True)
     if audit.retracted:
         parts.append("retracted")
     if no_record and not (fills or fixes or props):
@@ -1991,7 +2003,7 @@ def audit_event(audit: ItemAudit, applied: bool) -> dict:
         status, parts = "not checked", ["not checked: a registry did not answer"]
     elif audit.retracted:
         status = "retracted"
-    elif audit.attachment is not None:
+    elif wrong_pdf:
         status = "wrong pdf"
     elif props:
         status = "review"
@@ -1999,6 +2011,8 @@ def audit_event(audit: ItemAudit, applied: bool) -> dict:
         status = "updated"
     elif no_record:
         status = "no record"
+    elif audit.attachment is not None:
+        status = "other version"        # the right paper in another form (manuscript, proof, whole book)
     else:
         status, parts = "ok", ["OK"]
     return {"key": audit.key, "label": audit.label, "phase": "metadata", "status": status,
@@ -2153,6 +2167,10 @@ def _today() -> str:
     return _dt.date.today().strftime("%d-%m-%Y")
 
 
+#: A right paper, but not the published version: a tag, no warning.
+_VERSION_TAG = {"manuscript": ff.VERSION_TAGS["accepted"], "preprint": ff.VERSION_TAGS["preprint"],
+                "proof": ff.TAG_PROOF}
+
 _PROBLEM_NOTE = {
     "another work": "another paper is attached",
     "manuscript": "this is the accepted manuscript, not the published version",
@@ -2168,6 +2186,19 @@ def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
     from zotero_mcp import attachment_check
 
     problem = audit.attachment
+    if problem.kind in _VERSION_TAG:
+        # The right paper in an earlier version: tagged (no note, nothing to check); a fetch quietly
+        # looks for the published version and swaps it in when found.
+        tag = _VERSION_TAG[problem.kind]
+        try:
+            remove = [ff.TAG_CHECK_PDF] if ff.TAG_CHECK_PDF in audit.tags else []
+            if tag not in audit.tags or remove:
+                writer.apply(audit, [], tags_add=[tag], tags_remove=remove)
+            ff.mark_bad_pdf(audit.key, problem.attachment_key, problem.kind, want_published=True)
+        except Exception as e:
+            log(f"    -> could not tag the attachment: {type(e).__name__}: {e}")
+            return False
+        return True
     if ff.TAG_CHECK_PDF in audit.tags and problem.kind != "whole book":
         return True     # noted in an earlier run: only look for the right PDF again
     seen = f" ({problem.detail})" if problem.kind in ("another work", "whole book") else ""
@@ -2187,28 +2218,28 @@ def _fix_attachment(writer, audit: ItemAudit, log: Callable[[str], None],
                 note.append("<p>'Check & complete' or 'Fetch PDF only' looks for the right one; once found, it "
                             "replaces this PDF (which goes to Zotero's trash).</p>")
             fetch = True
-        elif problem.kind in ("manuscript", "preprint", "proof"):
-            ff.mark_bad_pdf(audit.key, problem.attachment_key, problem.kind, want_published=True)
-            note.append("<p>'Check & complete' or 'Fetch PDF only' looks for the published version; once found, "
-                        "it replaces this PDF (which goes to Zotero's trash). Until then this one stays.</p>")
-            fetch = True
         elif problem.kind == "whole book":
+            # The right content, with the rest of the book around it: the chapter is cut out when
+            # its printed pages can be found; otherwise the item is only tagged.
             import tempfile
 
             ff.clear_bad_pdf(audit.key)     # an earlier run may have taken the book for another work
-
+            if ff.TAG_WHOLE_BOOK in audit.tags:
+                return False                # tried before
             folder = tempfile.mkdtemp(prefix="zmcp-chapter-")
             out = os.path.join(folder, "chapter.pdf")
             span = attachment_check.extract_chapter(problem.path, writer.item_pages(audit.key), out)
+            remove = [ff.TAG_CHECK_PDF] if ff.TAG_CHECK_PDF in audit.tags else []
             if span:
                 writer.attach_file(audit.key, out, f"Chapter PDF (from the book, PDF pages {span[0]}-{span[1]})")
-                note.append(f"<p>The chapter (PDF pages {span[0]}-{span[1]} of the book) was cut out and "
-                            "attached as its own PDF; the book stays attached.</p>")
-                writer.apply(audit, [], tags_add=[], tags_remove=[ff.TAG_CHECK_PDF])
-                writer.add_note(audit.key, "".join(note))
+                writer.apply(audit, [], tags_add=[], tags_remove=remove)
+                writer.add_note(audit.key, f"<p>Chapter cut out of the attached book ({_today()}): PDF pages "
+                                           f"{span[0]}-{span[1]}, attached as its own PDF. The book stays.</p>")
                 log(f"    -> attached the chapter cut from the book (PDF pages {span[0]}-{span[1]})")
-                return False
-            note.append("<p>The chapter's pages could not be found in the book by their printed numbers.</p>")
+            else:
+                writer.apply(audit, [], tags_add=[ff.TAG_WHOLE_BOOK], tags_remove=remove)
+                log("    -> the whole book is attached; the chapter's pages were not found in it")
+            return False
         writer.apply(audit, [], tags_add=[ff.TAG_CHECK_PDF])
         writer.add_note(audit.key, "".join(note))
         log(f"    -> {problem.describe()}")

@@ -114,11 +114,17 @@ def test_fixes_move_a_stray_pdf_to_its_own_item_or_mark_it_for_replacement():
     assert ma._fix_attachment(w, audit, lambda m: None, pdfs=lambda key: [pdf(OTHER)]) is True
     assert not [c for c in w.calls if c[0] == "move"]
     assert ff.bad_pdf("EDP8CXSW") == {"attachments": ["ATT1"], "problem": "another work", "want_published": False}
-    # A manuscript waits for the published version; an earlier run's tag means no second note.
+    # A manuscript is the right paper: only a version tag (an earlier run's check-pdf tag goes), no note;
+    # a fetch swaps in the published version when it finds it.
     audit.attachment = ac.Problem("manuscript", "ATT2", "/m.pdf", "it says ...")
     audit.tags = {ff.TAG_CHECK_PDF}
     w = Writer()
-    assert ma._fix_attachment(w, audit, lambda m: None) is True and w.calls == []
+    assert ma._fix_attachment(w, audit, lambda m: None) is True
+    assert w.calls == [("tags", "EDP8CXSW", ["fulltext/accepted-manuscript"], [ff.TAG_CHECK_PDF])]
+    assert ff.bad_pdf("EDP8CXSW")["want_published"] is True
+    audit.tags = {"fulltext/accepted-manuscript"}
+    w = Writer()
+    assert ma._fix_attachment(w, audit, lambda m: None) is True and w.calls == []     # tagged before
 
 
 def test_the_audit_reports_attachments_and_fetches_the_right_pdfs():
@@ -178,9 +184,12 @@ def test_audit_events_say_what_was_found_or_done():
     assert ma.audit_event(a, applied=False)["detail"] == "1 to fill, 1 to correct"
     a.changes.append(ma.Change("volume", "15", "16", "propose", ["OpenAlex"]))
     assert ma.audit_event(a, applied=True)["status"] == "review"
-    a.attachment = ac.Problem("manuscript", "ATT2", "/m.pdf", "it says ...")
+    a.attachment = ac.Problem("another work", "ATT2", "/m.pdf", "its first pages show ...")
     ev = ma.audit_event(a, applied=True)
-    assert ev["status"] == "wrong pdf" and ev["detail"].endswith("the PDF is the accepted manuscript")
+    assert ev["status"] == "wrong pdf" and ev["detail"].endswith("the PDF is another paper")
+    c = ma.ItemAudit("K3", "Y (2021)", "journalArticle", attachment=ac.Problem("manuscript", "A", "/p", "it says"))
+    assert (ma.audit_event(c, applied=True)["status"], ma.audit_event(c, applied=True)["detail"]) == \
+        ("other version", "accepted manuscript")
     b = ma.ItemAudit("K2", "X (2020)", "journalArticle", flags=["no registry record found"])
     assert ma.audit_event(b, applied=True) == {"key": "K2", "label": "X (2020)", "phase": "metadata",
                                                "status": "no record", "detail": "no registry knows it",
@@ -315,3 +324,39 @@ def test_publisher_pdfs_that_only_mention_a_manuscript_are_the_published_version
     assert ac.check(i, d, [pdf(tf_aam)]).kind == "manuscript"
     proof = OWN + "\nInternational Journal of Rehabilitation Research XXX: 000–000 Copyright © 2022 Wolters Kluwer"
     assert ac.check(i, d, [pdf(proof)]).kind == "proof"
+
+
+def test_a_whole_book_is_the_right_paper_the_chapter_is_cut_out_or_the_item_is_tagged(monkeypatch):
+    audit = ma.ItemAudit("427BV3EH", "Nakamura (2009)", "bookSection")
+    audit.attachment = ac.Problem("whole book", "BOOK1", "/book.pdf", "1033 pages for a chapter on pp. 195-206")
+    audit.tags = {ff.TAG_CHECK_PDF}             # an earlier run took the book for another work
+    ff.mark_bad_pdf("427BV3EH", "BOOK1", "another work", want_published=False)
+
+    class W(Writer):
+        def item_pages(self, key):
+            return "195-206"
+
+        def attach_file(self, key, path, title):
+            self.calls.append(("attach", key, title))
+
+    monkeypatch.setattr(ac, "extract_chapter", lambda book, pages, out: None)
+    w = W()
+    assert ma._fix_attachment(w, audit, lambda m: None) is False
+    assert w.calls == [("tags", "427BV3EH", [ff.TAG_WHOLE_BOOK], [ff.TAG_CHECK_PDF])]
+    assert ff.bad_pdf("427BV3EH") == {}         # the book is not replaced
+    monkeypatch.setattr(ac, "extract_chapter", lambda book, pages, out: (205, 216))
+    audit.tags = set()
+    w = W()
+    ma._fix_attachment(w, audit, lambda m: None)
+    assert [c[0] for c in w.calls] == ["attach", "tags", "note"] and "Chapter cut out" in w.calls[2][2]
+
+
+def test_the_window_counts_the_right_paper_in_another_form_apart_from_wrong_pdfs():
+    from zotero_mcp.fulltext_window import Progress
+
+    p = Progress(["Metadata"])
+    p.apply({"key": "A", "label": "A", "phase": "metadata", "status": "other version", "detail": "accepted manuscript"})
+    p.apply({"key": "B", "label": "B", "phase": "metadata", "status": "wrong pdf", "detail": "the PDF is another paper"})
+    assert p.chips() == [("ChipWarn", "⚠ 1 wrong PDF"), ("ChipNeutral", "◐ 1 other form")]
+    assert p.meta_text("A") == "◐ Accepted manuscript" and p.tone("A") == "ok"
+    assert [t[1].split("  ")[0] for t in p.todo()] == ["⚠ 1 with another paper attached"]

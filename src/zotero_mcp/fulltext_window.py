@@ -36,13 +36,13 @@ FINISHED = {"attached", "found", "not found", "error", "skipped", "needs your br
 
 META_TEXT = {"waiting": "Waiting", "checking": "Checking…"}
 META_ICON = {"ok": "✓", "updated": "✎", "review": "⚑", "wrong pdf": "⚠", "no record": "?", "not checked": "–",
-             "retracted": "⚠", "error": "✗", "pdf replaced": "✓"}
+             "retracted": "⚠", "error": "✗", "pdf replaced": "✓", "other version": "◐"}
 META_PENDING = {"waiting", "checking"}
 
 #: Row colour: the most pressing of the row's columns wins.
 _SEVERITY = {"bad": 4, "warn": 3, "busy": 2, "ok": 1}
 _META_TONE = {"error": "bad", "retracted": "bad", "wrong pdf": "warn", "review": "warn", "no record": "warn",
-              "updated": "ok", "ok": "ok", "pdf replaced": "ok"}
+              "updated": "ok", "ok": "ok", "pdf replaced": "ok", "other version": "ok"}
 _FETCH_TONE = {"not found": "bad", "error": "bad", "no download": "bad", "needs your browser": "warn",
                "waiting for your download": "warn", "attached": "ok", "found": "ok"}
 
@@ -94,10 +94,11 @@ class Progress:
             return key
         self.status[key] = status
         self.detail[key] = event.get("detail", "")
-        if status in ("attached", "found") and self.meta.get(key) == "wrong pdf":
-            # The right PDF was found: it replaced the wrong one (in Zotero's trash).
+        if status in ("attached", "found") and self.meta.get(key) in ("wrong pdf", "other version"):
+            # The right (or published) PDF was found: it replaced the old one (in Zotero's trash).
+            self.meta_detail[key] = ("wrong PDF replaced" if self.meta[key] == "wrong pdf"
+                                     else "published version attached")
             self.meta[key] = "pdf replaced"
-            self.meta_detail[key] = "wrong PDF replaced"
         if status == "browser":
             self.browser_tried.add(key)     # searched with the browser: not offered again
         if status == "needs your browser":
@@ -197,6 +198,10 @@ class Progress:
         meta = self.meta.get
         status = self.status.get
         wrong = self._keys(lambda k: meta(k) == "wrong pdf")
+        other = self._keys(lambda k: meta(k) == "other version")
+        other_chip = ("ChipNeutral", "◐ {} other form", other,
+                      "The right paper as an accepted manuscript, preprint or proof, or the whole book around a "
+                      "chapter. Tagged; nothing to check. A fetch swaps in the published version when it finds it.")
         groups = []
         if self.stages:
             chips = [
@@ -210,7 +215,7 @@ class Progress:
             ]
             groups.append(("Metadata", chips))
         pdf_chips = [("ChipWarn", "⚠ {} wrong PDF", wrong,
-                      "Another paper, a manuscript, a preprint or a proof is attached. Tag: fulltext/check-pdf.")]
+                      "Another paper is attached. Tag: fulltext/check-pdf, with a note."), other_chip]
         if self.stages != ["Metadata"]:
             pdf_chips = [
                 ("ChipOk", "✓ {} attached", self._keys(lambda k: status(k) in ("attached", "found")),
@@ -255,8 +260,8 @@ class Progress:
                         "metadata/accept or metadata/reject; the next check applies it."))
         wrong = self._keys(lambda k: meta(k) == "wrong pdf")
         if wrong and not self.active_runs:
-            text = (f"⚠ {len(wrong)} wrong PDF, right version not found  ⓘ" if self.stages != ["Metadata"]
-                    else f"⚠ {len(wrong)} wrong PDF  ⓘ")
+            text = (f"⚠ {len(wrong)} with another paper attached, the right one not found  ⓘ"
+                    if self.stages != ["Metadata"] else f"⚠ {len(wrong)} with another paper attached  ⓘ")
             out.append(("warn", text, None,
                         "A note on the paper says what is wrong (tag: fulltext/check-pdf). "
                         + ("'Check & complete' looks for the right one." if self.stages == ["Metadata"]
@@ -365,7 +370,7 @@ def _style(root, ttk) -> dict:
     style.configure("StepTodo.TLabel", background=ui["bg"], foreground="#9ca3af", font=(fam, 10))
     for name, colour, tint in (("ChipOk", ui["ok"], "#dcfce7"), ("ChipWarn", ui["warn"], "#fef3c7"),
                                ("ChipBad", ui["bad"], "#fee2e2"), ("ChipInfo", ui["accent_dark"], "#dbeafe"),
-                               ("ChipReview", "#7e22ce", "#f3e8ff")):
+                               ("ChipReview", "#7e22ce", "#f3e8ff"), ("ChipNeutral", "#4b5563", "#f3f4f6")):
         style.configure(f"{name}.TLabel", background=tint, foreground=colour, padding=(10, 3),
                         font=(fam, 9, "bold"))
     style.configure("Panel.TFrame", background=ui["card"])

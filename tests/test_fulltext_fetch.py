@@ -269,7 +269,8 @@ def test_run_attaches_tags_and_reports(tmp_path, monkeypatch):
     # The source's own label wins: accepted manuscripts often print the DOI too.
     assert title == "Full Text PDF (accepted manuscript)"
     assert "Unpaywall (repository)" in note
-    assert ("ABCD1234", [ff.TAG_FETCHED, "fulltext/accepted-manuscript"], [ff.TAG_NOT_FOUND, ff.TAG_CHECK_PDF]) \
+    assert ("ABCD1234", [ff.TAG_FETCHED, "fulltext/accepted-manuscript"],
+            [ff.TAG_NOT_FOUND, ff.TAG_CHECK_PDF, "fulltext/preprint", ff.TAG_PROOF]) \
         in writer.tags
     assert ("NOPE0001", [ff.TAG_NOT_FOUND], []) in writer.tags
     assert Path(report.report_path).exists()
@@ -576,7 +577,7 @@ def test_pdfs_saved_to_downloads_are_matched_and_attached(tmp_path):
     assert got == ["ABCD1234"] and found == ["ABCD1234"]
     assert len(writer.attached) == 1 and "your own browser" in writer.attached[0][3]
     assert len(writer.tags) == 1 and writer.tags[0][0] == "ABCD1234" and ff.TAG_FETCHED in writer.tags[0][1]
-    assert writer.tags[0][2] == [ff.TAG_NOT_FOUND, ff.TAG_CHECK_PDF]
+    assert writer.tags[0][2][:2] == [ff.TAG_NOT_FOUND, ff.TAG_CHECK_PDF] and ff.TAG_PROOF in writer.tags[0][2]
 
 
 def test_the_window_offers_papers_behind_a_bot_check_to_the_users_own_browser():

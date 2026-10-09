@@ -62,6 +62,12 @@ class Problem:
     found_doi: str = ""
     other_item: str = ""          # the library item the PDF belongs to, when it is another work
 
+    @property
+    def wrong(self) -> bool:
+        """Another work: an error. A manuscript, preprint, proof or the whole book around a chapter
+        is the right paper in another form."""
+        return self.kind == "another work"
+
     def describe(self) -> str:
         what = {
             "another work": "the attached PDF is another work",

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.38] - 2026-10-09
+
+### Changed
+
+- **A wrong PDF and the right paper in another form are told apart.** Only another paper attached is a wrong PDF (tag `fulltext/check-pdf`, a note, replaced when the right one is found). An accepted manuscript, preprint or proof gets a version tag (`fulltext/accepted-manuscript`, `fulltext/preprint`, `fulltext/proof`) and no note; a fetch quietly swaps in the published version when it finds it. A whole book attached to a chapter has its chapter cut out, or gets the tag `fulltext/whole-book` when the pages cannot be found. Earlier `fulltext/check-pdf` tags on such items are replaced by these at the next check.
+- In the progress window they are a grey "◐ other form" count, not a warning, and not in "To do"; the report lists them as "Right paper, other form".
+
 ## [0.13.2+arne.37] - 2026-10-09
 
 ### Changed

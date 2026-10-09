@@ -63,6 +63,15 @@ TAG_FETCHED = "fulltext/fetched"
 #: A PDF the metadata audit found wrong (another work, a manuscript, a proof): to replace.
 TAG_CHECK_PDF = "fulltext/check-pdf"
 VERSION_TAGS = {"accepted": "fulltext/accepted-manuscript", "preprint": "fulltext/preprint"}
+#: An attached proof (page numbers not final), tagged by the metadata audit.
+TAG_PROOF = "fulltext/proof"
+#: A chapter's item with the whole book attached, when the chapter could not be cut out.
+TAG_WHOLE_BOOK = "fulltext/whole-book"
+
+
+def _old_version_tags(version: str | None) -> list[str]:
+    """Version tags that no longer hold once a PDF of ``version`` is attached."""
+    return [t for v, t in VERSION_TAGS.items() if v != version] + [TAG_PROOF]
 VERSION_LABELS = {
     "published": "published version",
     "accepted": "accepted manuscript",
@@ -1704,7 +1713,7 @@ def watch_downloads(keys: list[str], *, timeout: float = 900, folder: Path | Non
                             f"{_dt.date.today().isoformat()} ({f.name}). Version: {label}. Check: {check.reason}.</p>")
                     writer.attach_pdf(item, named, f"Full Text PDF ({label})", note)
                 tags = [TAG_FETCHED] + ([VERSION_TAGS[check.version]] if check.version in VERSION_TAGS else [])
-                writer.set_tags(key, add=tags, remove=[TAG_NOT_FOUND, TAG_CHECK_PDF])
+                writer.set_tags(key, add=tags, remove=[TAG_NOT_FOUND, TAG_CHECK_PDF] + _old_version_tags(check.version))
                 for a in bad_pdf(key).get("attachments") or []:
                     writer.trash_child(key, a)
                 clear_bad_pdf(key)
@@ -1821,7 +1830,8 @@ def run(
                     with write_lock:
                         res.attachment_key = writer.attach_pdf(item, named, title, note) or ""
                         tags = [TAG_FETCHED] + ([VERSION_TAGS[check.version]] if check.version in VERSION_TAGS else [])
-                        writer.set_tags(item.key, add=tags, remove=[TAG_NOT_FOUND, TAG_CHECK_PDF])
+                        writer.set_tags(item.key, add=tags,
+                                        remove=[TAG_NOT_FOUND, TAG_CHECK_PDF] + _old_version_tags(check.version))
                         replaced = [a for a in bad.get("attachments") or [] if writer.trash_child(item.key, a)]
                     if bad:
                         clear_bad_pdf(item.key)
