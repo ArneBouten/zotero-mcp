@@ -31,10 +31,14 @@ def _as_list(value) -> list[str] | None:
         "is corrected only when two independent sources agree (volume, issue, pages, "
         "DOI, year, journal name; a publisher is only filled); titles, author lists and "
         "unconfirmed values become proposals for the user (tag metadata/review plus a "
-        "note). The attached PDF is checked too (another work, a manuscript or proof of "
-        "a published article, a whole book on a chapter): with apply=true it is tagged "
-        "fulltext/check-pdf and replaced once the right PDF is found (the wrong one goes "
-        "to Zotero's trash). Every change is tagged and noted with its source. "
+        "note). The attached PDF is checked too. Another paper attached is a wrong PDF: "
+        "with apply=true it is tagged fulltext/check-pdf with a note, or moved to the item "
+        "it belongs to. The right paper in another form is only tagged, no warning: an "
+        "accepted manuscript, preprint or proof (fulltext/accepted-manuscript, "
+        "fulltext/preprint, fulltext/proof), or the whole book on a chapter (the chapter "
+        "is cut out, else fulltext/whole-book). Replacements are not fetched here (a "
+        "call must answer within a minute): zotero_fetch_fulltext or the user's 'Check & "
+        "complete' action does that. Every change is tagged and noted with its source. "
         "apply=false (default) only reports. "
         f"item_keys or collection_key; at most {_MAX_ITEMS} items per call — "
         "whole library: `zotero-mcp metadata-audit` in a terminal."
@@ -50,7 +54,7 @@ def metadata_audit(
     try:
         keys = _as_list(item_keys)
         report = _ma.run(keys=keys[:_MAX_ITEMS] if keys else None, collection=collection_key,
-                         limit=_MAX_ITEMS, apply=bool(apply), log=ctx.info)
+                         limit=_MAX_ITEMS, apply=bool(apply), log=ctx.info, fetch_replacements=False)
         return report.markdown(limit=_MAX_ITEMS)
     except Exception as e:
         ctx.error(f"Metadata audit failed: {e}")

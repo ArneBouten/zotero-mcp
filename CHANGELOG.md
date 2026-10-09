@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.39] - 2026-10-09
+
+### Changed
+
+- The `zotero_metadata_audit` tool (Claude in a chat) describes the new attachment findings (wrong PDF against the right paper in another form) and no longer fetches replacement PDFs within the call, which has to answer within a minute; `zotero_fetch_fulltext` or "Check & complete" does that.
+
 ## [0.13.2+arne.38] - 2026-10-09
 
 ### Changed
