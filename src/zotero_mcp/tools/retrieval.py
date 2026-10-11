@@ -24,6 +24,20 @@ from zotero_mcp.tools import _helpers
 #: is configured. Reading is token-bound where indexing is recall-bound, so
 #: this cap is deliberately separate from ``pdf_max_pages``.
 DEFAULT_FULLTEXT_DISPLAY_MAX = 10
+#: Pages read when only the passages answering a question are returned:
+#: the whole of almost any paper or chapter, most of a book.
+EXCERPT_MAX_PAGES = 400
+
+
+def _excerpts_body(question: str, passages: int | None, text: str,
+                   truncated: bool = False, page_count: int | None = None) -> str:
+    """The passages of ``text`` that answer ``question``, as the tool's body."""
+    from zotero_mcp import excerpts
+
+    body = excerpts.find(question, text, passages or excerpts.DEFAULT_PASSAGES).markdown()
+    if truncated and page_count:
+        body += (f"\n\n> Only the first {EXCERPT_MAX_PAGES} of {page_count} pages were searched.")
+    return body
 
 
 def _fulltext_display_max_pages() -> int:
@@ -153,7 +167,13 @@ def get_item_metadata(
         "when that cuts a document short the heading names the page range "
         "and TRUNCATED — read on with zotero_read_pdf_pages. "
         "Avoid calling this on multiple papers in one conversation unless "
-        "the user specifically asked to read several. "
+        "the user specifically asked to read several — or pass a question. "
+        "question: what you need from the paper (e.g. 'sample size and "
+        "recruitment', 'how was burnout measured'); then the whole document "
+        "is searched and only the passages that answer it come back (about "
+        "1,000 characters each, with their pages) after the metadata and "
+        "abstract. Use it when reading several papers for one answer. "
+        "passages: how many (default 8, at most 30). "
         "item_key: 8-character Zotero item key. Normally the parent item — "
         "the tool locates the attached PDF/EPUB itself, preferring PDF "
         "unless attachment_priority says otherwise. Passing an attachment's "
@@ -172,6 +192,8 @@ def get_item_metadata(
 @with_zotero_api_lock
 def get_item_fulltext(
     item_key: str,
+    question: str | None = None,
+    passages: int | str | None = None,
     *,
     ctx: Context
 ) -> str:
@@ -210,10 +232,16 @@ def get_item_fulltext(
         if item.get("data", {}).get("itemType") == "note":
             return metadata
 
+        question = (question or "").strip()
+        try:
+            n_passages = int(passages) if passages not in (None, "") else None
+        except (TypeError, ValueError):
+            n_passages = None
+
         # In local mode, prefer direct local DB/storage extraction first.
         # This avoids pyzotero dump() failures on linked file:// attachments
         # when using remote clients over SSE/HTTP.
-        max_pages = _fulltext_display_max_pages()
+        max_pages = EXCERPT_MAX_PAGES if question else _fulltext_display_max_pages()
         local_extract_error_msg = None
         try:
             from zotero_mcp.local_db import LocalZoteroReader
@@ -232,6 +260,10 @@ def get_item_fulltext(
                         extracted = reader.extract_fulltext_detailed(local_item.item_id)
                         if extracted and extracted.text:
                             ctx.info(f"Retrieved full text from local storage ({extracted.source})")
+                            if question:
+                                return f"{metadata}\n\n---\n\n" + _excerpts_body(
+                                    question, n_passages, extracted.text,
+                                    bool(extracted.truncated), extracted.page_count)
                             heading, notice = _fulltext_section_heading(
                                 extracted.truncated, extracted.page_count, max_pages, item_key
                             )
@@ -261,6 +293,9 @@ def get_item_fulltext(
             full_text_data = zot.fulltext_item(attachment.key)
             if full_text_data and "content" in full_text_data and full_text_data["content"]:
                 ctx.info("Successfully retrieved full text from Zotero's index")
+                if question:
+                    return f"{metadata}\n\n---\n\n" + _excerpts_body(
+                        question, n_passages, full_text_data["content"])
                 return _helpers._prepend_size_warning(
                     f"{metadata}\n\n---\n\n## Full Text\n\n{full_text_data['content']}",
                     "Consider using zotero_semantic_search to find specific content instead of reading full papers."
@@ -288,6 +323,9 @@ def get_item_fulltext(
                     # applies the same page cap, so it needs the document's
                     # page bookkeeping and not only its text (#448).
                     doc = extract_file(download.path, max_pages=max_pages)
+                    if doc is not None and question:
+                        return f"{metadata}\n\n---\n\n" + _excerpts_body(
+                            question, n_passages, doc.text, doc.truncated, doc.page_count)
                     if doc is None:
                         heading, notice = "## Full Text", ""
                         converted_text = f"Error converting file to markdown: {download.path.name}"

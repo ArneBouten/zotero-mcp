@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.63] - 2026-10-11
+
+### Added
+
+- **Only the passages that answer a question.** `zotero_read_paper` and `zotero_get_item_fulltext` take a `question` (and `passages`, default 8): the whole document is searched and only the passages that answer it come back, about 1,000 characters each with their pages, after the metadata and abstract. Ranked on your computer by keyword match, then by the re-ranker set up for semantic search (Voyage here). Running heads, page numbers and the reference list are left out. For reading many papers for one answer without filling the conversation.
+- **Parallel as a second web search** in the fetcher's web step (`PARALLEL_API_KEY` in `keys.env`; paid, about half a cent a search, capped by `parallel_monthly`, 500 by default). Tested on the 147 papers no source had found: Parallel found a right PDF for 13 (author copies on personal and society pages, repositories), Tavily for 2.
+
+### Fixed
+
+- **Shadow libraries are never used.** The fetcher promised it, but nothing enforced it: a Sci-Hub link from a web search would have been downloaded if its title matched. Links to Sci-Hub, Library Genesis, Z-Library, Anna's Archive and the like are now refused at every step, redirects included. (None was ever attached.)
+- **Four kinds of wrong PDF that passed the checks** (found in the test above):
+  - the main title followed by another subtitle ("Adolescents as active managers of their own psychological needs: The role of …" for "…: Examining the role of …");
+  - a registry or PDF title that only shares the words before the colon ("Materialistic values and goals" for "Materialistic values: Their causes and consequences");
+  - a near match meant for a scan's misread letters that swaps a word ("The validation of the Norwegian … Scale" for "Manual of the … Scale");
+  - slides about the paper, and a book's later edition (every copyright year well after the item's).
+  Replayed on the 51 PDFs the fetcher attached by title that are still in the library: none is newly rejected.
+
 ## [0.13.2+arne.62] - 2026-10-09
 
 ### Changed

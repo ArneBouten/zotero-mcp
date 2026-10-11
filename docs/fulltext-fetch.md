@@ -9,7 +9,7 @@ by hand, cheapest first, and stops at the first PDF that passes its checks.
 | `open-access` | Unpaywall, OpenAlex, Semantic Scholar, Europe PMC / PubMed Central, arXiv, OSF preprints (PsyArXiv and others), CORE, Zenodo, HAL, OAPEN (books) | Nothing; keys raise the limits |
 | `publisher` | The DOI's landing page and its `citation_pdf_url`, plus the PDF addresses of Wiley, Taylor & Francis, SAGE and Springer. Items without a DOI: their URL field | A network the library recognises (eduroam, campus) for subscribed papers |
 | `scholar` | Google Scholar through SerpApi: the result's [PDF] link, then the other versions in its cluster | `SERPAPI_API_KEY` (250 free searches a month) |
-| `web` | A web search for the exact title through Tavily; ResearchGate pages through the ZenRows unblocker | `TAVILY_API_KEY` (1,000 free searches a month); `ZENROWS_API_KEY` optional |
+| `web` | A web search for the exact title through Tavily and through Parallel's own web index (author copies on personal, lab and society pages that the other searches miss); ResearchGate pages through the ZenRows unblocker | `TAVILY_API_KEY` (1,000 free searches a month); `PARALLEL_API_KEY` optional (paid, about half a cent a search; capped at 500 a month); `ZENROWS_API_KEY` optional |
 | `browser` | Your own Chrome window with your logins: links that blocked a plain download earlier in the run (ResearchGate, Academia.edu, SSRN, bot-protected publishers), ResearchGate searched by title, and the publisher's page | Playwright and Google Chrome; only with `--browser` |
 
 Within a step, the services are asked at the same time; the links they
@@ -18,7 +18,10 @@ at least 6 seconds between two requests to the same site.
 
 Only copies you can open yourself are fetched: open-access copies, public
 downloads, and subscriptions through your own network. Captchas are never
-solved; a page that shows one is logged and skipped. No shadow libraries.
+solved; a page that shows one is logged and skipped. No shadow libraries:
+links to Sci-Hub, Library Genesis, Z-Library, Anna's Archive and the like are
+never opened, whoever suggests them (a web search, Scholar, a redirect, the
+item's URL field).
 
 ## The browser step
 
@@ -104,7 +107,18 @@ zotero-mcp fetch-fulltext --from-downloads --items KEY1,KEY2   # PDFs from the l
     does a short title (five words or fewer, "Conscientiousness"): inside a
     sentence or a longer title it belongs to another work;
   - an article's first author is in the byline at the top, not only cited
-    further down.
+    further down;
+  - the main title followed by another subtitle is another work ("Adolescents
+    as active managers of their own psychological needs: The role of …" is
+    not "…: Examining the role of …"); the main title alone, followed by the
+    authors, still counts;
+  - a near match allowed for a scan's misread letters must have every word of
+    the title ("The validation of the Norwegian … Scale" is not "Manual of the
+    … Scale").
+- Slides about the work (landscape pages with little text) are not the work.
+- A book's later edition is not the item: when every copyright year on its
+  first pages is more than two years after the item's year (a reprint keeps
+  the first edition's year).
 - A PDF the fetcher attached that you then move to the trash is not attached
   again: its link is remembered as wrong at the next run. When a wrong PDF is
   replaced, the "PDF to check" note about it goes too.
@@ -172,6 +186,7 @@ The simplest place for keys is a plain text file, `~/.config/zotero-mcp/keys.env
 ```
 SERPAPI_API_KEY=...
 TAVILY_API_KEY=...
+PARALLEL_API_KEY=...
 OPENALEX_API_KEY=...
 CORE_API_KEY=...
 ZENROWS_API_KEY=...
@@ -191,6 +206,7 @@ and this file over `client_env` in `~/.config/zotero-mcp/config.json`:
 Use is counted per month in `~/.config/zotero-mcp/fulltext/budget.json` and
 stops at the free allowance. Change the limits in a `fulltext_fetch` section
 of `config.json`: `serpapi_monthly` (250), `tavily_monthly` (1000),
+`parallel_monthly` (500 searches; Parallel is paid, so this is your cap, not a free allowance),
 `zenrows_monthly_credits` (5000), `openalex_content_daily` (100),
 `host_delay` (6 seconds), `retry_days` (30), `max_candidates` (12 links per step and paper).
 
@@ -202,4 +218,16 @@ someone else's project, or one not worth keeping. It uses the same sources and c
 fetcher (not the visible browser step) and gives Claude the paper's text; the whole text is also
 in a `.txt` file in the temp folder, and with `save_to` the PDF is saved to a folder you name.
 Nothing is recorded in the shared state either.
+
+## Only the passages that answer a question
+
+Reading ten papers for one answer at 60,000 characters each does not fit in a conversation.
+`zotero_read_paper` and `zotero_get_item_fulltext` take a `question` ("sample size and
+recruitment", "how was burnout measured"): the whole document is then cut into passages of a
+few sentences, ranked against the question, and only the best ones come back (8 by default,
+`passages` up to 30), each with its page, in reading order, after the paper's metadata and
+abstract. The ranking runs on your computer: a keyword match (BM25), then the re-ranker set up
+for semantic search (`semantic_search.reranker` in `config.json`: Voyage, Cohere, OpenRouter,
+or a local cross-encoder) when there is one. Running heads, page numbers and the closing
+reference list are left out, unless the question is about references.
 

@@ -85,6 +85,7 @@ KEY_ENV = {
     "openalex": "OPENALEX_API_KEY",
     "serpapi": "SERPAPI_API_KEY",
     "tavily": "TAVILY_API_KEY",
+    "parallel": "PARALLEL_API_KEY",
     "zenrows": "ZENROWS_API_KEY",
     "core": "CORE_API_KEY",
     "semantic_scholar": "SEMANTIC_SCHOLAR_API_KEY",
@@ -171,6 +172,8 @@ class Settings:
     email: str = ""
     serpapi_monthly: int = 250
     tavily_monthly: int = 1000
+    #: Parallel is paid per search (about half a cent); this caps a month's searches.
+    parallel_monthly: int = 500
     zenrows_monthly_credits: int = 5000
     zenrows_cost: int = 25
     openalex_content_daily: int = 100
@@ -215,7 +218,7 @@ class Settings:
         )
         s = cls(keys=keys, email=str(email).strip())
         for name in (
-            "serpapi_monthly", "tavily_monthly", "zenrows_monthly_credits", "zenrows_cost",
+            "serpapi_monthly", "tavily_monthly", "parallel_monthly", "zenrows_monthly_credits", "zenrows_cost",
             "openalex_content_daily", "retry_days", "max_candidates",
         ):
             if isinstance(section.get(name), int):
@@ -317,7 +320,10 @@ def title_similarity(a: str, b: str) -> float:
         return 0.0
     ratio = difflib.SequenceMatcher(None, fa, fb).ratio()
     main_a = _fold(re.split(r"[:?.]\s", a, maxsplit=1)[0])
-    if len(main_a) >= 20 and (main_a == fb or fb.startswith(main_a)):
+    # "Main title" for "Main title: subtitle" (a record without the subtitle), or a's title cut
+    # short. Not "Main title and more" when a has another subtitle: that is another work
+    # ("Materialistic values and goals" is not "Materialistic values: Their causes ...").
+    if len(main_a) >= 20 and (main_a == fb or (fb.startswith(main_a) and (main_a == fa or fa.startswith(fb)))):
         ratio = max(ratio, 0.95)
     return ratio
 
@@ -360,34 +366,74 @@ def _norm_doi(doi: str) -> str:
     return re.sub(r"[.,;:)\]]+$", "", doi.strip().lower())
 
 
-def title_near_top(title: str, text: str, limit: int = 6000) -> bool:
+def _other_subtitle(after: str, subtitle: str, authors: list[str]) -> bool:
+    """What follows a main title in the text (``after``) is a subtitle other than the item's:
+    "Adolescents as active managers of their own psychological needs: The role of ..." is
+    another work than "...: Examining the role of ...". Not when the item's subtitle follows,
+    nor when the subtitle is left out and the authors' names follow."""
+    words = after.split()
+    if not words or not subtitle:
+        return False
+    following = " ".join(words[: len(subtitle.split())])
+    if difflib.SequenceMatcher(None, subtitle, following, autojunk=False).ratio() >= 0.6:
+        return False
+    names = {_fold(a).split()[-1] for a in authors if _fold(a)}
+    return not any(w in names for w in words[:4])
+
+
+def _words_alike(phrase: str, window: str) -> bool:
+    """Every word of ``phrase`` (all but one in a title of 20 words or more) has a near twin in
+    ``window``: OCR misreads letters, it does not swap words ("Manual of the ... scale" is not
+    "The validation of the Norwegian ... scale")."""
+    have = window.split()
+    missing = 0
+    for w in phrase.split():
+        if len(w) < 3:
+            continue
+        if not any(difflib.SequenceMatcher(None, w, h, autojunk=False).ratio() >= 0.7 for h in have):
+            missing += 1
+    return missing <= len(phrase.split()) // 20
+
+
+def title_near_top(title: str, text: str, limit: int = 6000, authors: list[str] | None = None) -> bool:
     """The item's title (or its main title, before a colon, when that is long enough) as one phrase
     near the start of the text, where a paper or book prints its own title. Words alone are not
-    enough: a review or a later paper by the same author uses the same words."""
+    enough: a review or a later paper by the same author uses the same words.
+
+    With the item's ``authors``, a main title followed by another subtitle does not count."""
     hay = re.sub(r"\s+", " ", _fold(text))[:limit]
     hay_nospace = hay.replace(" ", "")
-    phrases = [_fold(title)]
-    main = _fold(re.split(r"[:?.!]\s", title, maxsplit=1)[0])
+    full = _fold(title)
+    phrases = [full]
+    parts = re.split(r"[:?.!]\s", title, maxsplit=1)
+    main = _fold(parts[0])
+    subtitle = _fold(parts[1]) if len(parts) > 1 else ""
     if main != phrases[0] and len(main.split()) >= 3 and len(main) >= 15:
         phrases.append(main)
+    spaced = f" {hay} "
     for phrase in phrases:
         if not phrase:
             continue
-        spaced = f" {hay} "
         at = [m.start() for m in re.finditer(re.escape(f" {phrase} "), spaced)]
-        if any(not _cited_at(spaced, i) for i in at):
+        for i in at:
+            if _cited_at(spaced, i):
+                continue
+            if (phrase == main and authors is not None
+                    and _other_subtitle(spaced[i + len(phrase) + 1:], subtitle, authors)):
+                continue
             return True
-        if not at and phrase.replace(" ", "") in hay_nospace:
+        if not at and phrase.replace(" ", "") in hay_nospace and (phrase == full or authors is None):
             return True
     # A scan's OCR misreads letters ("Pensistence", "$ontnol"): the title nearly letter for letter.
     words = hay.split()
-    for phrase in phrases:
+    for phrase in phrases if authors is None else [full]:
         n = len(phrase.split())
         if n < 4:
             continue
         for i in range(0, max(1, len(words) - n + 1)):
             window = " ".join(words[i:i + n])
-            if difflib.SequenceMatcher(None, phrase, window, autojunk=False).ratio() >= 0.9:
+            if (difflib.SequenceMatcher(None, phrase, window, autojunk=False).ratio() >= 0.9
+                    and _words_alike(phrase, window)):
                 # A near match one word off a cited title ("1986 social foundations of ...") is cited too.
                 around = " ".join(words[max(0, i - 4):i + 2])
                 if not re.search(r"\b(1[5-9]|20)\d\d[a-z]?\b", around):
@@ -442,6 +488,20 @@ _PART_URL = re.compile(r"/preview/|[-_]frm\.pdf|/preface/|frontmatter|front[-_]m
 #: The first words of a supplement to a paper (its online appendix), not the paper.
 _SUPPLEMENT_START = re.compile(r"^\s*(supplementary|supplemental|online supplement|supporting information|"
                                r"electronic supplementary|appendix\b)", re.I | re.M)
+
+
+_COPYRIGHT_YEAR = re.compile(r"(?:©|\(c\)|copyright)\s*(?:by\s+)?((?:19|20)\d\d)\b", re.I)
+
+
+def later_edition(item: ItemInfo, text: str, limit: int = 6000) -> str:
+    """Why a book's PDF is a later edition, or "": its copyright years on the first pages all
+    come well after the item's year (a reprint keeps the first edition's year)."""
+    if item.item_type not in BOOK_TYPES or not item.year.isdigit():
+        return ""
+    years = [int(y) for y in _COPYRIGHT_YEAR.findall(text[:limit])]
+    if years and min(years) > int(item.year) + 2:
+        return f"another edition (© {min(years)}; the item is from {item.year})"
+    return ""
 
 
 def doi_printed(item_doi: str, text: str, limit: int = 4000) -> bool:
@@ -539,6 +599,21 @@ class ItemInfo:
 # ---------------------------------------------------------------------------
 # HTTP with an SSRF guard and per-host pacing
 # ---------------------------------------------------------------------------
+
+
+#: Shadow libraries. Never asked, never downloaded from, whoever suggests the link (a web
+#: search, Google Scholar, a redirect, the item's URL field).
+SHADOW_LIBRARIES = (
+    "sci-hub", "scihub", "libgen", "library.lol", "z-lib", "zlibrary", "z-library", "1lib.",
+    "b-ok.", "singlelogin", "annas-archive", "booksc.", "ebin.pub", "dokumen.pub", "vdoc.pub",
+    "epdf.pub", "pdfdrive", "libstc", "nexus-stc", "cyberleninka.org/sci",
+)
+
+
+def is_shadow_library(url: str) -> bool:
+    low = (url or "").lower()
+    host = urlparse(low).hostname or ""
+    return any(mark in host or (("/" in mark) and mark in low) for mark in SHADOW_LIBRARIES)
 
 
 def _public_host(url: str) -> bool:
@@ -661,6 +736,8 @@ class Http:
         if referer:
             headers["Referer"] = referer
         for _ in range(8):
+            if is_shadow_library(current):
+                return Fetched(0, "", b"", current, "a shadow library (never used)")
             if not _public_host(current):
                 return Fetched(0, "", b"", current, "address not allowed")
             self._pace(current)
@@ -688,7 +765,7 @@ class Http:
     def fetch_unblocked(self, url: str, budget: Budget) -> Fetched | None:
         """Fetch a public page through ZenRows. None when not allowed or no budget."""
         s = self.settings
-        if not s.has("zenrows"):
+        if not s.has("zenrows") or is_shadow_library(url):
             return None
         if not budget.allows("zenrows", s.zenrows_monthly_credits, s.zenrows_cost):
             return None
@@ -1145,16 +1222,69 @@ def src_web(item: ItemInfo, http: Http, settings: Settings, budget: Budget) -> I
             yield Candidate(url, "ResearchGate", None, unblock=True)
 
 
+def _parallel_kind(item: ItemInfo) -> str:
+    return {"book": "book", "bookSection": "book chapter", "thesis": "thesis", "report": "report",
+            "conferencePaper": "conference paper"}.get(item.item_type, "paper")
+
+
+def src_parallel(item: ItemInfo, http: Http, settings: Settings, budget: Budget) -> Iterator[Candidate]:
+    """Parallel's own web index, searched for the title: author copies on personal and lab
+    pages, society and repository sites that the other searches miss. Paid per search, so it
+    is asked only in the web step, and at most ``parallel_monthly`` times a month."""
+    if not settings.has("parallel") or not item.title:
+        return
+    if not budget.allows("parallel", settings.parallel_monthly):
+        return
+    budget.spend("parallel")
+    who = ", ".join(item.authors[:3])
+    title = item.title[:200]
+    status, data = http.api_json(
+        "https://api.parallel.ai/v1/search", method="POST",
+        headers={"x-api-key": settings.keys["parallel"]},
+        body={
+            "objective": (f'Find a downloadable full-text PDF of the {_parallel_kind(item)} "{title}" by '
+                          f"{who} ({item.year or 'n.d.'}): the published version, an author copy, a "
+                          "repository copy or a preprint."),
+            "search_queries": [f'"{title}" pdf', f"{title} {item.first_author} {item.year}".strip()],
+            "advanced_settings": {"max_results": 10},
+        },
+        timeout=60,
+    )
+    if status != 200 or not data:
+        return
+    for res in data.get("results") or []:
+        url = res.get("url") or ""
+        if not url or is_shadow_library(url):
+            continue
+        text = f"{res.get('title') or ''} {' '.join(res.get('excerpts') or [])}"
+        match = title_in_text(item.title, text)
+        lower = url.lower()
+        if "researchgate.net/publication/" in lower or "academia.edu/" in lower:
+            if match >= 0.6:
+                yield Candidate(url, "ResearchGate" if "researchgate" in lower else "Academia.edu", None,
+                                unblock=True)
+            continue
+        if match < 0.6:
+            continue
+        pdfish = lower.endswith(".pdf") or "/download" in lower or "pdf" in urlparse(lower).path
+        # A repository's or the publisher's page for this work: its citation_pdf_url is followed.
+        if pdfish or match >= 0.8:
+            yield Candidate(url, "web search (Parallel)", None, unblock=_needs_unblock(url, settings))
+
+
 #: Display names, and the key each paid source needs.
 SOURCE_NAMES = {
     "src_unpaywall": "Unpaywall", "src_openalex": "OpenAlex", "src_semantic_scholar": "Semantic Scholar",
     "src_europepmc": "Europe PMC", "src_arxiv": "arXiv", "src_core": "CORE", "src_oapen": "OAPEN",
     "src_publisher": "publisher page (via DOI, or the item's URL)",
     "src_scholar": "Google Scholar (via SerpApi)", "src_web": "web search (via Tavily)",
+    "src_parallel": "web search (via Parallel, paid)",
     "src_osf": "OSF preprints (PsyArXiv and others)", "src_zenodo": "Zenodo", "src_hal": "HAL", "src_browser": "your browser (ResearchGate, Academia.edu, publisher logins)",
 }
-SOURCE_KEYS = {"src_scholar": "serpapi", "src_web": "tavily", "src_core": "core"}
-_BUDGETS = {"serpapi": "serpapi_monthly", "tavily": "tavily_monthly"}
+SOURCE_KEYS = {"src_scholar": "serpapi", "src_web": "tavily", "src_parallel": "parallel", "src_core": "core"}
+_BUDGETS = {"serpapi": "serpapi_monthly", "tavily": "tavily_monthly", "parallel": "parallel_monthly"}
+#: Paid services: their limit is the user's own cap, not a free allowance.
+_PAID = {"parallel"}
 
 
 def source_status(source, settings: Settings, budget: Budget) -> str | None:
@@ -1164,6 +1294,8 @@ def source_status(source, settings: Settings, budget: Budget) -> str | None:
         return f"skipped (no {KEY_ENV[key]})"
     limit_attr = _BUDGETS.get(key or "")
     if limit_attr and not budget.allows(key, getattr(settings, limit_attr)):
+        if key in _PAID:
+            return f"skipped (monthly limit of {getattr(settings, limit_attr)} searches reached)"
         return f"skipped (free monthly allowance of {getattr(settings, limit_attr)} used up)"
     return None
 
@@ -1200,7 +1332,7 @@ SOURCES: dict[str, list[Callable[..., Iterator[Candidate]]]] = {
                     src_core, src_zenodo, src_hal, src_oapen],
     "publisher": [src_publisher],
     "scholar": [src_scholar],
-    "web": [src_web],
+    "web": [src_web, src_parallel],
     "browser": [],  # filled in below, from fulltext_browser
 }
 
@@ -1237,8 +1369,11 @@ def _probe_main(path: str, pages: int) -> int:
     with pymupdf.open(path) as doc:
         n = doc.page_count
         texts = []
+        landscape = 0
         for i in range(min(n, pages)):
             texts.append(doc[i].get_text())
+            rect = doc[i].rect
+            landscape += int(rect.width > rect.height * 1.1)
         if n > pages:
             texts.append(doc[n - 1].get_text())
         meta = doc.metadata or {}
@@ -1248,6 +1383,8 @@ def _probe_main(path: str, pages: int) -> int:
         "text": text[:40000],
         "meta_title": meta.get("title") or "",
         "meta_author": meta.get("author") or "",
+        "probed": min(n, pages),
+        "landscape": landscape,
     }))
     return 0
 
@@ -1294,6 +1431,14 @@ def check_pdf(item: ItemInfo, probe: dict | None, cand: Candidate, size: int) ->
         return Check(False, "a supplement to the paper, not the paper")
     if item.item_type == "book" and 0 < pages < 10:
         return Check(False, f"only {pages} pages: not the book (a review, a list or a preview)")
+    probed = int(probe.get("probed") or 0)
+    # Slides: landscape pages with little text (a scanned book's two-page spreads are full of it).
+    if (probed >= 3 and int(probe.get("landscape") or 0) >= probed and item.item_type != "presentation"
+            and len(text.strip()) < 1200 * (probed + 1)):
+        return Check(False, "slides (landscape pages), not the work itself")
+    later = later_edition(item, text)
+    if later:
+        return Check(False, later)
     if len(text.strip()) < 200:
         # A scan without a text layer cannot be checked. Accept it only when
         # the address came from the item's own identifier.
@@ -1314,7 +1459,8 @@ def check_pdf(item: ItemInfo, probe: dict | None, cand: Candidate, size: int) ->
                 return Check(False, f"another work: its first page shows DOI {other}")
             limit = 8000 if item.item_type in BOOK_TYPES else 2500
             meta_title = probe.get("meta_title") or ""
-            if not (title_near_top(item.title, text, limit) or title_similarity(item.title, meta_title) >= 0.9):
+            if not (title_near_top(item.title, text, limit, item.authors)
+                    or title_similarity(item.title, meta_title) >= 0.9):
                 return Check(False, "the title is not printed as such on its first page (another work with similar words)")
             main = re.split(r"[:?.!]\s", item.title, maxsplit=1)[0]
             if title_similarity(item.title, meta_title) < 0.9:
@@ -1582,6 +1728,8 @@ def _figshare_pdf(url: str, http: Http) -> str | None:
 
 
 def _try_candidate(item, cand, http, settings, budget, workdir) -> tuple[str | None, Check | None, str]:
+    if is_shadow_library(cand.url):
+        return None, None, "a shadow library (never used)"
     fig = _figshare_pdf(cand.url, http)
     if fig:
         cand = Candidate(fig, cand.source + ", file via the figshare API", cand.version,
@@ -2345,7 +2493,9 @@ def _bg_main(run_id: str, raw: str) -> int:
                 reading = read_online.read(doi=opts.get("doi") or "", title=opts.get("title") or "",
                                            author=opts.get("author") or "", year=opts.get("year") or "",
                                            save_to=opts.get("save_to") or "", steps=opts.get("steps"), log=log)
-                paths["report"].write_text(reading.markdown(int(opts.get("max_chars") or 60_000)),
+                paths["report"].write_text(reading.markdown(int(opts.get("max_chars") or 60_000),
+                                                            question=opts.get("question") or "",
+                                                            passages=opts.get("passages")),
                                            encoding="utf-8")
                 paths["done"].write_text("ok", encoding="utf-8")
                 return 0

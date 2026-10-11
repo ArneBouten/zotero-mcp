@@ -237,6 +237,10 @@ class BrowserSession:
         return None
 
     def goto(self, url: str) -> bool:
+        from zotero_mcp.fulltext_fetch import is_shadow_library
+
+        if is_shadow_library(url):
+            return False
         if _host(url) in self.robot_hosts:
             raise BrowserUnavailable(f"{OWN_BROWSER}: {url}")
         if "researchgate.net" in url:

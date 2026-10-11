@@ -75,7 +75,7 @@ Example (Claude Desktop / Claude Code):
 
 ### 📚 Content tools
 - `zotero_get_item_metadata`: Get detailed metadata (supports `format="markdown"`, `format="json"` for complete raw Zotero metadata, and `format="bibtex"`)
-- `zotero_get_item_fulltext`: Get full text content
+- `zotero_get_item_fulltext`: Get full text content; with `question`, only the passages that answer it (whole document searched, about 1,000 characters each with their pages, `passages` = how many, default 8)
 - `zotero_get_item_children`: Get attachments and notes for one item or many (pass an array of keys)
 - `zotero_read_pdf_pages`: Read a page range of a PDF as Markdown, with pages whose math, figures or tables the text garbles flagged; `format="image"` returns the pages as images, and `rect=[x, y, width, height]` zooms into one region
 - `zotero_get_pdf_outline`: Extract the table of contents / outline from a PDF attachment
@@ -116,7 +116,7 @@ All add tools take a `collections` parameter accepting collection keys, names, o
 
 - `zotero_fetch_fulltext`: Find and attach a PDF for items that have none: open-access sources, the publisher's page, Google Scholar (SerpApi) and a web search (Tavily), each PDF checked against the item first — see [Fetching full texts](fulltext-fetch.md)
 - `zotero_fetch_fulltext_status`: Progress or result of a `zotero_fetch_fulltext` run still going in the background
-- `zotero_read_paper`: Find a paper's full text online (by DOI, or title with author and year) and read it, without adding anything to the library; the same search and checks as `zotero_fetch_fulltext`, the text returned to Claude (whole text in a .txt file), the PDF optionally saved to a folder
+- `zotero_read_paper`: Find a paper's full text online (by DOI, or title with author and year) and read it, without adding anything to the library; the same search and checks as `zotero_fetch_fulltext`, the text returned to Claude (whole text in a .txt file), or with `question` only the passages that answer it; the PDF optionally saved to a folder
 - `zotero_metadata_audit`: Check up to 15 items against Crossref/DataCite, Open Library, OpenAlex, PubMed and the item's PDF; fill empty fields and correct those two sources agree on (`apply=true`), propose the rest — see [Checking and fixing metadata](metadata-audit.md)
 - `zotero_metadata_review`: List, accept or reject the metadata proposals waiting in the review list
 - `zotero_citations`: The library's citation graph (OpenAlex reference lists, stored): what a paper cites, which papers in the library cite it, papers sharing its references, and a collection's most-cited papers and gaps — see [The citation graph](citations.md)

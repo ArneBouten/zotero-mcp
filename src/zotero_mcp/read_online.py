@@ -43,7 +43,8 @@ class Reading:
     saved_pdf: str = ""
     attempts: list = field(default_factory=list)
 
-    def markdown(self, max_chars: int = DEFAULT_MAX_CHARS) -> str:
+    def markdown(self, max_chars: int = DEFAULT_MAX_CHARS, question: str = "",
+                 passages: int | None = None) -> str:
         if not self.found:
             lines = [f"# Not found: {self.label}", "", self.reason or "no copy passed the checks."]
             for a in self.attempts[-8:]:
@@ -60,6 +61,12 @@ class Reading:
         ]
         if self.saved_pdf:
             head.append(f"PDF saved to {self.saved_pdf}.")
+        if question.strip():
+            from zotero_mcp import excerpts
+
+            found = excerpts.find(question, self.text, passages or excerpts.DEFAULT_PASSAGES)
+            head.append(f"The whole text is in {self.text_path}.")
+            return "\n".join(head) + "\n\n---\n\n" + found.markdown()
         text = self.text
         if len(text) > max_chars:
             head.append(f"Text: the first {max_chars:,} of {len(text):,} characters; the whole text is in "

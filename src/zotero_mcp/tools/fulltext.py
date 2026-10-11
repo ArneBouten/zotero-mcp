@@ -106,6 +106,13 @@ def fetch_fulltext_status(run_id: str, *, ctx: Context) -> str:
     return f"Still running (run_id {run_id}). Latest progress:\n{text}"
 
 
+def _passages(value: int | str | None) -> int | None:
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
 @mcp.tool(
     name="zotero_read_paper",
     description=(
@@ -115,9 +122,13 @@ def fetch_fulltext_status(run_id: str, *, ctx: Context) -> str:
         "user asks to read a paper they do not want to keep. Same search and checks as zotero_fetch_fulltext "
         "(open access, the publisher via the university network, Google Scholar, a web search; "
         "each PDF checked to be this work), but the result is the paper's text. "
-        "doi (best) or title (with author and year if known). save_to: optional folder to also "
-        "save the PDF in. max_chars: text returned (default 60000; the whole text is in a .txt "
-        "file whose path is given). Runs in the background: if it takes longer than ~40 s the call "
+        "doi (best) or title (with author and year if known). question: what you need from the "
+        "paper (e.g. 'sample size and recruitment', 'effect of X on Y'); then only the passages "
+        "that answer it come back, with their pages, instead of the whole text. Use it when "
+        "reading several papers for one answer; leave it out to read the paper as a whole. "
+        "passages: how many (default 8, at most 30). save_to: optional folder to also "
+        "save the PDF in. max_chars: text returned without a question (default 60000; the whole "
+        "text is in a .txt file whose path is given). Runs in the background: if it takes longer than ~40 s the call "
         "returns a run_id; then call zotero_fetch_fulltext_status(run_id) a minute later. Use "
         "zotero_fetch_fulltext instead for papers in the library (that attaches the PDF)."
     ),
@@ -129,6 +140,8 @@ def read_paper(
     year: str | int | None = None,
     save_to: str | None = None,
     max_chars: int | str | None = None,
+    question: str | None = None,
+    passages: int | str | None = None,
     *,
     ctx: Context,
 ) -> str:
@@ -144,6 +157,7 @@ def read_paper(
         run_id = _ff.start_background_run({
             "mode": "read", "doi": doi or "", "title": title or "", "author": author or "",
             "year": str(year or ""), "save_to": save_to or "", "max_chars": max(2_000, limit),
+            "question": (question or "").strip(), "passages": _passages(passages),
             "steps": list(_ff.DEFAULT_STEPS),
         })
         deadline = time.monotonic() + _WAIT_SECONDS

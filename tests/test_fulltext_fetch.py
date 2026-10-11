@@ -852,3 +852,145 @@ def test_an_affiliation_letter_on_the_name_still_counts_as_the_byline():
     text = "When and why do people avoid unknown probabilities\nCatrin Rodea,*, Leda Cosmidesb\naMax Planck"
     assert ff.author_near_top("Rode", text)
     assert not ff.author_near_top("Cosmid", text) and not ff.author_near_top("Tooby", text)
+
+
+def test_shadow_libraries_are_never_used():
+    assert ff.is_shadow_library("https://2024.sci-hub.ru/5938/abc/jang2008.pdf")
+    assert ff.is_shadow_library("https://libgen.is/book/index.php?md5=1")
+    assert ff.is_shadow_library("https://annas-archive.org/md5/1")
+    assert not ff.is_shadow_library("https://repository.nie.edu.sg/bitstreams/af/download")
+    assert not ff.is_shadow_library("https://www.frontiersin.org/articles/10.3389/x/pdf")
+    item = ff.ItemInfo("K1", "journalArticle", "A title", ["Jang"], "2008")
+    path, check, why = ff._try_candidate(item, ff.Candidate("https://sci-hub.se/10.1/x", "web search"),
+                                         None, ff.Settings(), ff.Budget(path=None), "/tmp")
+    assert path is None and "shadow" in why
+
+
+def test_a_redirect_to_a_shadow_library_is_not_followed():
+    class _Resp:
+        status_code = 302
+        headers = {"Location": "https://sci-hub.ru/x.pdf"}
+
+        def close(self):
+            pass
+
+    class _Session:
+        def get(self, url, **kw):
+            assert "sci-hub" not in url
+            return _Resp()
+
+    http = ff.Http(ff.Settings(), session=_Session(), sleep=lambda s: None)
+    http._pace = lambda url: None
+    ff_public = ff._public_host
+    try:
+        ff._public_host = lambda url: True
+        got = http.fetch("https://example.org/paper.pdf")
+    finally:
+        ff._public_host = ff_public
+    assert "shadow" in got.error
+
+
+class _ApiHttp:
+    def __init__(self, data, status=200):
+        self.data, self.status, self.calls = data, status, []
+
+    def api_json(self, url, **kw):
+        self.calls.append((url, kw))
+        return self.status, self.data
+
+
+def _parallel_settings():
+    return ff.Settings(keys={"parallel": "k"}, parallel_monthly=2)
+
+
+def test_parallel_search_yields_matching_pdfs_and_pages(tmp_path):
+    item = ff.ItemInfo("K1", "journalArticle", "Supporting students' motivation during an uninteresting activity",
+                       ["Jang"], "2008")
+    title = item.title
+    http = _ApiHttp({"results": [
+        {"url": "https://sdt.org/docs/2008_Jang_JEP.pdf", "title": title, "excerpts": []},
+        {"url": "https://repo.example.edu/entities/publication/abc", "title": title, "excerpts": ["Jang 2008"]},
+        {"url": "https://other.example.org/x.pdf", "title": "Something else entirely", "excerpts": []},
+        {"url": "https://sci-hub.se/10.1/x.pdf", "title": title, "excerpts": []},
+        {"url": "https://www.researchgate.net/publication/1_x", "title": title, "excerpts": []},
+    ]})
+    budget = ff.Budget(tmp_path / "budget.json")
+    cands = list(ff.src_parallel(item, http, _parallel_settings(), budget))
+    urls = [c.url for c in cands]
+    assert urls == ["https://sdt.org/docs/2008_Jang_JEP.pdf", "https://repo.example.edu/entities/publication/abc",
+                    "https://www.researchgate.net/publication/1_x"]
+    assert cands[0].source == "web search (Parallel)" and not cands[0].by_identifier
+    assert cands[2].unblock
+    url, kw = http.calls[0]
+    assert url == "https://api.parallel.ai/v1/search"
+    assert kw["headers"] == {"x-api-key": "k"}
+    assert kw["body"]["advanced_settings"] == {"max_results": 10}
+    assert budget.used("parallel") == 1
+
+
+def test_parallel_stops_at_its_monthly_limit_and_without_a_key(tmp_path):
+    item = ff.ItemInfo("K1", "journalArticle", "A title long enough", ["Jang"], "2008")
+    budget = ff.Budget(tmp_path / "budget.json")
+    http = _ApiHttp({"results": []})
+    for _ in range(3):
+        list(ff.src_parallel(item, http, _parallel_settings(), budget))
+    assert len(http.calls) == 2
+    assert "monthly limit of 2 searches" in ff.source_status(ff.src_parallel, _parallel_settings(), budget)
+    assert list(ff.src_parallel(item, http, ff.Settings(), budget)) == []
+    assert ff.src_parallel in ff.SOURCES["web"]
+
+
+def test_a_main_title_with_another_subtitle_is_another_work():
+    title = ("Adolescents as active managers of their own psychological needs: Examining the role of need "
+             "crafting and integrative need regulation in adolescence")
+    authors = ["Laporte", "Vandenkerckhove", "Brenning"]
+    other = ("Journal of Adolescence 88 (2021) 67-83\nAdolescents as active managers of their own psychological needs:\n"
+             "The role of psychological need crafting in adolescents' mental health\nNele Laporte, Bart Soenens")
+    assert not ff.title_near_top(title, other, 2500, authors)
+    own = other.replace("The role of psychological need crafting in adolescents' mental health",
+                        "Examining the role of need crafting and integrative need regulation in adolescence")
+    assert ff.title_near_top(title, own, 2500, authors)
+    no_subtitle = "Adolescents as active managers of their own psychological needs\nNele Laporte, Bart Soenens"
+    assert ff.title_near_top(title, no_subtitle, 2500, authors)
+    assert ff.title_near_top(title, other, 2500)  # without authors (the chapter cutter): as before
+
+
+def test_ocr_tolerance_does_not_swap_words():
+    title = "Manual of the basic psychological need satisfaction and frustration scale (BPNSFS)"
+    other = ("Frontiers in Psychology\nThe validation of the Norwegian Basic Psychological Need Satisfaction "
+             "and Frustration Scale (BPNSFS): A stratified sampling procedure\nJolene van der Kaap-Deeder")
+    assert not ff.title_near_top(title, other, 2500, ["Van der Kaap-Deeder"])
+    ocr = "Manual of the basic psychologlcal need satisfactlon and frustratlon scale (BPNSFS)\nUGent"
+    assert ff.title_near_top(title, ocr, 2500, ["Van der Kaap-Deeder"])
+
+
+def test_a_registry_title_with_other_words_after_the_main_title_is_not_similar():
+    assert ff.title_similarity("Materialistic values: Their causes and consequences",
+                               "Materialistic Values and Goals") < 0.9
+    assert ff.title_similarity("Materialistic values: Their causes and consequences", "Materialistic values") >= 0.9
+    assert ff.title_similarity("Adolescents as active managers of their needs",
+                               "Adolescents as active managers of their needs: a study") >= 0.9
+
+
+def _probe(text, **kw):
+    return {"pages": 25, "text": text, "meta_title": "", "meta_author": "", **kw}
+
+
+def test_slides_are_not_the_paper():
+    item = ff.ItemInfo("K", "journalArticle", "Multiple imputation using chained equations: Issues and guidance "
+                       "for practice", ["White", "Royston"], "2011")
+    text = ("Multiple imputation using chained equations: Issues and guidance for practice\nIan R. White, "
+            "Patrick Royston and Angela M. Wood\nBy Gabrielle Simoneau\n" + "Missing data are common. " * 12)
+    cand = ff.Candidate("https://x.org/slides.pdf", "web search")
+    assert "slides" in ff.check_pdf(item, _probe(text, probed=4, landscape=4), cand, 90_000).reason
+    assert ff.check_pdf(item, _probe(text, probed=4, landscape=0), cand, 90_000).ok
+
+
+def test_a_later_edition_of_a_book_is_refused():
+    item = ff.ItemInfo("K", "book", "Foundations of mixed methods research", ["Teddlie", "Tashakkori"], "2009")
+    text = "Foundations of Mixed Methods Research\nTeddlie Tashakkori\n© 2021 by SAGE Publications, Inc\n" * 3
+    check = ff.check_pdf(item, _probe(text, pages=178), ff.Candidate("https://x.org/b.pdf", "web search"), 900_000)
+    assert not check.ok and "another edition" in check.reason
+    reprint = text.replace("© 2021", "© 2009")
+    assert ff.check_pdf(item, _probe(reprint, pages=178), ff.Candidate("https://x.org/b.pdf", "web search"),
+                        900_000).ok
