@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.64] - 2026-10-18
+
 ### Fixed
 
 Three fixes taken from upstream (0.13.3 and 0.14.0):
