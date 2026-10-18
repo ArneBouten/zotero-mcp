@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+Three fixes taken from upstream (0.13.3 and 0.14.0):
+
+- **Book chapters and conference papers added by DOI keep their book or proceedings title.** CrossRef's container title went to `publicationTitle`, which those item types do not have, so it was dropped (upstream #638).
+- **Name particles and suffixes survive CSL JSON import.** "van der Maaten" no longer becomes "Maaten"; suffixes such as "Jr." are kept (upstream #639).
+- **Inlined `data:` images are removed from HTML snapshots before extraction**, so a saved web page with embedded images no longer floods the full text and the index with base64 (upstream #670).
+
 ## [0.13.2+arne.63] - 2026-10-11
 
 ### Added
