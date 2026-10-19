@@ -10,7 +10,8 @@
       "label": "Sync with GitHub",
       "type": "shell",
       "command": "scripts\\sync.cmd",
-      "options": { "cwd": "${workspaceFolder}" },
+      // cmd.exe, whatever VS Code's default terminal is (Git Bash would drop the backslash)
+      "options": { "cwd": "${workspaceFolder}", "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] } },
       "runOptions": { "runOn": "folderOpen" },
       "presentation": { "reveal": "always", "focus": true, "panel": "dedicated", "close": false },
       "problemMatcher": []
@@ -19,7 +20,7 @@
       "label": "Build and install zotero-mcp for Claude Desktop",
       "type": "shell",
       "command": "uv run --no-project scripts/install_build.py",
-      "options": { "cwd": "${workspaceFolder}" },
+      "options": { "cwd": "${workspaceFolder}", "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] } },
       "presentation": { "reveal": "always", "focus": true, "panel": "dedicated", "close": false },
       "problemMatcher": []
     }
