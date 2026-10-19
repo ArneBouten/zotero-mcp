@@ -182,6 +182,14 @@ libraries is two items, and collapsing them would hide where each copy lives.
 - `ZOTERO_MCP_SCHEMA_CACHE`: Custom path for the refreshed schema cache
   (default: `~/.cache/zotero-mcp/schema.json`).
 
+## Shared embedding store (two computers)
+
+```json
+{ "semantic_search": { "shared_store": { "enabled": true } } }
+```
+
+Embeddings and Gemini's structure answers are then kept in `state_dir` (see `share-state`) and reused by every computer that syncs that folder; each keeps its own index. `zotero-mcp shared-store setup` sets this and copies the existing embeddings; `ZOTERO_MCP_SHARED_STORE=0` turns it off for one run. See [Two computers](two-computers.md#the-shared-store).
+
 ## Text extraction settings
 
 PDFs are parsed with [pdf-inspector](https://github.com/firecrawl/pdf-inspector), which produces Markdown with the document's heading structure intact. These keys live under `semantic_search.extraction` in `~/.config/zotero-mcp/config.json`:

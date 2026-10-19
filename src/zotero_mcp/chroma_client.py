@@ -600,11 +600,17 @@ def create_chroma_client(config_path: str | None = None) -> ChromaClient:
         config["embedding_model"], config.get("embedding_config")
     )
 
-    return ChromaClient(
+    client = ChromaClient(
         collection_name=config["collection_name"],
         embedding_model=config["embedding_model"],
         embedding_config=config["embedding_config"]
     )
+    # Embeddings shared with other computers through a synced folder
+    # ("shared_store": {"enabled": true}); see zotero_mcp.embedding_store.
+    from zotero_mcp.embedding_store import attach
+
+    attach(getattr(client, "embedding_function", None), config)
+    return client
 
 
 class _NoEmbeddingFunction(EmbeddingFunction):

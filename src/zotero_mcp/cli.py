@@ -430,6 +430,10 @@ def _print_update_stats(stats: dict) -> None:
         print(f"- Updated: {stats.get('updated_items', 0)}")
     print(f"- Skipped: {stats.get('skipped_items', 0)}")
     print(f"- Errors: {stats.get('errors', 0)}")
+    if stats.get("shared_store"):
+        ss = stats["shared_store"]
+        print(f"- Passages from the shared store: {ss.get('from_store', 0)} "
+              f"(embedded through the API: {ss.get('embedded', 0)})")
     print(f"- Duration: {stats.get('duration', 'Unknown')}")
     if stats.get("batch_submitted"):
         print(f"- Batch run: {stats.get('batch_run_id')}")
@@ -983,6 +987,20 @@ def main():
              "knows what the others checked; run it on each computer with the same folder",
     )
     share_parser.add_argument("folder", help="The shared folder, e.g. your OneDrive's zotero-mcp\\state")
+
+    store_parser = subparsers.add_parser(
+        "shared-store",
+        help="Share embeddings and Gemini's section labels between computers through the shared "
+             "folder (state_dir), so each passage is paid for once and both indexes match",
+    )
+    store_parser.add_argument("action", choices=["setup", "status"],
+                              help="setup: turn it on and copy this computer's embeddings and labels "
+                                   "into the shared folder (no API calls); status: what is in it")
+    store_parser.add_argument("--coverage", action="store_true",
+                              help="With status: how many of this index's passages the store has")
+    store_parser.add_argument("--no-export", action="store_true",
+                              help="With setup: only turn it on, copy nothing")
+    store_parser.add_argument("--config-path", help="Path to config.json")
 
     cit_parser = subparsers.add_parser(
         "citations",
@@ -1664,6 +1682,20 @@ def main():
 
         try:
             shared_state.share(args.folder)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    elif args.command == "shared-store":
+        setup_zotero_environment()  # the embedding provider's key (no API calls are made)
+        from zotero_mcp import shared_store
+
+        config_path = str(_semantic_config_path(args.config_path))
+        try:
+            if args.action == "setup":
+                shared_store.setup(config_path, export=not args.no_export)
+            else:
+                shared_store.status(config_path, coverage=args.coverage)
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)

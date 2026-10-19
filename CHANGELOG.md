@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.65] - 2026-10-19
+
+### Added
+
+- **A shared store of embeddings and section labels for two computers** (`zotero-mcp shared-store setup`, `zotero-mcp shared-store status [--coverage]`; `docs/two-computers.md`). Each computer keeps its own search index, but before a passage is sent to the embedding API the store in the shared folder (`state_dir`, see `share-state`) is asked for it, and what one computer embeds is added for the other. Gemini's answers about a PDF's structure (headings, sections, printed pages) are kept there too, so both computers label the same PDF the same way and pay for it once. `setup` turns it on (`semantic_search.shared_store.enabled` in config.json, with a backup) and copies this computer's embeddings and structure answers into the shared folder without any API call. Files are per computer and only appended to (`<COMPUTER>-<YYYY-MM>.vec`; exports in parts of about 200 MB), so a synced folder never has two writers for one file; a record the sync has only half delivered waits until the rest arrives. Vectors are kept as float32, as ChromaDB keeps them, so nothing is lost. Any failure of the store falls back to the API. Index updates report how many passages came from the store. Off unless turned on; `ZOTERO_MCP_SHARED_STORE=0` turns it off for one run.
+- **`scripts/sync.cmd` and `scripts/install_build.py`**: comparing the working copy with GitHub and the installed build with the working copy, on opening the folder in VS Code (`extras/vscode/`).
+
 ## [0.13.2+arne.64] - 2026-10-18
 
 ### Fixed

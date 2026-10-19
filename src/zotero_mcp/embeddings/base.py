@@ -164,6 +164,10 @@ class RemoteEmbeddingFunction(BaseEmbeddingFunction):
     max_parallel_requests_default = 1
     max_retries_default = 5
     truncate_queries = False
+    #: The shared embedding store (zotero_mcp.embedding_store), attached by
+    #: create_chroma_client when config.json turns it on; None means every
+    #: document goes to the API, as before.
+    _shared_store: Any = None
 
     def _init_common(
         self,
@@ -264,6 +268,37 @@ class RemoteEmbeddingFunction(BaseEmbeddingFunction):
         }
 
     def __call__(self, input: Documents) -> Embeddings:
+        """Embed documents, taking those the shared store already has from it.
+
+        Without a store (the default) this is exactly :meth:`_embed_documents`.
+        With one, only the texts it lacks go to the API, and what comes back is
+        added to it. A failing store never fails the call: it is then skipped.
+        """
+        store = self._shared_store
+        if store is None or not input:
+            return self._embed_documents(input)
+        texts = list(input)
+        prepared = [self._prepare_document(text) for text in texts]
+        try:
+            found = store.get_many(prepared)
+        except Exception as e:
+            logger.warning(f"Shared embedding store not readable ({e}); embedding through the API.")
+            return self._embed_documents(texts)
+        missing = [i for i in range(len(texts)) if i not in found]
+        fresh = self._embed_documents([texts[i] for i in missing]) if missing else []
+        if missing:
+            try:
+                store.put_many([(prepared[i], vec) for i, vec in zip(missing, fresh)])
+            except Exception as e:
+                logger.warning(f"Could not add to the shared embedding store: {e}")
+        out: Embeddings = [None] * len(texts)  # type: ignore[list-item]
+        for i, vec in found.items():
+            out[i] = vec
+        for i, vec in zip(missing, fresh):
+            out[i] = vec
+        return out
+
+    def _embed_documents(self, input: Documents) -> Embeddings:
         """Embed documents: prepare, split into sub-batches, embed with retry.
 
         Sub-batches run sequentially when ``max_parallel_requests <= 1`` (the

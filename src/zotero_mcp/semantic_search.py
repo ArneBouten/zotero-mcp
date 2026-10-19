@@ -3481,6 +3481,12 @@ class ZoteroSemanticSearch:
             stats["duration"] = str(end_time - start_time)
             stats["end_time"] = end_time.isoformat()
 
+            store = getattr(getattr(self.chroma_client, "embedding_function", None), "_shared_store", None)
+            if store is not None and (store.hits or store.misses):
+                stats["shared_store"] = {"from_store": store.hits, "embedded": store.misses}
+                logger.info(f"Shared embedding store: {store.hits} passage(s) from the store, "
+                            f"{store.misses} embedded through the API")
+
             logger.info(f"Database update completed in {stats['duration']}")
             return stats
 

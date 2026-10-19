@@ -16,6 +16,7 @@ import datetime as _dt
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from collections import Counter
@@ -51,22 +52,44 @@ def structure_config(config_path: str | None) -> dict:
         return {}
 
 
-class _Cache:
-    """Gemini answers per (file, prompt version), on disk."""
+def shared_cache_dir() -> Path:
+    """Gemini's structure answers in the folder the computers share (``state_dir``)."""
+    from zotero_mcp.fulltext_fetch import shared_dir
 
-    def __init__(self) -> None:
-        self.dir = structure_dir() / "gemini-cache"
+    return shared_dir() / "structure" / "gemini-cache"
+
+
+class _Cache:
+    """Gemini answers per (file, prompt version), on disk.
+
+    With the shared store on (``semantic_search.shared_store.enabled``), answers
+    are kept in the shared folder, so the other computer labels the same PDF
+    the same way without asking Gemini again; this computer's own older cache
+    is still read. One file per answer, written once: safe in a synced folder.
+    """
+
+    def __init__(self, shared: bool = False) -> None:
+        local = structure_dir() / "gemini-cache"
+        self.dir = shared_cache_dir() if shared else local
+        self.fallback = local if self.dir != local else None
 
     def get(self, key: str) -> str | None:
-        try:
-            return (self.dir / f"{key}.json").read_text(encoding="utf-8")
-        except OSError:
-            return None
+        for d in (self.dir, self.fallback):
+            if d is None:
+                continue
+            try:
+                return (d / f"{key}.json").read_text(encoding="utf-8")
+            except OSError:
+                continue
+        return None
 
     def put(self, key: str, value: str) -> None:
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
-            (self.dir / f"{key}.json").write_text(value, encoding="utf-8")
+            target = self.dir / f"{key}.json"
+            tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+            tmp.write_text(value, encoding="utf-8")
+            os.replace(tmp, target)
         except OSError:
             pass
 
@@ -168,7 +191,9 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
     use_gemini = cfg.get("gemini", False) if gemini is None else gemini
     model = cfg.get("gemini_model") or DEFAULT_MODEL
     thinking = cfg.get("gemini_thinking") or "low"
-    cache = _Cache()
+    from zotero_mcp.embedding_store import enabled_in_config_file
+
+    cache = _Cache(shared=enabled_in_config_file(config_path))
     if use_gemini and ask is None:
         try:
             raw_ask = st.gemini_asker(model, search.chroma_client.embedding_config, thinking=thinking)

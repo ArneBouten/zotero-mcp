@@ -10,6 +10,7 @@ a live sync like OneDrive, so the steps below remind you.
 | What Claude Desktop runs | `py -3.12`'s `Scripts\zotero-mcp.exe`, installed from the working copy | the same |
 | Settings | `%USERPROFILE%\.config\zotero-mcp\config.json` and `keys.env` | own copy (no keys in git) |
 | Search index | `%USERPROFILE%\.config\zotero-mcp\chroma_db` | own index; never shared or synced |
+| Embeddings and section labels | the shared store in `state\embeddings` and `state\structure` ([below](#the-shared-store)) | the same store: paid for once |
 | Shared state (checks, citations, counters) | `state_dir` in `config.json`: the OneDrive folder's `state` ([Two computers](maintenance.md#two-computers)) | the same folder |
 | Python tools | uv (`%USERPROFILE%\.local\bin\uv.exe`) and Python 3.12 from python.org | the same |
 
@@ -45,6 +46,34 @@ The installed version and commit are recorded in
 notices new code under an unchanged version number. Ask Claude to run
 `zotero_get_search_database_status` to see the version the server reports.
 
+## The shared store
+
+Each computer keeps its own search index, but the paid parts of it are shared
+through the OneDrive `state` folder (arne.65 and later):
+
+- **Embeddings** (`state\embeddings\<model>\`): before a passage is sent to
+  Gemini, the store is asked for it; what one computer embeds is added for the
+  other. The same text with the same model gives the same embedding, so this
+  only saves the second payment.
+- **Gemini's reading of a PDF's structure** (`state\structure\gemini-cache\`):
+  headings, sections and printed pages. This part is generative, so sharing it
+  also makes both computers label the same PDF the same way.
+
+Turned on with `"shared_store": {"enabled": true}` under `semantic_search` in
+`config.json` (the settings template has it). `zotero-mcp shared-store setup`
+turns it on and copies this computer's embeddings and structure answers into the
+store, read from the index without any API call (about 2 GB for the PC's index:
+12 KB per passage). `zotero-mcp shared-store status --coverage` shows what is in
+it and how much of this computer's index it covers; index updates print
+*Passages from the shared store: N (embedded through the API: M)*.
+
+Each computer writes only its own files (`<COMPUTER>-<YYYY-MM>.vec`, exports in
+parts of about 200 MB) and only appends to them, so OneDrive never has two
+writers for one file. A store that is missing or unreadable is skipped: the
+passages are then embedded through the API, as before. What a computer embeds
+only reaches the store when its extracted text is the same, so both should run
+the same build (the sync check above takes care of that).
+
 ## Setting up a computer
 
 The OneDrive folder `OneDrive - UGent\Academic\Software\zotero-mcp` has
@@ -55,6 +84,12 @@ installer), clones this repository to `%USERPROFILE%\zotero-mcp` on `arne/main`
 `%USERPROFILE%\.config\zotero-mcp\config.json` if there is none, unpacks the
 search index snapshot if there is no index yet, copies the Zotero action scripts,
 builds and installs zotero-mcp, and prints the path of `zotero-mcp.exe`.
+What the new index still lacks after that (everything, without a snapshot)
+is added at Claude Desktop's first start, or with
+`py -3.12 -m zotero_mcp.cli update-db`: every missing paper is read on this
+computer (hours for a whole library), but its embeddings and labels come from
+the store. Papers that an older build read differently from today's are the
+exception: their text no longer matches, so they are embedded again.
 
 By hand, the same in PowerShell:
 
@@ -79,9 +114,11 @@ Then, once per computer:
    `env` block (Gemini and Voyage keys, `ZOTERO_LOCAL`, `ZOTERO_MCP_WORD_AUTHOR`)
    must be the same on both.
 3. **Shared state:** the settings template already points `state_dir` at the
-   OneDrive folder's `state`; on a computer that had its own records, run
+   OneDrive folder's `state` and turns the shared store on; on a computer that
+   had its own records, run
    `py -3.12 -m zotero_mcp.cli share-state "$env:USERPROFILE\OneDrive - UGent\Academic\Software\zotero-mcp\state"`
-   instead ([Two computers](maintenance.md#two-computers)).
+   instead ([Two computers](maintenance.md#two-computers)), then
+   `py -3.12 -m zotero_mcp.cli shared-store setup`.
 4. **OCR for scanned PDFs** (optional): `py -3.12 -m zotero_mcp.cli ocr-setup`.
 5. **Zotero:** signed in and synced, files downloaded at sync time, Better BibTeX,
    *Settings → Advanced → Allow other applications on this computer to
