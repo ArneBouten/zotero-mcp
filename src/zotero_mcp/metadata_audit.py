@@ -64,6 +64,13 @@ def meta_dir() -> Path:
     return ff.shared_dir() / "metadata"
 
 
+def pdf_answer_store():
+    """Gemini's readings of PDFs (metadata audit), shared: a few append-only files per computer."""
+    from zotero_mcp.answer_store import AnswerStore
+
+    return AnswerStore("pdf-readings", meta_dir() / "pdf-answers", legacy_dirs=[meta_dir() / "pdf-cache"])
+
+
 # ---------------------------------------------------------------------------
 # Records from the sources
 # ---------------------------------------------------------------------------
@@ -1790,6 +1797,37 @@ def _pdf_gemini_reader(model: str | None = None, config_path: str | None = None,
     if reader is None:
         return None
     cache = meta_dir() / "pdf-cache"
+    # With the shared store on, the readings go into a few append-only files per computer
+    # (zotero_mcp.answer_store) instead of one file each; those are still read.
+    store = None
+    from zotero_mcp.embedding_store import is_enabled
+
+    if is_enabled(cfg):
+        try:
+            store = pdf_answer_store()
+        except Exception as e:
+            log(f"Shared PDF readings unavailable ({e}); using one file per reading.")
+
+    def cached(sig: str) -> dict | None:
+        try:
+            text = store.get(sig) if store is not None else (cache / f"{sig}.json").read_text(encoding="utf-8")
+            return json.loads(text) if text is not None else None
+        except (OSError, ValueError):
+            return None
+
+    def keep(sig: str, data: dict) -> None:
+        text = json.dumps(data, ensure_ascii=False)
+        try:
+            if store is not None:
+                store.put(sig, text)
+                return
+        except Exception as e:
+            log(f"Could not add to the shared PDF readings: {e}")
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / f"{sig}.json").write_text(text, encoding="utf-8")
+        except OSError:
+            pass
 
     def read(key: str) -> dict | None:
         for att in reader.get_attachment_paths(key):
@@ -1797,21 +1835,15 @@ def _pdf_gemini_reader(model: str | None = None, config_path: str | None = None,
             if not (att.get("exists") and path and str(path).lower().endswith(".pdf")):
                 continue
             sig = structure.file_signature(path)
-            hit = cache / f"{sig}.json"
-            try:
-                return json.loads(hit.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                pass
+            hit = cached(sig)
+            if hit is not None:
+                return hit
             prompt = pdf_prompt(path)
             if prompt is None:
                 return None
             data = gemini_util.ask_json(ask, prompt)
             if isinstance(data, dict):
-                try:
-                    cache.mkdir(parents=True, exist_ok=True)
-                    hit.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-                except OSError:
-                    pass
+                keep(sig, data)
                 return data
             return None
         return None

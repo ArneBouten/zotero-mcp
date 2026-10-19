@@ -205,21 +205,26 @@ def test_store_is_safe_with_parallel_callers(tmp_path):
 # -- relabel's Gemini cache in the shared folder ----------------------------------------
 
 
-def test_relabel_cache_shared_reads_local_fallback_and_writes_shared(tmp_path, monkeypatch):
+def test_relabel_cache_shared_uses_the_answer_store_and_reads_old_files(tmp_path, monkeypatch):
     from zotero_mcp import relabel
 
     local = tmp_path / "local"
     shared = tmp_path / "shared"
     monkeypatch.setattr(relabel, "structure_dir", lambda: local / "structure")
     monkeypatch.setattr(relabel, "shared_cache_dir", lambda: shared / "structure" / "gemini-cache")
+    monkeypatch.setattr(relabel, "shared_answers_dir", lambda: shared / "structure" / "answers")
+    monkeypatch.setattr("zotero_mcp.answer_store._config_dir", lambda: tmp_path / "cfg")
     (local / "structure" / "gemini-cache").mkdir(parents=True)
     (local / "structure" / "gemini-cache" / "old.json").write_text("from before", encoding="utf-8")
+    (shared / "structure" / "gemini-cache").mkdir(parents=True)
+    (shared / "structure" / "gemini-cache" / "arne65.json").write_text("loose shared", encoding="utf-8")
     cache = relabel._Cache(shared=True)
     assert cache.get("old") == "from before"
+    assert cache.get("arne65") == "loose shared"
     cache.put("new", "answer")
-    assert (shared / "structure" / "gemini-cache" / "new.json").read_text(encoding="utf-8") == "answer"
-    assert not (local / "structure" / "gemini-cache" / "new.json").exists()
-    assert not list((shared / "structure" / "gemini-cache").glob(".*tmp"))
+    assert cache.get("new") == "answer"
+    assert [p.suffix for p in (shared / "structure" / "answers").iterdir()] == [".jsonl"]
+    assert not (shared / "structure" / "gemini-cache" / "new.json").exists()
 
 
 def test_relabel_cache_unshared_is_unchanged(tmp_path, monkeypatch):
@@ -228,8 +233,14 @@ def test_relabel_cache_unshared_is_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(relabel, "structure_dir", lambda: tmp_path / "structure")
     cache = relabel._Cache()
     cache.put("k", "v")
-    assert cache.fallback is None
+    assert cache.store is None
     assert (tmp_path / "structure" / "gemini-cache" / "k.json").read_text(encoding="utf-8") == "v"
+
+
+def test_file_owner_keeps_hyphens_in_computer_names():
+    assert es.file_owner("DESKTOP-A-export-0001.vec") == "DESKTOP-A"
+    assert es.file_owner("LAPTOP-A-2026-10.jsonl") == "LAPTOP-A"
+    assert es.file_owner("PC-pack-0002.jsonl") == "PC"
 
 
 # -- zotero-mcp shared-store setup -------------------------------------------------------

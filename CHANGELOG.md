@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.66] - 2026-10-19
+
+### Changed
+
+- **Gemini's cached answers in a few files instead of thousands.** With the shared store on, Gemini's readings of a PDF's structure (headings, sections, printed pages) and the metadata audit's readings of a PDF are kept like the embeddings: each computer appends to its own file per month (`state\structure\answers\<COMPUTER>-<YYYY-MM>.jsonl`, `state\metadata\pdf-answers\…`), one line per answer. arne.65 wrote one small file per answer (about 3,400 so far), which OneDrive syncs slowly. `zotero-mcp shared-store pack` puts those into pack files and moves the loose ones out of the shared folder to `~\.config\zotero-mcp\_archive\`; answers kept one file each are still read. A half-synced line waits for the rest; two processes on one computer take turns writing (a lock file outside the synced folder), for the embeddings too.
+
+### Fixed
+
+- `shared-store status` named a computer by the part of its name before the first hyphen ("DESKTOP" for DESKTOP-A); `--coverage` reports its progress.
+
 ## [0.13.2+arne.65] - 2026-10-19
 
 ### Added

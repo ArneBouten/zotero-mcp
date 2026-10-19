@@ -55,9 +55,10 @@ through the OneDrive `state` folder (arne.65 and later):
   Gemini, the store is asked for it; what one computer embeds is added for the
   other. The same text with the same model gives the same embedding, so this
   only saves the second payment.
-- **Gemini's reading of a PDF's structure** (`state\structure\gemini-cache\`):
+- **Gemini's reading of a PDF's structure** (`state\structure\answers\`):
   headings, sections and printed pages. This part is generative, so sharing it
-  also makes both computers label the same PDF the same way.
+  also makes both computers label the same PDF the same way. The metadata
+  audit's readings of PDFs are kept the same way (`state\metadata\pdf-answers\`).
 
 Turned on with `"shared_store": {"enabled": true}` under `semantic_search` in
 `config.json` (the settings template has it). `zotero-mcp shared-store setup`
@@ -67,9 +68,12 @@ store, read from the index without any API call (about 2 GB for the PC's index:
 it and how much of this computer's index it covers; index updates print
 *Passages from the shared store: N (embedded through the API: M)*.
 
-Each computer writes only its own files (`<COMPUTER>-<YYYY-MM>.vec`, exports in
-parts of about 200 MB) and only appends to them, so OneDrive never has two
-writers for one file. A store that is missing or unreadable is skipped: the
+Each computer writes only its own files (`<COMPUTER>-<YYYY-MM>.vec` and
+`.jsonl`, exports and packs in parts) and only appends to them, so OneDrive
+never has two writers for one file, and a whole library is a few dozen files
+rather than thousands. `zotero-mcp shared-store pack` puts answers that an
+older build kept one file each into such files and moves the loose files out of
+the shared folder (to `~\.config\zotero-mcp\_archive\`). A store that is missing or unreadable is skipped: the
 passages are then embedded through the API, as before. What a computer embeds
 only reaches the store when its extracted text is the same, so both should run
 the same build (the sync check above takes care of that).

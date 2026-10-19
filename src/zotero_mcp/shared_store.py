@@ -1,4 +1,4 @@
-"""``zotero-mcp shared-store setup|status``: embeddings and section labels shared between computers.
+"""``zotero-mcp shared-store setup|status|pack``: embeddings and section labels shared between computers.
 
 ``setup`` turns the shared store on in config.json (``semantic_search.shared_store``), then
 copies what this computer already has into the shared folder (``state_dir``, see
@@ -29,6 +29,18 @@ def _format_bytes(n: int) -> str:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n} B"
+
+
+def _log_per_computer(files: list[dict], log: Callable[[str], None]) -> None:
+    per: dict[str, list[int]] = {}
+    for f in files:
+        agg = per.setdefault(es.file_owner(f["name"]), [0, 0, 0])
+        agg[0] += f.get("records") or 0
+        agg[1] += f["bytes"]
+        agg[2] += 1
+    for who, (n, size, nfiles) in sorted(per.items()):
+        records = f"{n} records, " if n else ""
+        log(f"  {who}: {records}{_format_bytes(size)} in {nfiles} file(s)")
 
 
 def _require_shared_folder() -> Path:
@@ -92,21 +104,54 @@ def export_embeddings(client, store: es.EmbeddingStore, log: Callable[[str], Non
     return {"passages": seen, "added": added}
 
 
-def copy_structure_cache(log: Callable[[str], None] = print) -> int:
-    from zotero_mcp import relabel
+def pack(log: Callable[[str], None] = print) -> dict:
+    """``zotero-mcp shared-store pack``: the loose answer files into the shared stores."""
+    _require_shared_folder()
+    return pack_answers(log, archive=True)
 
-    src = relabel.structure_dir() / "gemini-cache"
-    dst = relabel.shared_cache_dir()
-    if not src.is_dir() or src.resolve() == dst.resolve():
-        return 0
-    dst.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for f in src.glob("*.json"):
-        target = dst / f.name
-        if not target.exists():
-            shutil.copy2(f, target)
-            n += 1
-    return n
+
+def pack_answers(log: Callable[[str], None] = print, archive: bool = True) -> dict:
+    """Put Gemini's cached answers kept one file each into the shared answer stores.
+
+    Structure answers (this computer's own cache and arne.65's shared folder) and the
+    metadata audit's PDF readings. With ``archive``, the loose files in the shared folder
+    are then moved out of it, to ``~/.config/zotero-mcp/_archive/``, so the synced folder
+    no longer holds thousands of small files. No API calls.
+    """
+    from zotero_mcp import fulltext_fetch as ff
+    from zotero_mcp import metadata_audit, relabel
+
+    jobs = [
+        ("structure answers", relabel.shared_answer_store(),
+         [relabel.structure_dir() / "gemini-cache", relabel.shared_cache_dir()], relabel.shared_cache_dir()),
+        ("PDF readings", metadata_audit.pdf_answer_store(),
+         [metadata_audit.meta_dir() / "pdf-cache"], metadata_audit.meta_dir() / "pdf-cache"),
+    ]
+    result: dict = {}
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    shared_root = ff.shared_dir().resolve()
+    for label, store, sources, loose_shared in jobs:
+        n = store.pack_legacy(sources, log=log)
+        total = store.count()
+        result[label] = {"packed": n, "in_store": total}
+        log(f"{label.capitalize()}: {n} packed, {total} in {store.dir}")
+        if not (archive and loose_shared.is_dir()):
+            continue
+        try:
+            inside_shared = loose_shared.resolve().is_relative_to(shared_root)
+        except Exception:
+            inside_shared = False
+        if not inside_shared or shared_root == ff.config_dir().resolve():
+            continue
+        missing = [f for f in loose_shared.glob("*.json") if not store.has(f.stem)]
+        if missing:
+            log(f"  Kept {loose_shared}: {len(missing)} file(s) could not be packed.")
+            continue
+        target = ff.config_dir() / "_archive" / f"{stamp}-{loose_shared.parent.name}-{loose_shared.name}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(loose_shared), str(target))
+        log(f"  Moved the loose files out of the shared folder to {target}")
+    return result
 
 
 def setup(config_path: str, export: bool = True, log: Callable[[str], None] = print) -> dict:
@@ -125,9 +170,7 @@ def setup(config_path: str, export: bool = True, log: Callable[[str], None] = pr
         )
     log(f"Copying this index's embeddings to {store.dir} (no API calls) ...")
     result["embeddings"] = export_embeddings(client, store, log)
-    n = copy_structure_cache(log)
-    result["structure_answers_copied"] = n
-    log(f"Copied {n} of Gemini's structure answers to the shared folder.")
+    result["answers"] = pack_answers(log, archive=False)
     log(f"Done: {store.count()} embeddings in the store. Both computers now take from it what the "
         "other already paid for.")
     return result
@@ -147,14 +190,7 @@ def status(config_path: str, coverage: bool = False, log: Callable[[str], None] 
         store = getattr(client.embedding_function, "_shared_store", None) or es.EmbeddingStore(ns)
         out["embeddings"] = store.count()
         log(f"Embeddings ({ns}): {out['embeddings']} in {store.dir}")
-        per: dict[str, list[int]] = {}
-        for f in store.files():
-            who = f["name"].split("-", 1)[0]
-            agg = per.setdefault(who, [0, 0])
-            agg[0] += f["records"] or 0
-            agg[1] += f["bytes"]
-        for who, (n, size) in sorted(per.items()):
-            log(f"  {who}: {n} records, {_format_bytes(size)}")
+        _log_per_computer(store.files(), log)
         if coverage:
             prepare = getattr(client.embedding_function, "_prepare_document", lambda t: t)
             have = total = 0
@@ -171,12 +207,20 @@ def status(config_path: str, coverage: bool = False, log: Callable[[str], None] 
                     total += 1
                     have += store.has(prepare(d))
                 offset += len(docs)
+                if offset % 20000 < 1000:
+                    log(f"  {offset}/{count} passages checked ...")
             out["coverage"] = {"in_store": have, "passages": total}
             log(f"This index: {have} of {total} passages are in the store")
-    shared_cache = relabel.shared_cache_dir()
-    local_cache = relabel.structure_dir() / "gemini-cache"
-    n_shared = len(list(shared_cache.glob("*.json"))) if shared_cache.is_dir() else 0
-    n_local = len(list(local_cache.glob("*.json"))) if local_cache.is_dir() else 0
-    out["structure_answers"] = {"shared": n_shared, "local": n_local}
-    log(f"Gemini structure answers: {n_shared} shared, {n_local} in this computer's own cache")
+    from zotero_mcp import metadata_audit
+
+    for label, store in (("Gemini structure answers", relabel.shared_answer_store()),
+                         ("Gemini PDF readings", metadata_audit.pdf_answer_store())):
+        n = store.count()
+        shared_root = ff.shared_dir().resolve()
+        loose = sum(len(list(d.glob("*.json"))) for d in store.legacy_dirs
+                    if d.is_dir() and d.resolve().is_relative_to(shared_root)
+                    and shared_root != ff.config_dir().resolve())
+        out[label] = {"in_store": n, "loose_files": loose}
+        log(f"{label}: {n} in {store.dir}" + (f" ({loose} still one file each; `shared-store pack`)" if loose else ""))
+        _log_per_computer(store.files(), log)
     return out

@@ -31,6 +31,7 @@ save money, never cost an index update.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -82,6 +83,43 @@ def namespace_for(embedding_function: Any) -> str | None:
     return _slug("-".join(str(p) for p in parts))
 
 
+def file_owner(file_name: str) -> str:
+    """The computer that wrote a store file: ``DESKTOP-A-export-0001.vec`` -> ``DESKTOP-A``."""
+    m = re.match(r"^(.*?)-(?:export-\d+|pack-\d+|\d{4}-\d{2})\.\w+$", file_name)
+    return m.group(1) if m else file_name.rsplit(".", 1)[0]
+
+
+@contextlib.contextmanager
+def locked(lock_path: Path):
+    """Hold an exclusive lock on ``lock_path`` (a local file, never a synced one), so two
+    processes on this computer never append to the same store file at once."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as f:
+        if os.name == "nt":
+            import msvcrt
+
+            f.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:  # LK_LOCK gives up after ~10 s; keep waiting
+                    continue
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
 def text_key(namespace: str, text: str) -> bytes:
     return hashlib.sha256(f"{namespace}\x00doc\x00{text}".encode()).digest()
 
@@ -121,7 +159,8 @@ class EmbeddingStore:
         self.computer = _slug(computer or computer_name()).upper()
         index_dir = index_dir or (_config_dir() / "embedding-store")
         index_dir.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(str(index_dir / f"{namespace}.sqlite"), check_same_thread=False)
+        self._lock_path = index_dir / f"{namespace}.lock"
+        self._db = sqlite3.connect(str(index_dir / f"{namespace}.sqlite"), check_same_thread=False, timeout=30)
         self._db.execute("CREATE TABLE IF NOT EXISTS files (name TEXT PRIMARY KEY, scanned INTEGER, dim INTEGER)")
         self._db.execute("CREATE TABLE IF NOT EXISTS keys (key BLOB PRIMARY KEY, file TEXT, offset INTEGER)")
         self._db.commit()
@@ -267,7 +306,8 @@ class EmbeddingStore:
             path = path or self.own_file()
             self.dir.mkdir(parents=True, exist_ok=True)
             rows = []
-            with open(path, "ab") as f:
+            with locked(self._lock_path), open(path, "ab") as f:
+                f.seek(0, os.SEEK_END)
                 if f.tell() == 0:
                     f.write(HEADER.pack(MAGIC, self.dim, 0))
                 offset = f.tell()
@@ -279,7 +319,11 @@ class EmbeddingStore:
             for i, (key, _) in enumerate(records):
                 rows.append((key, path.name, offset + i * rec))
             self._db.executemany("INSERT OR IGNORE INTO keys VALUES (?, ?, ?)", rows)
-            self._db.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?)", (path.name, end, self.dim))
+            # Move the scan mark past our own records only when nothing came before them
+            # unscanned (another process on this computer may have appended in between).
+            self._db.execute("UPDATE files SET scanned = ? WHERE name = ? AND scanned = ?", (end, path.name, offset))
+            self._db.execute("INSERT OR IGNORE INTO files VALUES (?, ?, ?)",
+                             (path.name, end if offset == HEADER_SIZE else 0, self.dim))
             self._db.commit()
             self.added += len(records)
             return len(records)

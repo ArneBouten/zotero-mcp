@@ -993,9 +993,11 @@ def main():
         help="Share embeddings and Gemini's section labels between computers through the shared "
              "folder (state_dir), so each passage is paid for once and both indexes match",
     )
-    store_parser.add_argument("action", choices=["setup", "status"],
+    store_parser.add_argument("action", choices=["setup", "status", "pack"],
                               help="setup: turn it on and copy this computer's embeddings and labels "
-                                   "into the shared folder (no API calls); status: what is in it")
+                                   "into the shared folder (no API calls); status: what is in it; "
+                                   "pack: put Gemini's cached answers kept one file each into a few "
+                                   "files, and move the loose ones out of the shared folder")
     store_parser.add_argument("--coverage", action="store_true",
                               help="With status: how many of this index's passages the store has")
     store_parser.add_argument("--no-export", action="store_true",
@@ -1694,6 +1696,8 @@ def main():
         try:
             if args.action == "setup":
                 shared_store.setup(config_path, export=not args.no_export)
+            elif args.action == "pack":
+                shared_store.pack()
             else:
                 shared_store.status(config_path, coverage=args.coverage)
         except Exception as e:

@@ -16,7 +16,6 @@ import datetime as _dt
 import hashlib
 import json
 import logging
-import os
 import threading
 import time
 from collections import Counter
@@ -53,43 +52,63 @@ def structure_config(config_path: str | None) -> dict:
 
 
 def shared_cache_dir() -> Path:
-    """Gemini's structure answers in the folder the computers share (``state_dir``)."""
+    """Where arne.65 kept Gemini's structure answers in the shared folder, one file each."""
     from zotero_mcp.fulltext_fetch import shared_dir
 
     return shared_dir() / "structure" / "gemini-cache"
+
+
+def shared_answers_dir() -> Path:
+    """Gemini's structure answers in the shared folder, a few files per computer."""
+    from zotero_mcp.fulltext_fetch import shared_dir
+
+    return shared_dir() / "structure" / "answers"
+
+
+def shared_answer_store():
+    from zotero_mcp.answer_store import AnswerStore
+
+    return AnswerStore("structure", shared_answers_dir(),
+                       legacy_dirs=[shared_cache_dir(), structure_dir() / "gemini-cache"])
 
 
 class _Cache:
     """Gemini answers per (file, prompt version), on disk.
 
     With the shared store on (``semantic_search.shared_store.enabled``), answers
-    are kept in the shared folder, so the other computer labels the same PDF
-    the same way without asking Gemini again; this computer's own older cache
-    is still read. One file per answer, written once: safe in a synced folder.
+    are kept in the shared folder (:class:`zotero_mcp.answer_store.AnswerStore`:
+    a few append-only files per computer), so the other computer labels the same
+    PDF the same way without asking Gemini again; answers kept one file each,
+    shared or local, are still read.
     """
 
     def __init__(self, shared: bool = False) -> None:
-        local = structure_dir() / "gemini-cache"
-        self.dir = shared_cache_dir() if shared else local
-        self.fallback = local if self.dir != local else None
+        self.dir = structure_dir() / "gemini-cache"
+        self.store = None
+        if shared:
+            try:
+                self.store = shared_answer_store()
+            except Exception as e:
+                logger.warning(f"Shared structure answers unavailable ({e}); using this computer's cache.")
 
     def get(self, key: str) -> str | None:
-        for d in (self.dir, self.fallback):
-            if d is None:
-                continue
-            try:
-                return (d / f"{key}.json").read_text(encoding="utf-8")
-            except OSError:
-                continue
-        return None
+        if self.store is not None:
+            return self.store.get(key)
+        try:
+            return (self.dir / f"{key}.json").read_text(encoding="utf-8")
+        except OSError:
+            return None
 
     def put(self, key: str, value: str) -> None:
+        if self.store is not None:
+            try:
+                self.store.put(key, value)
+                return
+            except Exception as e:
+                logger.warning(f"Could not add to the shared structure answers: {e}")
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
-            target = self.dir / f"{key}.json"
-            tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-            tmp.write_text(value, encoding="utf-8")
-            os.replace(tmp, target)
+            (self.dir / f"{key}.json").write_text(value, encoding="utf-8")
         except OSError:
             pass
 
