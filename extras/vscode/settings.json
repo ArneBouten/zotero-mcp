@@ -1,0 +1,13 @@
+{
+  // Two computers: check GitHub for changes every few minutes (arrows in the
+  // status bar at the bottom left), and after every commit offer to sync
+  // (pull + push), so the other computer gets it.
+  "git.autofetch": true,
+  "git.postCommitCommand": "sync",
+  "git.confirmSync": true,
+
+  // Tests (uv run pytest) and the uv-managed environment in .venv
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["tests"],
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe"
+}

@@ -2,3 +2,6 @@
 # tests/test_skill_reference_current.py checks the tracked reference is LF.
 # Without this, a Windows checkout with core.autocrlf rewrites it to CRLF.
 src/zotero_mcp/skills/** text eol=lf
+
+# Batch files must keep CRLF line endings for cmd.exe.
+*.cmd text eol=crlf

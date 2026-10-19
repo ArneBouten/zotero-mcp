@@ -1,0 +1,27 @@
+{
+  // Runs scripts\sync.cmd when this folder is opened in VS Code: tells you what
+  // your other computer pushed (and offers to pull), whether this computer has
+  // commits that are not on GitHub yet (and offers to push), and whether the
+  // zotero-mcp Claude Desktop runs is older than this folder (and offers to
+  // build and install it).
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Sync with GitHub",
+      "type": "shell",
+      "command": "scripts\\sync.cmd",
+      "options": { "cwd": "${workspaceFolder}" },
+      "runOptions": { "runOn": "folderOpen" },
+      "presentation": { "reveal": "always", "focus": true, "panel": "dedicated", "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build and install zotero-mcp for Claude Desktop",
+      "type": "shell",
+      "command": "uv run --no-project scripts/install_build.py",
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "reveal": "always", "focus": true, "panel": "dedicated", "close": false },
+      "problemMatcher": []
+    }
+  ]
+}
