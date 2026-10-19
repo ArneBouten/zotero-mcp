@@ -78,6 +78,40 @@ passages are then embedded through the API, as before. What a computer embeds
 only reaches the store when its extracted text is the same, so both should run
 the same build (the sync check above takes care of that).
 
+### One index on both computers
+
+The store above saves money; it does not by itself make the two indexes the
+same (each computer would still read the PDFs and cut them into passages
+itself). From arne.67 the index itself is shared through a log in
+`state\index\`:
+
+- **Newest wins, both ways.** After every update, each paper whose index
+  entries changed is published whole: the ids, texts and metadata of its
+  passages (the embeddings are in the store). For each paper the newest
+  publication, from either computer, is the one both indexes hold. Before an
+  update a computer copies what the other published more recently: no PDF
+  reading, no Gemini.
+- **One computer per paper.** Before a computer reads a new or changed paper,
+  it claims it in the log. The other leaves a paper its peer claimed in the
+  last 30 minutes alone and copies it once it is published; a claim that is
+  never finished (the computer went to sleep) runs out, and the other one does
+  it. A paper whose file Zotero has not downloaded here yet is left to the
+  computer that has it, for up to a day.
+- **Both can stay open.** Claude Desktop and Zotero can run on both computers.
+  The computer whose Zotero gets a paper first indexes it; the other copies it
+  at its next update (Claude Desktop's start, or before a search: a search
+  waits up to 25 seconds when the other computer published something new).
+
+Commands (`py -3.12 -m zotero_mcp.cli shared-store …`):
+
+| Command | What it does |
+|---|---|
+| `publish --all` | Publishes every paper of this index (once, on the computer with the full index) |
+| `mirror` | Replaces this computer's index by an exact copy from the log (the old one goes to `~\.config\zotero-mcp\_archive\`); minutes, no PDFs read, no API calls. Quit Claude Desktop first |
+| `pull` | Copies what the other computer published since (updates do this by themselves) |
+| `compare [--fix]` | Lists papers whose entries here differ from their newest publication; `--fix` makes them match |
+| `status [--coverage]` | What is in the store and the log, and whether something is waiting to be copied |
+
 ## Setting up a computer
 
 The OneDrive folder `OneDrive - UGent\Academic\Software\zotero-mcp` has
@@ -85,15 +119,11 @@ The OneDrive folder `OneDrive - UGent\Academic\Software\zotero-mcp` has
 it. It installs what is missing (Git, uv, Python 3.12, with winget or uv's own
 installer), clones this repository to `%USERPROFILE%\zotero-mcp` on `arne/main`
 (or syncs an existing clone), copies `extras\vscode\*.json` into `.vscode\`, puts the settings template in
-`%USERPROFILE%\.config\zotero-mcp\config.json` if there is none, unpacks the
-search index snapshot if there is no index yet, copies the Zotero action scripts,
-builds and installs zotero-mcp, and prints the path of `zotero-mcp.exe`.
-What the new index still lacks after that (everything, without a snapshot)
-is added at Claude Desktop's first start, or with
-`py -3.12 -m zotero_mcp.cli update-db`: every missing paper is read on this
-computer (hours for a whole library), but its embeddings and labels come from
-the store. Papers that an older build read differently from today's are the
-exception: their text no longer matches, so they are embedded again.
+`%USERPROFILE%\.config\zotero-mcp\config.json` if there is none, copies the
+Zotero action scripts, builds and installs zotero-mcp, points it at the shared
+folder, and prints the path of `zotero-mcp.exe`.
+It then makes this computer's index an exact copy of the other's
+(`shared-store mirror`; an existing index is moved to `_archive`, not deleted).
 
 By hand, the same in PowerShell:
 

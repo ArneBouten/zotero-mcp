@@ -65,6 +65,10 @@ class ChromaClient:
             embedding_config: Configuration for the embedding model
         """
         self.collection_name = collection_name
+        # The shared index log (zotero_mcp.index_sync), attached by
+        # create_chroma_client when the shared store is on: every write below
+        # notes which papers it touched, so they can be published.
+        self.index_sync = None
         self.embedding_model = embedding_model
         self.embedding_config = embedding_config or {}
 
@@ -189,6 +193,17 @@ class ChromaClient:
                 text = text[:max_chars]
         return text
 
+    def _journal(self, ids: list[str] | None = None, metadatas: list[dict[str, Any]] | None = None,
+                 keys: list[str] | None = None) -> None:
+        sync = getattr(self, "index_sync", None)
+        if sync is None:
+            return
+        touched = set(keys or [])
+        for i, doc_id in enumerate(ids or []):
+            meta = metadatas[i] if metadatas and i < len(metadatas) else None
+            touched.add((meta or {}).get("item_key") or str(doc_id).split("#", 1)[0])
+        sync.touch(touched)
+
     def add_documents(self,
                      documents: list[str],
                      metadatas: list[dict[str, Any]],
@@ -207,6 +222,7 @@ class ChromaClient:
                 metadatas=metadatas,
                 ids=ids
             )
+            self._journal(ids, metadatas)
             logger.info(f"Added {len(documents)} documents to ChromaDB collection")
         except Exception as e:
             logger.error(f"Error adding documents to ChromaDB: {e}")
@@ -238,6 +254,7 @@ class ChromaClient:
                     metadatas=metadatas[i:i + max_batch],
                     ids=ids[i:i + max_batch]
                 )
+            self._journal(ids, metadatas)
             logger.info(f"Upserted {len(documents)} documents to ChromaDB collection")
         except Exception as e:
             logger.error(f"Error upserting documents to ChromaDB: {e}")
@@ -267,6 +284,7 @@ class ChromaClient:
                     ids=ids[i:i + max_batch],
                     embeddings=embeddings[i:i + max_batch],
                 )
+            self._journal(ids, metadatas)
             logger.info(f"Upserted {len(documents)} precomputed embeddings to ChromaDB collection")
         except Exception as e:
             logger.error(f"Error upserting precomputed embeddings to ChromaDB: {e}")
@@ -330,6 +348,7 @@ class ChromaClient:
         """
         try:
             self.collection.delete(ids=ids)
+            self._journal(ids)
             logger.info(f"Deleted {len(ids)} documents from ChromaDB collection")
         except Exception as e:
             logger.error(f"Error deleting documents from ChromaDB: {e}")
@@ -356,6 +375,7 @@ class ChromaClient:
             where = {"$and": [{"parent_item_key": item_key}, {"group_id": int(group_id)}]}
         try:
             self.collection.delete(where=where)
+            self._journal(keys=[item_key])
         except Exception as e:
             logger.warning(f"delete_item_chunks({item_key}) failed: {e}")
 
@@ -371,6 +391,7 @@ class ChromaClient:
         try:
             self.collection.delete(where=where)
             self.collection.delete(ids=[item_key])
+            self._journal(keys=[item_key])
         except Exception as e:
             logger.warning(f"prune_item_chunks({item_key}) failed: {e}")
 
@@ -396,6 +417,16 @@ class ChromaClient:
 
     def reset_collection(self) -> None:
         """Reset (clear) the collection."""
+        if getattr(self, "index_sync", None) is not None:
+            # Every paper in it changes: those not indexed again are published as removed.
+            try:
+                keys = set()
+                for ids, metas in self.iter_metadatas():
+                    for doc_id, meta in zip(ids, metas):
+                        keys.add((meta or {}).get("item_key") or str(doc_id).split("#", 1)[0])
+                self._journal(keys=list(keys))
+            except Exception as e:
+                logger.warning(f"Could not note the papers of the reset index for the shared log: {e}")
         try:
             self.client.delete_collection(name=self.collection_name)
             self.collection = self.client.create_collection(
@@ -541,6 +572,7 @@ class ChromaClient:
                     ids=ids[i:i + max_batch],
                     metadatas=metadatas[i:i + max_batch],
                 )
+            self._journal(ids, metadatas)
             logger.info(f"Updated metadata for {len(ids)} documents")
         except Exception as e:
             logger.error(f"Error updating document metadata: {e}")
@@ -610,6 +642,10 @@ def create_chroma_client(config_path: str | None = None) -> ChromaClient:
     from zotero_mcp.embedding_store import attach
 
     attach(getattr(client, "embedding_function", None), config)
+    # ... and the index itself kept the same on both computers (zotero_mcp.index_sync).
+    from zotero_mcp import index_sync
+
+    index_sync.attach(client, config)
     return client
 
 

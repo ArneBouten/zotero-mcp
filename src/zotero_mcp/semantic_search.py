@@ -1808,6 +1808,12 @@ class ZoteroSemanticSearch:
         stored = (self.update_config.get("library_fingerprints") or {}).get(str(group))
         if not stored:
             return None
+        sync = getattr(self.chroma_client, "index_sync", None)
+        try:
+            if sync is not None and sync.has_news():
+                return False  # the other computer published papers: copy them
+        except Exception:
+            pass
         current = self.library_fingerprint(group)
         if current is None:
             return None
@@ -2213,6 +2219,42 @@ class ZoteroSemanticSearch:
                             items_to_process.append(it)
 
                             # (progress shown inline above via \r)
+
+                    # Two computers (zotero_mcp.index_sync): a paper the other
+                    # computer started on is left to it and copied once it is
+                    # done; the rest is claimed here before its PDF is read.
+                    _sync = getattr(self.chroma_client, "index_sync", None)
+                    if _sync is not None and items_to_process and not force_rebuild:
+                        try:
+                            # Files Zotero has not downloaded here yet: leave the
+                            # paper to the computer that has them (see
+                            # IndexSync.still_waiting_for_files).
+                            _no_file, _has_file = [], []
+                            for _it in items_to_process:
+                                _want = {k for k in (getattr(_it, "_attachment_keys", "") or "").split(",") if k}
+                                if _want and any(
+                                    a["key"] in _want and not a["exists"]
+                                    for a in reader.get_attachment_paths(_it.key)
+                                ):
+                                    _no_file.append(_it.key)
+                                else:
+                                    _has_file.append(_it.key)
+                            _sync.files_arrived(_has_file)
+                            _theirs = _sync.still_waiting_for_files(_no_file) if _no_file else set()
+                            _theirs |= _sync.claimed_elsewhere([it.key for it in items_to_process])
+                            if _theirs:
+                                items_to_process = [it for it in items_to_process if it.key not in _theirs]
+                                pending_extraction = [it for it in pending_extraction if it.key not in _theirs]
+                                extracted -= len(_theirs)
+                                self._deferred_items = getattr(self, "_deferred_items", 0) + len(_theirs)
+                                sys.stderr.write(
+                                    f"\n  {len(_theirs)} item(s) left to the other computer (it is indexing "
+                                    "them, or their file is not here yet); they are copied once it is done.\n"
+                                )
+                            if items_to_process:
+                                _sync.claim([it.key for it in items_to_process])
+                        except Exception as e:
+                            logger.warning(f"Shared index claims unavailable: {e}")
 
                     # Phase 2b: parse the chosen attachments. With
                     # extraction_workers == 1 this is the same sequential walk
@@ -2998,6 +3040,11 @@ class ZoteroSemanticSearch:
             return stats
 
         try:
+            # Two computers (zotero_mcp.index_sync): first copy what the other
+            # computer indexed since, so this run only does what neither did.
+            self._deferred_items = 0
+            self._sync_pull(stats)
+
             # Pin this run's library identity once, from the client the run
             # will read items/versions from. Everything scope-sensitive in
             # the run (tagging, watermark key, backfill attribution, the
@@ -3463,7 +3510,10 @@ class ZoteroSemanticSearch:
             # Trade-off: an item that always fails keeps the watermark back
             # on every run. Persisting failed keys instead is a follow-up.
             self.update_config["last_update"] = datetime.now().isoformat()
-            if stats.get("deletion_skipped_reason") or retry_fail:
+            if self._deferred_items:
+                stats["deferred_items"] = self._deferred_items
+            if stats.get("deletion_skipped_reason") or retry_fail or self._deferred_items:
+                # Papers left to the other computer: the next update copies them.
                 self._save_update_config()
             else:
                 self._remember_fingerprint(self._run_group_id, run_fingerprint)
@@ -3498,9 +3548,10 @@ class ZoteroSemanticSearch:
             return stats
         finally:
             self._run_group_id = None
+            self._sync_publish(stats)
             if force_full_rebuild or any(
                 stats.get(k) for k in
-                ("added_items", "updated_items", "recovered_items", "deleted_items")
+                ("added_items", "updated_items", "recovered_items", "deleted_items", "pulled_items")
             ):
                 self._mark_index_changed()
             # Release the update flock on every exit path. Paired with the
@@ -3508,6 +3559,32 @@ class ZoteroSemanticSearch:
             # separately before its early return, so this finally only runs
             # for the path where we actually hold the lock.
             lock_cm.__exit__(None, None, None)
+
+    def _sync_pull(self, stats: dict[str, Any]) -> None:
+        """Copy the papers the other computer indexed (shared index log); never fails the update."""
+        sync = getattr(self.chroma_client, "index_sync", None)
+        if sync is None:
+            return
+        try:
+            result = sync.pull()
+            if result.get("copied") or result.get("deleted"):
+                stats["pulled_items"] = result["copied"] + result["deleted"]
+                _report(f"  Copied {result['copied']} paper(s) the other computer indexed"
+                        + (f", removed {result['deleted']}" if result["deleted"] else "") + ".\n")
+            if result.get("waiting"):
+                stats["pull_waiting"] = result["waiting"]
+        except Exception as e:
+            logger.warning(f"Copying from the shared index log failed: {e}")
+
+    def _sync_publish(self, stats: dict[str, Any]) -> None:
+        """Publish the papers this run changed (shared index log); never fails the update."""
+        sync = getattr(self.chroma_client, "index_sync", None)
+        if sync is None or not sync.pending:
+            return
+        try:
+            stats["published_items"] = sync.publish()
+        except Exception as e:
+            logger.warning(f"Publishing to the shared index log failed: {e}")
 
     def _label_new_passages(self, stats: dict[str, Any]) -> None:
         """Printed pages, headings and chapters for items just (re)indexed.

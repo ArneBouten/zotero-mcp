@@ -993,15 +993,23 @@ def main():
         help="Share embeddings and Gemini's section labels between computers through the shared "
              "folder (state_dir), so each passage is paid for once and both indexes match",
     )
-    store_parser.add_argument("action", choices=["setup", "status", "pack"],
+    store_parser.add_argument("action", choices=["setup", "status", "pack", "publish", "pull", "mirror", "compare"],
                               help="setup: turn it on and copy this computer's embeddings and labels "
                                    "into the shared folder (no API calls); status: what is in it; "
                                    "pack: put Gemini's cached answers kept one file each into a few "
-                                   "files, and move the loose ones out of the shared folder")
+                                   "files, and move the loose ones out of the shared folder; "
+                                   "publish [--all]: this index's papers to the shared folder; "
+                                   "pull: copy what the other computer indexed; mirror: replace this "
+                                   "index by an exact copy from the shared folder; compare [--fix]: "
+                                   "how this index differs from the other computer's")
     store_parser.add_argument("--coverage", action="store_true",
                               help="With status: how many of this index's passages the store has")
     store_parser.add_argument("--no-export", action="store_true",
                               help="With setup: only turn it on, copy nothing")
+    store_parser.add_argument("--all", dest="everything", action="store_true",
+                              help="With publish: every paper in this index, not only what changed")
+    store_parser.add_argument("--fix", action="store_true",
+                              help="With compare: copy the newest version of every paper that differs")
     store_parser.add_argument("--config-path", help="Path to config.json")
 
     cit_parser = subparsers.add_parser(
@@ -1698,6 +1706,14 @@ def main():
                 shared_store.setup(config_path, export=not args.no_export)
             elif args.action == "pack":
                 shared_store.pack()
+            elif args.action == "publish":
+                shared_store.publish(config_path, everything=args.everything)
+            elif args.action == "pull":
+                shared_store.pull(config_path)
+            elif args.action == "mirror":
+                shared_store.mirror(config_path)
+            elif args.action == "compare":
+                shared_store.compare(config_path, fix=args.fix)
             else:
                 shared_store.status(config_path, coverage=args.coverage)
         except Exception as e:

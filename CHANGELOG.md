@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.67] - 2026-10-19
+
+### Added
+
+- **One search index on two computers** (`zotero_mcp/index_sync.py`; `docs/two-computers.md`, "One index on both computers"). With the shared store on, every paper whose index entries change is published whole to a log in the shared folder (`state\index\`: ids, texts and metadata; embeddings in the store), and before each update a computer copies what the other published more recently. Newest wins, both ways. Before reading a new or changed paper a computer claims it; the other leaves a paper claimed in the last 30 minutes to its peer and copies it once published (an unfinished claim runs out), and leaves a paper whose file Zotero has not downloaded yet to the computer that has it, for up to a day. A search waits for the update when the other computer published something new. New commands: `shared-store publish [--all]`, `pull`, `mirror` (replace this index by an exact copy from the log, without reading PDFs or calling an API; the old index goes to `_archive`), `compare [--fix]`; `status` reports the log. Writes made while copying are not published back; files are per computer and append-only, and a half-synced line waits for the rest. Index entries are now noted per paper on every write (add, upsert, delete, prune, metadata update, reset) so they can be published.
+
 ## [0.13.2+arne.66] - 2026-10-19
 
 ### Changed

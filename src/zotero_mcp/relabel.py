@@ -328,6 +328,12 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
     totals["minutes"] = round((time.monotonic() - started) / 60, 1)
     from zotero_mcp.gemini_util import usage_summary
 
+    sync = getattr(search.chroma_client, "index_sync", None)
+    if sync is not None and sync.pending and not dry_run:
+        try:  # the other computer copies the new labels
+            sync.publish()
+        except Exception as e:
+            logger.warning(f"Publishing the new labels to the shared index log failed: {e}")
     usage = usage_summary()
     report_path = _write_report(totals, samples, dry_run, usage)
     log(f"Done. {dict(totals)}")

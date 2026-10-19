@@ -211,6 +211,21 @@ def status(config_path: str, coverage: bool = False, log: Callable[[str], None] 
                     log(f"  {offset}/{count} passages checked ...")
             out["coverage"] = {"in_store": have, "passages": total}
             log(f"This index: {have} of {total} passages are in the store")
+    sync = getattr(client, "index_sync", None)
+    if sync is not None:
+        sync.refresh(force=True)
+        with sync._lock:
+            per = sync._db.execute("SELECT who, COUNT(*), SUM(deleted) FROM pubs GROUP BY who").fetchall()
+            claims = sync._db.execute("SELECT COUNT(*) FROM claims WHERE who != ? AND t > ?",
+                                      (sync.computer, __import__("time").time() - 1800)).fetchone()[0]
+        out["index_log"] = {who: n for who, n, _d in per}
+        log(f"Index log ({sync.dir}): newest version of each paper by computer: "
+            + (", ".join(f"{who} {n}" for who, n, _d in per) or "none yet"))
+        if claims:
+            log(f"  {claims} paper(s) being indexed on the other computer right now")
+        if sync.has_news():
+            log("  The other computer published papers this index has not copied yet "
+                "(copied at the next update, or `shared-store pull`).")
     from zotero_mcp import metadata_audit
 
     for label, store in (("Gemini structure answers", relabel.shared_answer_store()),
@@ -224,3 +239,114 @@ def status(config_path: str, coverage: bool = False, log: Callable[[str], None] 
         log(f"{label}: {n} in {store.dir}" + (f" ({loose} still one file each; `shared-store pack`)" if loose else ""))
         _log_per_computer(store.files(), log)
     return out
+
+
+# -- the index itself: one copy on both computers (zotero_mcp.index_sync) -------------------
+
+
+def _index_sync(config_path: str):
+    client = _open_index(config_path)
+    sync = getattr(client, "index_sync", None)
+    if sync is None:
+        raise RuntimeError("The shared store is off, or this embedding model is not shared. "
+                           "Run `zotero-mcp shared-store setup` first.")
+    return client, sync
+
+
+def publish(config_path: str, everything: bool = False, log: Callable[[str], None] = print) -> int:
+    """Publish this index to the shared log: all papers (``--all``), else what is pending."""
+    _require_shared_folder()
+    _client, sync = _index_sync(config_path)
+    if everything:
+        log("Publishing every paper in this index to the shared folder (no API calls) ...")
+        n = sync.publish_all(log=log)
+    else:
+        n = sync.publish(log=log)
+    log(f"Published {n} paper(s).")
+    return n
+
+
+def pull(config_path: str, log: Callable[[str], None] = print) -> dict:
+    _require_shared_folder()
+    _client, sync = _index_sync(config_path)
+    log("Copying what the other computer indexed ...")
+    return sync.pull(log=log)
+
+
+def _server_running() -> bool:
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        return False
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq zotero-mcp.exe", "/NH"],
+                         capture_output=True, text=True).stdout
+    return "zotero-mcp.exe" in out.lower()
+
+
+def mirror(config_path: str, log: Callable[[str], None] = print) -> dict:
+    """Replace this computer's index with an exact copy of what the shared log holds.
+
+    The old index is moved to ``~/.config/zotero-mcp/_archive/`` (not deleted). No PDF is
+    read and nothing is sent to an API: texts, metadata and embeddings all come from the
+    shared folder.
+    """
+    from zotero_mcp import fulltext_fetch as ff
+
+    _require_shared_folder()
+    if _server_running():
+        raise RuntimeError("zotero-mcp.exe is running: quit Claude Desktop (tray icon -> Quit) first.")
+    # Read the log without opening the index, so the index folder can be moved aside.
+    from types import SimpleNamespace
+
+    from zotero_mcp.index_sync import IndexSync
+
+    probe = IndexSync(SimpleNamespace(collection_name="zotero_library"), store=None)
+    probe.refresh(force=True)
+    with probe._lock:
+        others = probe._db.execute("SELECT COUNT(*) FROM pubs WHERE who != ? AND deleted = 0",
+                                   (probe.computer,)).fetchone()[0]
+    probe.close()
+    if not others:
+        raise RuntimeError("The shared folder has no papers from the other computer yet. Run "
+                           "`zotero-mcp shared-store publish --all` there first, and let OneDrive finish.")
+    persist = ff.config_dir() / "chroma_db"
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    if persist.exists():
+        target = ff.config_dir() / "_archive" / f"{stamp}-chroma_db"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(persist), str(target))
+        log(f"The old index is kept in {target}")
+    client, sync = _index_sync(config_path)
+    with sync._lock:
+        sync._db.execute("DELETE FROM applied")
+        sync._db.commit()
+    log(f"Copying {others} papers into a new index (no PDFs read, no API calls) ...")
+    result = sync.pull(log=log)
+    log(f"Done: {client.collection.count()} passages in the new index.")
+    return result
+
+
+def compare(config_path: str, fix: bool = False, log: Callable[[str], None] = print) -> dict:
+    """How this index differs from the shared log (and so from the other computer)."""
+    _require_shared_folder()
+    _client, sync = _index_sync(config_path)
+    diff = sync.compare(log=log)
+    for label in ("different", "only_here", "only_in_log"):
+        if diff[label]:
+            log(f"  {label.replace('_', ' ')}: {', '.join(diff[label][:15])}"
+                + (" ..." if len(diff[label]) > 15 else ""))
+    if fix:
+        with sync._lock:
+            published = {i for (i,) in sync._db.execute("SELECT item FROM pubs")}
+        unpublished = [k for k in diff["only_here"] if k not in published]
+        to_copy = diff["different"] + diff["only_in_log"] + [k for k in diff["only_here"] if k in published]
+        if unpublished:
+            log(f"Publishing {len(unpublished)} paper(s) only this computer has ...")
+            sync.publish(unpublished)
+        if to_copy:
+            log(f"Copying the newest publication of {len(to_copy)} paper(s) ...")
+            diff["fixed"] = sync.pull(to_copy, force=True, log=log)
+    elif any(diff[k] for k in ("different", "only_here", "only_in_log")):
+        log("Run `zotero-mcp shared-store compare --fix` to make this index match.")
+    return diff
