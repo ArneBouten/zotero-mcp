@@ -193,15 +193,10 @@ ZENROWS_API_KEY=...
 UNPAYWALL_EMAIL=you@example.org
 ```
 
-Lines starting with `#` are ignored. The environment wins over this file,
-and this file over `client_env` in `~/.config/zotero-mcp/config.json`:
-
-```json
-"client_env": {
-  "OPENALEX_API_KEY": "…", "SERPAPI_API_KEY": "…", "TAVILY_API_KEY": "…",
-  "ZENROWS_API_KEY": "…", "CORE_API_KEY": "…", "UNPAYWALL_EMAIL": "you@example.org"
-}
-```
+Lines starting with `#` are ignored. The environment wins over this file.
+Keys in `client_env` of `~/.config/zotero-mcp/config.json` still work as a
+fallback, but keep them in `keys.env`: `config.json` is rewritten by setup and
+upgrades, and its backups would carry copies of the keys.
 
 Use is counted per month in `~/.config/zotero-mcp/fulltext/budget.json` and
 stops at the free allowance. Change the limits in a `fulltext_fetch` section

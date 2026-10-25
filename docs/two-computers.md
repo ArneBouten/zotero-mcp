@@ -138,10 +138,10 @@ uv run --no-project scripts/install_build.py
 
 Then, once per computer:
 
-1. **Keys:** copy `%USERPROFILE%\.config\zotero-mcp\keys.env` and the
-   `client_env` block of `config.json` (OpenAlex, SerpAPI, Tavily, ZenRows) from
-   the other computer (USB stick or a password manager; never into git or
-   OneDrive). The template has only the Unpaywall e-mail address there.
+1. **Keys:** copy `%USERPROFILE%\.config\zotero-mcp\keys.env` (OpenAlex,
+   SerpAPI, Tavily, Parallel, ZenRows, Unpaywall e-mail) from the other computer
+   (USB stick or a password manager; never into git or OneDrive). `config.json`
+   holds no keys; the template's `client_env` has only the Unpaywall e-mail address.
 2. **Claude Desktop:** *Settings → Developer → Edit Config*, and copy the
    `zotero` entry of `mcpServers` from the other computer, with `command` set to
    the `zotero-mcp.exe` path the installer printed (backslashes doubled). The
