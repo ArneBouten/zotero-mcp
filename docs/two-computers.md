@@ -11,7 +11,7 @@ a live sync like OneDrive, so the steps below remind you.
 | Settings | `%USERPROFILE%\.config\zotero-mcp\config.json` and `keys.env` | own copy (no keys in git) |
 | Search index | `%USERPROFILE%\.config\zotero-mcp\chroma_db` | own index; never shared or synced |
 | Embeddings and section labels | the shared store in `state\embeddings` and `state\structure` ([below](#the-shared-store)) | the same store: paid for once |
-| Shared state (checks, citations, counters) | `state_dir` in `config.json`: the OneDrive folder's `state` ([Two computers](maintenance.md#two-computers)) | the same folder |
+| Shared state (checks, citations, counters) | `state_dir` in `config.json`: the OneDrive folder's `state`, one file per computer (`…-DESKTOP-A.json`) ([Two computers](maintenance.md#two-computers)) | the same folder, its own files (`…-LAPTOP-A.json`) |
 | Python tools | uv (`%USERPROFILE%\.local\bin\uv.exe`) and Python 3.12 from python.org | the same |
 
 ## Every day

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2+arne.68] - 2026-10-26
+
+### Changed
+
+- **Each computer writes its own record files in the shared folder** (`zotero_mcp/computer_files.py`; `docs/maintenance.md`, "Two computers"). The fetcher's state, log and free-tier counters, the metadata audit's state, the maintenance record and the citation graph were one file each in `state_dir`, written by both computers, so OneDrive kept conflict copies or one computer's changes were lost when both ran. Now each computer writes `<name>-<COMPUTER>.<ext>` (for example `fulltext\state-DESKTOP-A.json`) and reads every computer's copy: per paper the newer record wins (entries carry an `_updated` time), dates such as the last maintenance run take the latest, the log is read in time order and the counters are added up. The old shared files are still read, never written. Without `state_dir` nothing changes.
+
 ## [0.13.2+arne.67] - 2026-10-19
 
 ### Added

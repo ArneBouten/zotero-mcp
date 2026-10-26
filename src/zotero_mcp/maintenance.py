@@ -39,17 +39,20 @@ def _state_path() -> Path:
 
 
 def _load() -> dict:
+    """What maintenance checked, merged over the computers that share the state folder."""
+    from zotero_mcp import computer_files
+
     try:
-        return json.loads(_state_path().read_text(encoding="utf-8"))
+        return computer_files.load(_state_path())
     except Exception:
         return {}
 
 
 def _save(state: dict) -> None:
-    try:
-        from zotero_mcp.fulltext_fetch import write_json
+    from zotero_mcp import computer_files
 
-        write_json(_state_path(), state)
+    try:
+        computer_files.save(_state_path(), state)
     except OSError:
         pass
 

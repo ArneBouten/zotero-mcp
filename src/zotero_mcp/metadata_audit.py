@@ -1618,15 +1618,20 @@ def parse_proposals(note_html: str) -> list[Change]:
 
 
 def _load_state() -> dict:
+    """The audit records, merged over the computers that share the state folder."""
+    from zotero_mcp import computer_files
+
     try:
-        return json.loads((meta_dir() / "state.json").read_text(encoding="utf-8"))
+        return computer_files.load(meta_dir() / "state.json")
     except Exception:
         return {}
 
 
 def _save_state(state: dict) -> None:
+    from zotero_mcp import computer_files
+
     try:
-        ff.write_json(meta_dir() / "state.json", state)
+        computer_files.save(meta_dir() / "state.json", state)
     except OSError:
         pass
 

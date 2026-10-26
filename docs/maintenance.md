@@ -71,8 +71,8 @@ Run it once on each computer with the same folder. The first copies its records 
 The embeddings and Gemini's structure labels can be shared through the same folder as well, so each passage is paid for once and both computers label a PDF the same way: `zotero-mcp shared-store setup` ([Two computers](two-computers.md#the-shared-store)).
 
 - **New papers on import** are checked on the computer where you add them, laptop or PC. When the paper then arrives on the other computer by sync, that one leaves it alone (the action skips synced items), so a paper is never checked twice.
-- Avoid running a check of the same papers on both computers at the same moment: OneDrive would keep a second copy of a record file, and one computer's record of that run would be lost (the papers are then simply checked again later).
-- Free allowances (SerpApi, Tavily, ZenRows) are counted together.
+- Each computer writes only its own record files, named after the computer (`fulltext\state-DESKTOP-A.json`, `fulltext\log-DESKTOP-A.jsonl`, `fulltext\budget-DESKTOP-A.json`, `metadata\state-DESKTOP-A.json`, `maintenance-DESKTOP-A.json`, `citations-DESKTOP-A.json`), and reads those of the other as well, so OneDrive never has two computers writing one file and nothing is lost when both run at once. Where both checked the same paper, the newer record counts. The files without a computer name, from before 0.13.2+arne.68, are still read but no longer written.
+- Free allowances (SerpApi, Tavily, ZenRows) are counted together: each computer's counter is added up.
 
 ## Duplicates
 

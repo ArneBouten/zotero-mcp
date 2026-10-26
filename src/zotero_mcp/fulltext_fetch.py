@@ -269,12 +269,18 @@ class Budget:
     """Monthly (or daily) counters for the services with a free allowance."""
 
     def __init__(self, path: Path | None = None):
+        from zotero_mcp import computer_files
+
         self._lock = threading.RLock()
-        self.path = path or (state_dir() / "budget.json")
+        shared = path or (state_dir() / "budget.json")
+        # In a shared state folder each computer counts in its own file; the allowance is the
+        # account's, so what the other computers used is added (``others``).
+        self.path = computer_files.own_path(shared)
         try:
             self.data = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception:
             self.data = {}
+        self.others = computer_files.sum_counts(shared) if self.path != shared else {}
 
     @staticmethod
     def _period(daily: bool) -> str:
@@ -282,7 +288,8 @@ class Budget:
         return today.isoformat() if daily else today.strftime("%Y-%m")
 
     def used(self, service: str, daily: bool = False) -> int:
-        return int(self.data.get(service, {}).get(self._period(daily), 0))
+        period = self._period(daily)
+        return int(self.data.get(service, {}).get(period, 0)) + int(self.others.get(service, {}).get(period, 0))
 
     def allows(self, service: str, limit: int, cost: int = 1, daily: bool = False) -> bool:
         return self.used(service, daily) + cost <= limit
@@ -1793,15 +1800,20 @@ def _try_candidate(item, cand, http, settings, budget, workdir) -> tuple[str | N
 
 
 def _load_state() -> dict:
+    """Every item's fetch record, merged over the computers that share the state folder."""
+    from zotero_mcp import computer_files
+
     try:
-        return json.loads((state_dir() / "state.json").read_text(encoding="utf-8"))
+        return computer_files.load(state_dir() / "state.json")
     except Exception:
         return {}
 
 
 def _save_state(state: dict) -> None:
+    from zotero_mcp import computer_files
+
     try:
-        write_json(state_dir() / "state.json", state)
+        computer_files.save(state_dir() / "state.json", state)
     except OSError:
         pass
 
@@ -1809,7 +1821,9 @@ def _save_state(state: dict) -> None:
 def _append_log(result: ItemResult) -> None:
     try:
         state_dir().mkdir(parents=True, exist_ok=True)
-        with open(state_dir() / "log.jsonl", "a", encoding="utf-8") as f:
+        from zotero_mcp import computer_files
+
+        with open(computer_files.own_path(state_dir() / "log.jsonl"), "a", encoding="utf-8") as f:
             rec = asdict(result)
             rec["time"] = _dt.datetime.now().isoformat(timespec="seconds")
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -2395,11 +2409,17 @@ def recheck_attached(*, since: str | None = None, apply: bool = True, log: Calla
                     return str(att.get("resolved_path"))
             return None
     probe = probe or probe_pdf
-    try:
-        rows = [json.loads(line) for line in (state_dir() / "log.jsonl").read_text(encoding="utf-8").splitlines()
-                if line.strip()]
-    except OSError:
-        rows = []
+    from zotero_mcp import computer_files
+
+    rows = []
+    for line in computer_files.read_lines(state_dir() / "log.jsonl"):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    rows.sort(key=lambda r: r.get("time") or "")     # several computers' logs, in time order
     rows = [r for r in rows if r.get("status") == "attached" and r.get("attachment_key")
             and _found_by_title(r.get("source", "")) and (not since or (r.get("time") or "") >= since)]
     latest = {}

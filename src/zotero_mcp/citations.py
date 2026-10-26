@@ -55,8 +55,11 @@ def _empty() -> dict:
 
 
 def load() -> dict:
+    """The citation graph, merged over the computers that share the state folder."""
+    from zotero_mcp import computer_files
+
     try:
-        data = json.loads(_path().read_text(encoding="utf-8"))
+        data = computer_files.load(_path(), _empty)
     except Exception:
         return _empty()
     if not isinstance(data, dict):
@@ -107,10 +110,9 @@ def save(store: dict) -> None:
                 disk["papers"][key] = entry
         for wid, info in store["works"].items():
             disk["works"][wid] = {**disk["works"].get(wid, {}), **info}
-        path = _path()
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(disk, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, path)
+        from zotero_mcp import computer_files
+
+        computer_files.save(_path(), disk, separators=(",", ":"))
         store["papers"], store["works"] = disk["papers"], disk["works"]
 
 
