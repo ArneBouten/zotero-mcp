@@ -404,6 +404,7 @@ def test_background_run_reports_through_status(home, monkeypatch):
     import time
 
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # the child's home on Windows
     monkeypatch.setenv("ZOTERO_NO_CLAUDE", "1")
     monkeypatch.setenv("ZOTERO_LOCAL", "true")
     monkeypatch.setenv("ZOTERO_DB_PATH", str(home / "missing.sqlite"))
