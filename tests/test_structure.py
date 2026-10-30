@@ -198,10 +198,12 @@ class FakeChroma:
         self.embedding_config = {}
         self.updated = {}
 
-    def update_metadatas(self, ids, metas):
+    def update_metadatas(self, ids, metas, replace=False):
+        # Like ChromaDB 1.x: keys left out are kept unless the caller asks to replace.
         for i, m in zip(ids, metas):
             self.updated[i] = m
-            self.collection.rows[i] = (m, self.collection.rows[i][1])
+            old = self.collection.rows[i][0]
+            self.collection.rows[i] = (dict(m) if replace else {**old, **m}, self.collection.rows[i][1])
 
 
 class FakeSearch:
@@ -513,6 +515,15 @@ def test_gemini_failures_stop_the_run_asking_and_are_retried_next_time(tmp_path,
     assert first["structure_gemini"] == "failed" and first["section"] == "Introduction"   # bookmarks stood in
     assert len(relabel.items_to_label(search.chroma_client.collection, retry_gemini=True)) == 4
     assert relabel.items_to_label(search.chroma_client.collection) == []
+
+    # Next time Gemini answers: the failure mark goes, so the items are not retried again
+    # (it used to stay, and every update relabelled the whole library).
+    def working(prompt):
+        return '{"headings": []}'
+
+    relabel.run(search=search, reader=Reader(pdfs["K0"]), gemini=True, ask=working, log=logs.append, workers=1)
+    assert "structure_gemini" not in search.chroma_client.collection.rows["K3#0"][0]
+    assert relabel.items_to_label(search.chroma_client.collection, retry_gemini=True) == []
 
 
 def test_gemini_usage_is_counted_and_per_minute_limits_are_waited_out(monkeypatch):

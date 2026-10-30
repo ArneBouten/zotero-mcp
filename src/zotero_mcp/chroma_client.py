@@ -43,6 +43,7 @@ except ImportError as e:
 logger = logging.getLogger(__name__)
 
 
+
 class IndexReadError(RuntimeError):
     """The ChromaDB index exists but a read from it failed."""
 
@@ -204,6 +205,38 @@ class ChromaClient:
             touched.add((meta or {}).get("item_key") or str(doc_id).split("#", 1)[0])
         sync.touch(touched)
 
+    def _replacing(self, ids: list[str], metadatas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The metadata dicts, with ``None`` for every key the stored record has and they lack.
+
+        ChromaDB 1.x merges metadata on ``upsert`` and ``update``: a key left out
+        of the new dict keeps its old value, and only ``None`` deletes it. Every
+        caller here passes the complete metadata a record should have, so keys it
+        dropped (a heading that no longer applies, ``structure_gemini`` after a
+        successful retry, a passage's labels from before its PDF was replaced)
+        must be deleted explicitly, or they stay forever.
+        """
+        if not ids:
+            return metadatas
+        try:
+            got = self.collection.get(ids=list(ids), include=["metadatas"])
+        except Exception as e:
+            logger.debug(f"Could not read the stored metadata to drop removed keys: {e}")
+            return metadatas
+        stored = {doc_id: meta for doc_id, meta in
+                  zip(got.get("ids") or [], got.get("metadatas") or []) if meta}
+        if not stored:
+            return metadatas
+        out = []
+        for doc_id, meta in zip(ids, metadatas):
+            old = stored.get(doc_id)
+            if old:
+                meta = dict(meta or {})
+                for key in old:
+                    if key not in meta:
+                        meta[key] = None
+            out.append(meta)
+        return out
+
     def add_documents(self,
                      documents: list[str],
                      metadatas: list[dict[str, Any]],
@@ -251,7 +284,7 @@ class ChromaClient:
             for i in range(0, len(ids), max_batch):
                 self.collection.upsert(
                     documents=documents[i:i + max_batch],
-                    metadatas=metadatas[i:i + max_batch],
+                    metadatas=self._replacing(ids[i:i + max_batch], metadatas[i:i + max_batch]),
                     ids=ids[i:i + max_batch]
                 )
             self._journal(ids, metadatas)
@@ -280,7 +313,7 @@ class ChromaClient:
             for i in range(0, len(ids), max_batch):
                 self.collection.upsert(
                     documents=documents[i:i + max_batch],
-                    metadatas=metadatas[i:i + max_batch],
+                    metadatas=self._replacing(ids[i:i + max_batch], metadatas[i:i + max_batch]),
                     ids=ids[i:i + max_batch],
                     embeddings=embeddings[i:i + max_batch],
                 )
@@ -549,12 +582,14 @@ class ChromaClient:
             metadatas = result.get("metadatas") or [{} for _ in ids]
             yield ids, metadatas
 
-    def update_metadatas(self, ids: list[str], metadatas: list[dict[str, Any]]) -> None:
+    def update_metadatas(self, ids: list[str], metadatas: list[dict[str, Any]], *, replace: bool = False) -> None:
         """Metadata-only update for existing documents; never re-embeds.
 
         Callers must pass complete metadata dicts: chromadb 1.5.x merges
         the given keys into existing metadata, while other versions have
         replaced the whole dict — full dicts behave identically under both.
+        With ``replace=True`` keys the new dicts lack are deleted as well
+        (``_replacing``), for callers that remove keys (the relabeller).
         Split under the backend's max batch size like ``upsert_documents``
         (#369).
         """
@@ -570,7 +605,8 @@ class ChromaClient:
             for i in range(0, len(ids), max_batch):
                 self.collection.update(
                     ids=ids[i:i + max_batch],
-                    metadatas=metadatas[i:i + max_batch],
+                    metadatas=(self._replacing(ids[i:i + max_batch], metadatas[i:i + max_batch])
+                               if replace else metadatas[i:i + max_batch]),
                 )
             self._journal(ids, metadatas)
             logger.info(f"Updated metadata for {len(ids)} documents")

@@ -313,7 +313,7 @@ def run(*, keys: list[str] | None = None, limit: int | None = None, config_path:
                 totals["headings not found in the indexed text"] += 1
             if res["changed"] and not dry_run:
                 ids = [cid for cid, _m in res["changed"]]
-                search.chroma_client.update_metadatas(ids, [m for _c, m in res["changed"]])
+                search.chroma_client.update_metadatas(ids, [m for _c, m in res["changed"]], replace=True)
             totals["passages updated" if not dry_run else "passages that would change"] += len(res["changed"])
             heads = len(s.headings) if s else 0
             if not s:
