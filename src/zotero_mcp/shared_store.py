@@ -223,6 +223,11 @@ def status(config_path: str, coverage: bool = False, log: Callable[[str], None] 
             + (", ".join(f"{who} {n}" for who, n, _d in per) or "none yet"))
         if claims:
             log(f"  {claims} paper(s) being indexed on the other computer right now")
+        usage = sync.log_usage()
+        out["index_log_usage"] = usage
+        log(f"  This computer's log: {_format_bytes(usage['bytes'])} in {usage['files']} file(s), "
+            f"{_format_bytes(usage['live_bytes'])} of it current"
+            + (" (`shared-store compact` would shrink it)" if usage["bytes"] > 2 * usage["live_bytes"] + 50e6 else ""))
         if sync.has_news():
             log("  The other computer published papers this index has not copied yet "
                 "(copied at the next update, or `shared-store pull`).")
@@ -264,6 +269,16 @@ def publish(config_path: str, everything: bool = False, log: Callable[[str], Non
         n = sync.publish(log=log)
     log(f"Published {n} paper(s).")
     return n
+
+
+def compact(config_path: str, log: Callable[[str], None] = print) -> dict:
+    """Rewrite this computer's index log with only the newest version of each paper."""
+    _require_shared_folder()
+    _client, sync = _index_sync(config_path)
+    usage = sync.log_usage()
+    log(f"This computer's index log: {usage['files']} file(s), {_format_bytes(usage['bytes'])}, of which "
+        f"{_format_bytes(usage['live_bytes'])} is the newest version of {usage['papers']} paper(s).")
+    return sync.compact(log=log)
 
 
 def pull(config_path: str, log: Callable[[str], None] = print) -> dict:

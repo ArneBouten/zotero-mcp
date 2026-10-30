@@ -3585,6 +3585,13 @@ class ZoteroSemanticSearch:
             stats["published_items"] = sync.publish()
         except Exception as e:
             logger.warning(f"Publishing to the shared index log failed: {e}")
+            return
+        try:
+            done = sync.maybe_compact(log=lambda m: _report(f"  {m}\n"))
+            if done:
+                stats["compacted_log"] = done
+        except Exception as e:
+            logger.warning(f"Compacting the shared index log failed: {e}")
 
     def _label_new_passages(self, stats: dict[str, Any]) -> None:
         """Printed pages, headings and chapters for items just (re)indexed.

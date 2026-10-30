@@ -993,7 +993,8 @@ def main():
         help="Share embeddings and Gemini's section labels between computers through the shared "
              "folder (state_dir), so each passage is paid for once and both indexes match",
     )
-    store_parser.add_argument("action", choices=["setup", "status", "pack", "publish", "pull", "mirror", "compare"],
+    store_parser.add_argument("action", choices=["setup", "status", "pack", "publish", "pull", "mirror", "compare",
+                                                        "compact"],
                               help="setup: turn it on and copy this computer's embeddings and labels "
                                    "into the shared folder (no API calls); status: what is in it; "
                                    "pack: put Gemini's cached answers kept one file each into a few "
@@ -1001,7 +1002,9 @@ def main():
                                    "publish [--all]: this index's papers to the shared folder; "
                                    "pull: copy what the other computer indexed; mirror: replace this "
                                    "index by an exact copy from the shared folder; compare [--fix]: "
-                                   "how this index differs from the other computer's")
+                                   "how this index differs from the other computer's; compact: "
+                                   "rewrite this computer's index log with only the newest version "
+                                   "of each paper (old files go to _archive)")
     store_parser.add_argument("--coverage", action="store_true",
                               help="With status: how many of this index's passages the store has")
     store_parser.add_argument("--no-export", action="store_true",
@@ -1714,6 +1717,8 @@ def main():
                 shared_store.mirror(config_path)
             elif args.action == "compare":
                 shared_store.compare(config_path, fix=args.fix)
+            elif args.action == "compact":
+                shared_store.compact(config_path)
             else:
                 shared_store.status(config_path, coverage=args.coverage)
         except Exception as e:

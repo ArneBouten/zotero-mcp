@@ -226,3 +226,93 @@ def test_publish_all_then_mirror_into_an_empty_index(tmp_path):
     assert list((tmp_path / "shared" / "index").glob("PC-pack-*.jsonl"))
     laptop.index_sync.pull()
     assert _state(laptop) == _state(pc)
+
+
+# -- an unchanged paper is not published again; the log is compacted --------------------------
+
+
+def _own_bytes(c):
+    return sum(p.stat().st_size for p in c.index_sync._own_log_files())
+
+
+def test_a_paper_touched_without_changing_is_not_published_again(tmp_path):
+    pc = _computer(tmp_path, "PC")
+    _add(pc, "AAA", n=3)
+    assert pc.index_sync.publish() == 1
+    size = _own_bytes(pc)
+    # Written again with the same texts and metadata (a relabel that changed nothing).
+    _add(pc, "AAA", n=3)
+    assert pc.index_sync.pending == 1
+    assert pc.index_sync.publish() == 0
+    assert _own_bytes(pc) == size
+    # A real change is published.
+    _add(pc, "AAA", n=3, section="Results")
+    assert pc.index_sync.publish() == 1
+
+
+def test_a_full_publication_twice_writes_it_once(tmp_path):
+    pc = _computer(tmp_path, "PC")
+    _add(pc, "AAA")
+    _add(pc, "BBB")
+    assert pc.index_sync.publish_all() == 2
+    assert pc.index_sync.publish_all() == 0
+
+
+def test_the_monthly_file_moves_on_past_its_size_limit(tmp_path, monkeypatch):
+    pc = _computer(tmp_path, "PC")
+    monkeypatch.setattr(isync, "OWN_FILE_BYTES", 10)
+    _add(pc, "AAA")
+    pc.index_sync.publish()
+    _add(pc, "BBB")
+    pc.index_sync.publish()
+    names = [p.name for p in pc.index_sync._own_log_files()]
+    month = time.strftime("%Y-%m")
+    assert sorted(names) == sorted([f"PC-{month}.jsonl", f"PC-{month}-02.jsonl"])
+
+
+def test_compacting_keeps_the_newest_version_and_the_other_computer_still_reads_it(tmp_path):
+    pc, laptop = _computer(tmp_path, "PC"), _computer(tmp_path, "LAPTOP")
+    for section in ("Methods", "Results", "Discussion"):
+        _add(pc, "AAA", n=3, section=section)
+        _add(pc, "BBB", section=section)
+        pc.index_sync.publish()
+        time.sleep(0.01)
+    pc.delete_item_chunks("BBB")
+    pc.index_sync.publish()
+    laptop.index_sync.pull()
+    assert _state(laptop) == _state(pc)
+    before = _own_bytes(pc)
+
+    archive = tmp_path / "archive"
+    result = pc.index_sync.compact(archive_dir=archive)
+
+    assert result["papers"] == 2  # AAA, and BBB's removal
+    assert _own_bytes(pc) < before / 2
+    assert sorted(p.name for p in archive.iterdir())  # old files kept, outside the shared folder
+    # This computer's own bookkeeping points at the new files.
+    assert pc.index_sync.publish(["AAA"]) == 0
+    # The laptop reads the folder afresh and copies nothing it already has ...
+    assert laptop.index_sync.pull() == {"copied": 0, "deleted": 0, "waiting": 0}
+    # ... and still follows later changes, and a new computer gets everything.
+    time.sleep(0.01)
+    _add(pc, "AAA", n=2, section="Abstract")
+    pc.index_sync.publish()
+    assert laptop.index_sync.pull()["copied"] == 1
+    assert _state(laptop) == _state(pc)
+    fresh = _computer(tmp_path, "NEW")
+    fresh.index_sync.pull()
+    assert _state(fresh) == _state(pc)
+
+
+def test_compact_only_when_most_of_a_large_log_is_superseded(tmp_path, monkeypatch):
+    pc = _computer(tmp_path, "PC")
+    for section in ("Methods", "Results", "Discussion", "Abstract"):
+        _add(pc, "AAA", n=3, section=section)
+        pc.index_sync.publish()
+    monkeypatch.setattr(isync, "AUTO_COMPACT_MIN_BYTES", 10 ** 9)
+    assert pc.index_sync.maybe_compact() is None  # small
+    monkeypatch.setattr(isync, "AUTO_COMPACT_MIN_BYTES", 1)
+    assert pc.index_sync.maybe_compact()["papers"] == 1
+    _add(pc, "AAA", n=3, section="Methods")
+    pc.index_sync.publish()
+    assert pc.index_sync.maybe_compact() is None  # at most once a day

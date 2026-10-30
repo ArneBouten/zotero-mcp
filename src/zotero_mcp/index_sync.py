@@ -53,6 +53,12 @@ CLAIM_TTL_SECONDS = 30 * 60
 #: How long a paper whose attachment file has not arrived here is left to the other computer.
 MISSING_FILE_WAIT_SECONDS = 24 * 3600
 PACK_FILE_BYTES = 50 * 1024 * 1024
+#: A computer's monthly log file moves on to ``-02``, ``-03`` ... beyond this size.
+OWN_FILE_BYTES = 200 * 1024 * 1024
+#: Compact this computer's log automatically once it holds this much ...
+AUTO_COMPACT_MIN_BYTES = 1024 * 1024 * 1024
+#: ... and less than this share of it is still the newest version of a paper.
+AUTO_COMPACT_LIVE_SHARE = 0.4
 
 
 def log_root() -> Path:
@@ -149,6 +155,13 @@ class IndexSync:
             if not self.dir.is_dir():
                 return 0
             known = dict(self._db.execute("SELECT name, scanned FROM files"))
+            gone = [name for name in known if not (self.dir / name).exists()]
+            if gone:
+                # A computer compacted its log: the newest version of each paper now
+                # sits in other files. Forget where things were and read every file anew.
+                self._db.executemany("DELETE FROM pubs WHERE file = ?", [(g,) for g in gone])
+                self._db.execute("DELETE FROM files")
+                known = {}
             n = 0
             for path in sorted(self.dir.glob("*.jsonl")):
                 try:
@@ -204,7 +217,13 @@ class IndexSync:
     # -- writing the log ------------------------------------------------------------------
 
     def _own_file(self) -> Path:
-        return self.dir / f"{self.computer}-{time.strftime('%Y-%m')}.jsonl"
+        base = f"{self.computer}-{time.strftime('%Y-%m')}"
+        path = self.dir / f"{base}.jsonl"
+        n = 1
+        while path.exists() and path.stat().st_size >= OWN_FILE_BYTES:
+            n += 1
+            path = self.dir / f"{base}-{n:02d}.jsonl"
+        return path
 
     def _pack_file(self) -> Path:
         existing = sorted(self.dir.glob(f"{self.computer}-pack-*.jsonl")) if self.dir.is_dir() else []
@@ -295,7 +314,11 @@ class IndexSync:
 
     def publish(self, keys: Iterable[str] | None = None, pack: bool = False,
                 log: Callable[[str], None] | None = None, batch: int = 50) -> int:
-        """Write the current entries of the touched papers (or ``keys``) to the log."""
+        """Write the current entries of the touched papers (or ``keys``) to the log.
+
+        A paper whose newest publication already holds exactly these entries is skipped.
+        """
+        self.refresh()
         with self._lock:
             if keys is None:
                 keys, self._touched = sorted(self._touched), set()
@@ -304,7 +327,7 @@ class IndexSync:
         if not keys:
             return 0
         prepare = getattr(self.client.embedding_function, "_prepare_document", lambda t: t)
-        done = 0
+        done = unchanged = 0
         for i in range(0, len(keys), batch):
             part = keys[i:i + batch]
             rows = self._rows_for(part, with_vectors=True)
@@ -313,18 +336,29 @@ class IndexSync:
             if vectors:
                 self.store.put_many(vectors)
             now = time.time()
+            with self._lock:
+                marks = ",".join("?" * len(part))
+                newest = {item: (fp, deleted) for item, fp, deleted in self._db.execute(
+                    f"SELECT item, fp, deleted FROM pubs WHERE item IN ({marks})", part)}
             records = []
             for k in part:
                 rs = rows.get(k) or []
                 if rs:
-                    records.append({"item": k, "t": now, "by": self.computer,
-                                    "rows": [{"id": r["id"], "doc": r["doc"], "meta": r["meta"]} for r in rs]})
+                    entries = [{"id": r["id"], "doc": r["doc"], "meta": r["meta"]} for r in rs]
+                    if newest.get(k) == (canonical_fingerprint(entries), 0):
+                        unchanged += 1
+                        continue
+                    records.append({"item": k, "t": now, "by": self.computer, "rows": entries})
                 else:
+                    if k in newest and newest[k][1]:
+                        unchanged += 1
+                        continue
                     records.append({"item": k, "t": now, "by": self.computer, "deleted": True})
             self._append(records, self._pack_file() if pack else self._own_file())
-            done += len(part)
-            if log and (done % 500 < batch or done == len(keys)):
-                log(f"  {done}/{len(keys)} papers published")
+            done += len(records)
+            if log and ((done + unchanged) % 500 < batch or done + unchanged == len(keys)):
+                log(f"  {done}/{len(keys)} papers published"
+                    + (f", {unchanged} unchanged since their last publication" if unchanged else ""))
         return done
 
     def publish_all(self, log: Callable[[str], None] | None = None) -> int:
@@ -418,6 +452,139 @@ class IndexSync:
             log(f"  {result['copied']} copied, {result['deleted']} removed"
                 + (f", {result['waiting']} waiting for the sync" if result["waiting"] else ""))
         return result
+
+    # -- compacting this computer's log -----------------------------------------------------
+
+    def _own_log_files(self) -> list[Path]:
+        if not self.dir.is_dir():
+            return []
+        return sorted(p for p in self.dir.glob(f"{self.computer}-*.jsonl") if p.is_file())
+
+    def log_usage(self) -> dict:
+        """This computer's log: bytes on disk, and bytes still holding a paper's newest version."""
+        self.refresh(force=True)
+        files = self._own_log_files()
+        total = sum(p.stat().st_size for p in files)
+        with self._lock:
+            live = self._db.execute("SELECT COALESCE(SUM(length + 1), 0), COUNT(*) FROM pubs WHERE who = ?",
+                                    (self.computer,)).fetchone()
+        return {"files": len(files), "bytes": total, "live_bytes": int(live[0]), "papers": int(live[1])}
+
+    def compact(self, archive_dir: Path | None = None, log: Callable[[str], None] | None = None) -> dict:
+        """Rewrite this computer's log with only the newest version of each paper it published.
+
+        Superseded publications (a paper published again later, by either computer) and
+        claims that have run out are left out. The new files are packs written beside the
+        old ones; the old files are then moved out of the synced folder into
+        ``archive_dir`` (default ``~/.config/zotero-mcp/_archive/index-log-<time>``), not
+        deleted. The other computer notices the files are gone at its next read and reads
+        the folder afresh; what it already copied stays copied (same publication times).
+        """
+        import datetime as _dt
+        import shutil
+
+        log = log or (lambda _m: None)
+        with locked(self._lock_path):
+            self.refresh(force=True)
+            old_files = self._own_log_files()
+            if not old_files:
+                return {"papers": 0, "before": 0, "after": 0, "files_archived": 0}
+            before = sum(p.stat().st_size for p in old_files)
+            with self._lock:
+                keep = self._db.execute(
+                    "SELECT item, file, offset, length FROM pubs WHERE who = ? ORDER BY file, offset",
+                    (self.computer,)).fetchall()
+                claims = self._db.execute("SELECT item, t FROM claims WHERE who = ? AND t > ?",
+                                          (self.computer, time.time() - CLAIM_TTL_SECONDS)).fetchall()
+            existing = sorted(self.dir.glob(f"{self.computer}-pack-*.jsonl"))
+            n = int(existing[-1].stem.rsplit("-", 1)[-1]) + 1 if existing else 1
+            written: list[tuple[Path, Path]] = []      # (temporary name, final name)
+            moved: list[tuple[str, str, int]] = []     # (item, new file, new offset)
+            out = None
+
+            def next_file():
+                nonlocal n, out
+                if out is not None:
+                    out.flush()
+                    os.fsync(out.fileno())
+                    out.close()
+                final = self.dir / f"{self.computer}-pack-{n:04d}.jsonl"
+                tmp = final.with_suffix(".jsonl.tmp")
+                written.append((tmp, final))
+                n += 1
+                out = open(tmp, "wb")
+                return final
+
+            current = next_file()
+            pos = 0
+            handles: dict[str, Any] = {}
+            try:
+                for i, (item, file, offset, length) in enumerate(keep, 1):
+                    f = handles.get(file)
+                    if f is None:
+                        f = handles[file] = open(self.dir / file, "rb")
+                    f.seek(offset)
+                    line = f.read(length)
+                    if len(line) != length:
+                        raise RuntimeError(f"{file} is shorter than the index of it says; nothing was changed")
+                    if pos and pos + length + 1 > PACK_FILE_BYTES:
+                        current = next_file()
+                        pos = 0
+                    out.write(line + b"\n")
+                    moved.append((item, current.name, pos))
+                    pos += length + 1
+                    if i % 500 == 0:
+                        log(f"  {i}/{len(keep)} papers rewritten")
+                for item, t in claims:
+                    out.write((json.dumps({"item": item, "t": t, "by": self.computer, "claim": True},
+                                          separators=(",", ":")) + "\n").encode("utf-8"))
+                out.flush()
+                os.fsync(out.fileno())
+                out.close()
+                out = None
+            except BaseException:
+                if out is not None:
+                    out.close()
+                for tmp, _final in written:
+                    tmp.unlink(missing_ok=True)
+                raise
+            finally:
+                for f in handles.values():
+                    f.close()
+
+            for tmp, final in written:
+                os.replace(tmp, final)
+            stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            archive = Path(archive_dir) if archive_dir else _config_dir() / "_archive" / f"index-log-{stamp}"
+            archive.mkdir(parents=True, exist_ok=True)
+            for p in old_files:
+                shutil.move(str(p), str(archive / p.name))
+            with self._lock:
+                self._db.executemany("UPDATE pubs SET file = ?, offset = ? WHERE item = ? AND who = ?",
+                                     [(f, o, item, self.computer) for item, f, o in moved])
+                self._db.executemany("DELETE FROM files WHERE name = ?", [(p.name,) for p in old_files])
+                self._db.executemany("INSERT OR REPLACE INTO files VALUES (?, ?)",
+                                     [(final.name, final.stat().st_size) for _tmp, final in written])
+                self._db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+                self._db.execute("INSERT OR REPLACE INTO meta VALUES ('last_compact', ?)", (str(time.time()),))
+                self._db.commit()
+            after = sum(final.stat().st_size for _tmp, final in written)
+        log(f"Compacted this computer's index log: {len(keep)} papers, {before / 1e6:.0f} MB -> "
+            f"{after / 1e6:.0f} MB; the old files are in {archive}")
+        return {"papers": len(keep), "before": before, "after": after, "files_archived": len(old_files),
+                "archive": str(archive)}
+
+    def maybe_compact(self, log: Callable[[str], None] | None = None) -> dict | None:
+        """Compact when most of a large log is superseded; at most once a day."""
+        usage = self.log_usage()
+        if usage["bytes"] < AUTO_COMPACT_MIN_BYTES or usage["live_bytes"] > AUTO_COMPACT_LIVE_SHARE * usage["bytes"]:
+            return None
+        with self._lock:
+            self._db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            row = self._db.execute("SELECT value FROM meta WHERE key = 'last_compact'").fetchone()
+        if row and time.time() - float(row[0]) < 24 * 3600:
+            return None
+        return self.compact(log=log)
 
     # -- comparing ----------------------------------------------------------------------------
 
