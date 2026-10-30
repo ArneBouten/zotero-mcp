@@ -316,3 +316,31 @@ def test_compact_only_when_most_of_a_large_log_is_superseded(tmp_path, monkeypat
     _add(pc, "AAA", n=3, section="Methods")
     pc.index_sync.publish()
     assert pc.index_sync.maybe_compact() is None  # at most once a day
+
+
+def test_a_log_file_in_use_is_left_in_place_and_nothing_is_lost(tmp_path, monkeypatch):
+    import shutil
+
+    pc, laptop = _computer(tmp_path, "PC"), _computer(tmp_path, "LAPTOP")
+    for section in ("Methods", "Results"):
+        _add(pc, "AAA", section=section)
+        pc.index_sync.publish()
+        time.sleep(0.01)
+    laptop.index_sync.pull()
+    real_move = shutil.move
+
+    def busy(src, dst):
+        raise PermissionError("in use by OneDrive")
+
+    monkeypatch.setattr(shutil, "move", busy)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    result = pc.index_sync.compact(archive_dir=tmp_path / "archive")
+    monkeypatch.setattr(shutil, "move", real_move)
+
+    assert result["files_left"] and result["files_archived"] == 0
+    assert pc.index_sync.publish(["AAA"]) == 0
+    assert laptop.index_sync.pull() == {"copied": 0, "deleted": 0, "waiting": 0}
+    assert pc.index_sync.compact(archive_dir=tmp_path / "archive2")["files_left"] == []
+    fresh = _computer(tmp_path, "NEW")
+    fresh.index_sync.pull()
+    assert _state(fresh) == _state(pc)

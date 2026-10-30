@@ -554,25 +554,39 @@ class IndexSync:
 
             for tmp, final in written:
                 os.replace(tmp, final)
-            stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-            archive = Path(archive_dir) if archive_dir else _config_dir() / "_archive" / f"index-log-{stamp}"
-            archive.mkdir(parents=True, exist_ok=True)
-            for p in old_files:
-                shutil.move(str(p), str(archive / p.name))
+            # From here the new packs hold every current publication; the old files only
+            # repeat them (same times), so one that cannot be moved yet does no harm.
             with self._lock:
                 self._db.executemany("UPDATE pubs SET file = ?, offset = ? WHERE item = ? AND who = ?",
                                      [(f, o, item, self.computer) for item, f, o in moved])
-                self._db.executemany("DELETE FROM files WHERE name = ?", [(p.name,) for p in old_files])
                 self._db.executemany("INSERT OR REPLACE INTO files VALUES (?, ?)",
                                      [(final.name, final.stat().st_size) for _tmp, final in written])
                 self._db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
                 self._db.execute("INSERT OR REPLACE INTO meta VALUES ('last_compact', ?)", (str(time.time()),))
                 self._db.commit()
+            stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            archive = Path(archive_dir) if archive_dir else _config_dir() / "_archive" / f"index-log-{stamp}"
+            archive.mkdir(parents=True, exist_ok=True)
+            archived, stuck = [], []
+            for p in old_files:
+                for attempt in range(5):
+                    try:
+                        shutil.move(str(p), str(archive / p.name))
+                        archived.append(p)
+                        break
+                    except OSError:  # OneDrive or a reader holds it open: try again shortly
+                        time.sleep(1 + attempt)
+                else:
+                    stuck.append(p.name)
+            with self._lock:
+                self._db.executemany("DELETE FROM files WHERE name = ?", [(p.name,) for p in archived])
+                self._db.commit()
             after = sum(final.stat().st_size for _tmp, final in written)
         log(f"Compacted this computer's index log: {len(keep)} papers, {before / 1e6:.0f} MB -> "
-            f"{after / 1e6:.0f} MB; the old files are in {archive}")
-        return {"papers": len(keep), "before": before, "after": after, "files_archived": len(old_files),
-                "archive": str(archive)}
+            f"{after / 1e6:.0f} MB; the old files are in {archive}"
+            + (f"; still in use, left in place for now: {', '.join(stuck)}" if stuck else ""))
+        return {"papers": len(keep), "before": before, "after": after, "files_archived": len(archived),
+                "files_left": stuck, "archive": str(archive)}
 
     def maybe_compact(self, log: Callable[[str], None] | None = None) -> dict | None:
         """Compact when most of a large log is superseded; at most once a day."""
