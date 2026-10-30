@@ -26,12 +26,22 @@ import pytest
 
 @pytest.fixture(scope="module")
 def registered_tools():
+    # Set for registration only: left behind, ZOTERO_LOCAL put every later test
+    # module in local mode (test_webdav failed when it ran after this one).
+    saved = {k: os.environ.get(k) for k in ("ZOTERO_LOCAL", "ZOTERO_MCP_TOOLSETS")}
     os.environ.setdefault("ZOTERO_LOCAL", "true")
     os.environ["ZOTERO_MCP_TOOLSETS"] = "all"
-    from zotero_mcp import server  # noqa: F401  (registers the tools)
-    from zotero_mcp._app import mcp
+    try:
+        from zotero_mcp import server  # noqa: F401  (registers the tools)
+        from zotero_mcp._app import mcp
 
-    return asyncio.run(mcp.list_tools())
+        yield asyncio.run(mcp.list_tools())
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def _sequence_params(tool):
