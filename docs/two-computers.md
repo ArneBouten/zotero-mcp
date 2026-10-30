@@ -184,6 +184,7 @@ build, so a computer still on an old build gives errors for the newer tools.
   replaces this build with the plain PyPI release.
 - Copy or sync `chroma_db` while a server runs, or keep it in a synced folder:
   OneDrive corrupts it. Each computer keeps its own index.
-- Work in the old copies (`C:\dev\zotero-mcp-fork`, `zotero-mcp-arne9`,
+- Bring back or work in the old copies (`C:\dev\zotero-mcp-fork`, `zotero-mcp-arne9`,
   `zotero-mcp-arne17`, `zotero-mcp-clean`, `OneDrive\Documenten\zotero-mcp`):
-  they have the history from before it was rewritten and must never be pushed.
+  they had the history from before it was rewritten and must never be pushed.
+  They were removed on 31 October 2026; `%USERPROFILE%\zotero-mcp` is the only copy.
