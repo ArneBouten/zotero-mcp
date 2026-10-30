@@ -45,9 +45,9 @@ dependencies = [
     "markdown-it-py>=2.2",
     "pydantic>=2.0.0",
     "requests>=2.28.0",
-    # <4 until the FastMCP 4 migration: FastMCP 4 targets the stateless
-    # 2026-07-28 MCP revision, drops ctx.sample/list_roots/elicit, and swaps
-    # httpx for httpx2. It is still a beta (4.0.0b1) as of this pin.
+    # FastMCP 4 targets the stateless 2026-07-28 MCP revision, drops
+    # ctx.sample/list_roots/elicit (unused here) and swaps httpx for httpx2.
+    # The test suite passes on 3.4 and on 4.1.4 (with mcp 2.3); <5 until 5.
     "fastmcp>=2.14.0,<5",
     # The client we hand the local Zotero API is built from whichever HTTP
     # library the installed pyzotero is built against — httpx2 on >=1.15,

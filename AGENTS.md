@@ -11,9 +11,13 @@ GitHub. See `docs/two-computers.md`.
   Claude Desktop runs) is older than this folder. Pull only after a yes.
 - After committing, ask whether to push now. Never push without a yes.
 - After a change under `src/` that should reach Claude Desktop, bump
-  `src/zotero_mcp/_version.py` (`0.13.2+arne.N`), commit, and offer to run
+  `src/zotero_mcp/_version.py` (`<upstream version>+arne.N`, e.g. `0.15.1+arne.69`), commit, and offer to run
   `uv run --no-project scripts/install_build.py` (Claude Desktop must be closed).
 - If the same files changed on both computers, combine the changes carefully
   and show the result before committing.
+- To take a new upstream release: `git fetch upstream`, merge `upstream/main`
+  into `arne/main` (never rebase: the history is on two computers), keep this
+  build's versions of `background_update` and the two-computer code, run the
+  tests, and set the version to `<new upstream version>+arne.N`.
 - Never run `zotero-mcp update` or `pip install --upgrade zotero-mcp-server`,
   and never `--force-rebuild` the search index unless the embedding model changes.

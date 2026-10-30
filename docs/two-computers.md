@@ -101,6 +101,14 @@ itself). From arne.67 the index itself is shared through a log in
   The computer whose Zotero gets a paper first indexes it; the other copies it
   at its next update (Claude Desktop's start, or before a search: a search
   waits up to 25 seconds when the other computer published something new).
+- **Only what changed is written.** A paper whose newest publication already
+  holds exactly its entries is not published again. Each computer's monthly
+  file moves on to `-02`, `-03` … past 200 MB, and once a computer's log is
+  over 1 GB and less than 40% of it is current, the next update compacts it:
+  only the newest version of each paper is kept, in new pack files, and the
+  old files move to `~\.config\zotero-mcp\_archive\index-log-<time>\`
+  (outside OneDrive; delete them once all is well). The other computer reads
+  the folder afresh when files disappear and copies nothing it already has.
 
 Commands (`py -3.12 -m zotero_mcp.cli shared-store …`):
 
@@ -110,6 +118,7 @@ Commands (`py -3.12 -m zotero_mcp.cli shared-store …`):
 | `mirror` | Replaces this computer's index by an exact copy from the log (the old one goes to `~\.config\zotero-mcp\_archive\`); minutes, no PDFs read, no API calls. Quit Claude Desktop first |
 | `pull` | Copies what the other computer published since (updates do this by themselves) |
 | `compare [--fix]` | Lists papers whose entries here differ from their newest publication; `--fix` makes them match |
+| `compact` | Rewrites this computer's log with only the newest version of each paper (updates do this by themselves when most of a large log is superseded) |
 | `status [--coverage]` | What is in the store and the log, and whether something is waiting to be copied |
 
 ## Setting up a computer

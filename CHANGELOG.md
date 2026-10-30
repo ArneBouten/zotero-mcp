@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1+arne.69] - 2026-10-31
+
+### Changed
+
+- **Upstream 0.15.1 merged in** (from 0.13.2). Among others: `config.json` is never rewritten from a file that cannot be parsed, and always written atomically (#646); temp copies of `zotero.sqlite` are named per process and cleaned up (#645; 52 were left in Temp, 1.8 GB); the DOI duplicate check reads SQLite in local mode instead of pinning Zotero's CPU (#704); notes keep `<`, `>` and `&` (#664); bibliography exports include every item (#662); SQLite quick search ignores accents (#663); PubMed IDs for `zotero_add_item`; OpenAlex repository copies in the open-access PDF cascade. This build keeps its own startup update (`background_update`) and its two-computer code; the Windows update lock is upstream's, released explicitly before closing.
+
+### Fixed
+
+- **Relabelling no longer rewrites the whole library at every update.** ChromaDB 1.x merges metadata on `upsert` and `update`, so a key left out of the new metadata kept its old value. The relabeller removes `structure_gemini` after a successful Gemini retry and headings that no longer apply by leaving them out, so they never went away: all 1,693 labelled papers kept `structure_gemini: "failed"` from an earlier Gemini outage, and each index update relabelled all of them, rewrote about 125,000 passages and published them to the shared log. Upserts now replace a record's metadata (a re-indexed passage no longer inherits the old passage's labels either), and the relabeller's metadata updates replace too.
+- **The shared index log stays small.** A paper is not published again when its newest publication already holds exactly its entries; the monthly file moves on past 200 MB; `zotero-mcp shared-store compact` keeps only the newest version of each paper (old files to `~\.config\zotero-mcp\_archive\index-log-<time>\`), and updates compact by themselves once a log is over 1 GB and mostly superseded. The other computer rereads the folder when files disappear. (The PC's log had grown to 8.5 GB in 11 days, with the whole library published 26 times.)
+- **Semantic search works while another process writes the index.** ChromaDB is not process-safe: during the startup update or `maintain --index`, the server's cached vector index stopped matching the stored records and searches failed with "Error executing plan: Internal error: Error finding id". The search now reloads the index and retries once.
+- A test left `ZOTERO_LOCAL` set for the rest of the run, which made `test_webdav` fail depending on order.
+
 ## [0.13.2+arne.68] - 2026-10-26
 
 ### Changed
