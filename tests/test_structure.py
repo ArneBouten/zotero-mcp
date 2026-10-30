@@ -198,7 +198,7 @@ class FakeChroma:
         self.embedding_config = {}
         self.updated = {}
 
-    def update_metadatas(self, ids, metas, replace=False):
+    def update_metadatas(self, ids, metas, *, replace=False):
         # Like ChromaDB 1.x: keys left out are kept unless the caller asks to replace.
         for i, m in zip(ids, metas):
             self.updated[i] = m

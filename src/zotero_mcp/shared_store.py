@@ -66,7 +66,9 @@ def enable(config_path: str | Path, log: Callable[[str], None] = print) -> bool:
         stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         shutil.copy2(path, path.with_name(f"{path.name}.bak-{stamp}"))
     sem.setdefault("shared_store", {})["enabled"] = True
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    from zotero_mcp.utils import write_json_atomic
+
+    write_json_atomic(path, data)
     log(f"Shared store turned on in {path} (backup beside it).")
     return True
 

@@ -12,12 +12,12 @@ The MCP server sends every enabled tool's name, description and JSON parameter s
 
 | Route | Tokens in context | When it is paid |
 |---|---:|---|
-| MCP, default profile (38 tools) | 13,448 | every request |
-| MCP, `ZOTERO_MCP_TOOLSETS=none` (32 tools) | 11,761 | every request |
-| MCP, `ZOTERO_MCP_TOOLSETS=all` (50 tools) | 17,414 | every request |
+| MCP, default profile (41 tools) | 16,815 | every request |
+| MCP, `ZOTERO_MCP_TOOLSETS=none` (34 tools) | 14,317 | every request |
+| MCP, `ZOTERO_MCP_TOOLSETS=all` (53 tools) | 20,942 | every request |
 | CLI skill, frontmatter only | 98 | always |
-| CLI skill, body loaded | 1,368 | once the skill fires |
-| CLI skill + full command reference | 4,389 | worst case |
+| CLI skill, body loaded | 2,400 | once the skill fires |
+| CLI skill + full command reference | 6,158 | worst case |
 
 That is the *fixed* cost only. It does not measure task success, output size, or how many round trips each route takes to finish a job — a cheaper surface that gets the answer wrong is not cheaper. Numbers are `cl100k_base` tokens and are re-measured, not estimated; `tests/test_context_cost_claim.py` fails if the relationship stops holding.
 
@@ -100,6 +100,7 @@ zotero-cli add doi 10.1038/s41586-021-03819-2
 zotero-cli add url https://arxiv.org/abs/2301.00001
 zotero-cli add file --filepath /path/to/paper.pdf --title "Override Title"
 zotero-cli add isbn 9780262046305
+zotero-cli add pmid 31842878,16446872                # PubMed record: keeps PMID/PMCID, MeSH tags
 zotero-cli add bibtex --file refs.bib                # or --bibtex '@article{...}'
 zotero-cli add bibtex --bibtex - < refs.bib          # stdin via -
 zotero-cli add csl-json --file refs.json             # or --json '...' / --json -
@@ -136,10 +137,13 @@ zotero-cli duplicates find
 
 # Reading PDFs — find the section first, then read only those pages
 zotero-cli outline ABC123
+zotero-cli read ABC123 --find "robustness check"          # ranked pages with short snippets, not whole pages
 zotero-cli read ABC123 --start-page 42 --end-page 55      # flags garbled math, figures, tables
 zotero-cli read ABC123 --start-page 44 --format image    # PNG page images (up to 10 pages)
 zotero-cli read ABC123 --start-page 44 --format image --rect 0.35,0.49,0.3,0.05   # zoom in
 zotero-cli path ABC123                        # where the file lives on disk
+zotero-cli open ABC123 --page 44              # show page 44 in the Zotero reader
+zotero-cli open --annotation ANN01            # jump to an annotation and select it
 
 # Annotating a PDF — boxes to aim at, then a checked plan written in one run
 zotero-cli --json layout ATTACH01 --pages 3-9            # figure, table and equation boxes
@@ -158,6 +162,11 @@ zotero-cli export --collection COLL01 --format bibtex
 zotero-cli related 10.1038/s41586-021-03819-2 --direction citations
 zotero-cli coverage --collection COLL01
 zotero-cli synthesize --tag "to-read" --format json
+
+# Zotero Agent plugin: where the .xpi is and how to install it
+zotero-cli plugin
+zotero-cli plugin --path
+zotero-cli plugin --reveal
 
 # Bulk edits across many items
 zotero-cli batch --item-keys ABC123,DEF456 --add-tags screened

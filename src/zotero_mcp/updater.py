@@ -5,6 +5,7 @@ This module provides intelligent updating that detects the original installation
 method and preserves all user configurations.
 """
 
+import json
 import os
 import re
 import shutil
@@ -377,6 +378,19 @@ def is_newer_version(current: str, latest: str) -> bool:
         return as_tuple(latest_norm) > as_tuple(current_norm)
 
 
+def _chroma_dir() -> Path:
+    """The index directory the server uses: ``semantic_search.persist_directory`` or the default (#617)."""
+    from zotero_mcp.config import resolve_chroma_dir
+
+    configured = None
+    try:
+        cfg = json.loads((Path.home() / ".config" / "zotero-mcp" / "config.json").read_text())
+        configured = cfg.get("semantic_search", {}).get("persist_directory")
+    except (OSError, ValueError, AttributeError):
+        pass
+    return resolve_chroma_dir(configured)
+
+
 def backup_configurations() -> Path:
     """
     Backup current configurations before update.
@@ -410,7 +424,7 @@ def backup_configurations() -> Path:
             logger.warning(f"Could not backup semantic search config: {e}")
 
     # Backup ChromaDB database (if exists)
-    chroma_db_path = Path.home() / ".config" / "zotero-mcp" / "chroma_db"
+    chroma_db_path = _chroma_dir()
     if chroma_db_path.exists():
         try:
             backup_chroma_path = backup_dir / "chroma_db"
@@ -462,15 +476,19 @@ def restore_configurations(backup_dir: Path) -> bool:
             logger.error(f"Could not restore semantic search config: {e}")
             success = False
 
-    # Restore ChromaDB database
+    # Restore ChromaDB database, only if it went missing. A package update
+    # never writes to the index, and replacing it means deleting it first: a
+    # partial backup (disk full, an unreadable file) then loses data, and
+    # persist_directory may share its folder with other files. A running
+    # server's open database also rejects writes afterwards on POSIX, and on
+    # Windows its file locks can leave the delete incomplete.
     chroma_backup = backup_dir / "chroma_db"
     if chroma_backup.exists():
         try:
-            chroma_db_path = Path.home() / ".config" / "zotero-mcp" / "chroma_db"
-            if chroma_db_path.exists():
-                shutil.rmtree(chroma_db_path)
-            shutil.copytree(chroma_backup, chroma_db_path)
-            print("Restored ChromaDB database")
+            chroma_db_path = _chroma_dir()
+            if not chroma_db_path.exists():
+                shutil.copytree(chroma_backup, chroma_db_path)
+                print("Restored ChromaDB database")
         except Exception as e:
             logger.error(f"Could not restore ChromaDB database: {e}")
             success = False

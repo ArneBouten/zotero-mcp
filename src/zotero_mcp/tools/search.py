@@ -261,6 +261,71 @@ def _canonical_item_type(value: str) -> str | None:
     return None
 
 
+_FALLBACK_TAG_OR = re.compile(r"\s+OR\s+|\|\|")
+
+
+def _fallback_filters_active(item_type: str | None, tag: list[str]) -> bool:
+    """Whether the caller narrowed the search beyond the default."""
+    return bool(tag) or (item_type or "-attachment") != "-attachment"
+
+
+def _filter_fallback_items(
+    items: list[dict], item_type: str | None, tag: list[str]
+) -> list[dict] | None:
+    """Keep the semantic-fallback items that satisfy the caller's `tag` and
+    `item_type` filters, which the semantic index itself cannot apply.
+
+    The text searches hand both filters to the backend; the semantic fallback
+    did not, so `tag='a'` returned untagged items. The syntax is the one
+    those searches accept: tag entries are ANDed, ` OR ` / `||` disjoins within
+    an entry and a leading `-` excludes; `item_type` is a type name, `-type`
+    or `a || b`. Returns None when a filter cannot be honoured here (a `*` or
+    `%` wildcard in a tag), so the caller skips the fallback rather than show
+    items that may not match.
+    """
+    if any("*" in t or "%" in t for t in tag):
+        return None
+
+    def _tags(item: dict) -> set[str]:
+        data = item.get("data", item)
+        return {
+            _semantics.normalize(str(t.get("tag", "")).strip())
+            for t in (data.get("tags") or [])
+            if isinstance(t, dict)
+        }
+
+    def _tag_ok(item: dict) -> bool:
+        have = _tags(item)
+        for entry in tag:
+            hit = False
+            for term in (t.strip() for t in _FALLBACK_TAG_OR.split(entry)):
+                excluded = term.startswith("-")
+                name = _semantics.normalize((term[1:] if excluded else term).strip())
+                if not name:
+                    continue
+                if excluded != (name in have):
+                    hit = True
+                    break
+            if not hit:
+                return False
+        return True
+
+    def _type_ok(item: dict) -> bool:
+        kind = str((item.get("data", item)).get("itemType", ""))
+        wanted = (item_type or "-attachment").strip()
+        for term in (t.strip() for t in wanted.split("||")):
+            if not term:
+                continue
+            if term.startswith("-"):
+                if kind == term[1:].strip():
+                    return False
+            elif kind == term:
+                return True
+        return all(t.strip().startswith("-") for t in wanted.split("||") if t.strip())
+
+    return [i for i in items if _tag_ok(i) and _type_ok(i)]
+
+
 def _is_note(item: dict) -> bool:
     """Whether *item* is a note — the one itemType whose *content* Zotero's
     quicksearch matches in `titleCreatorYear` mode, standing in for the
@@ -647,8 +712,15 @@ def search_items(
                             # by surfacing a group-library hit, and a global
                             # one narrows to the active library on its last
                             # step. `scope_group_id` is already either.
+                            # The index cannot filter by tag or item type, so
+                            # when either is set it is applied to the hits
+                            # below; over-fetch so the limit survives it.
+                            sem_limit = limit or 10
+                            filtered_fallback = _fallback_filters_active(item_type, tag)
+                            if filtered_fallback:
+                                sem_limit = min(max(sem_limit * 5, 50), 200)
                             sem_results = sem_search.search(
-                                query=query, limit=limit or 10, group_id=scope_group_id
+                                query=query, limit=sem_limit, group_id=scope_group_id
                             )
                             _search_logger.debug(f"[CASCADE] semantic query: {_time.monotonic() - t0:.2f}s")
                             if sem_results and sem_results.get("results"):
@@ -661,6 +733,11 @@ def search_items(
                                         if "key" not in zot_item:
                                             zot_item["key"] = key
                                         items.append(zot_item)
+                                if filtered_fallback:
+                                    # None: a filter we cannot evaluate here,
+                                    # so show nothing rather than unfiltered hits.
+                                    items = _filter_fallback_items(items, item_type, tag) or []
+                                items = items[: limit or 10]
                                 if items:
                                     fallback_strategy = "semantic search"
                     except Exception as e:
@@ -699,9 +776,10 @@ def search_items(
                     f"Found {len(items)} item(s) via {fallback_strategy} — verify the correct one "
                     f"by checking title, authors, journal, and year match your original query.*"
                 )
-            output.insert(1, "")
-            output.insert(2, note_text)
-            output.insert(3, "")
+            # Below the header block (title, scope, tag filter and its blank
+            # line), not wedged between the title and the filter line.
+            note_at = 3 + (1 if search_all_libraries else 0)
+            output[note_at:note_at] = [note_text, ""]
 
         return _helpers._prepend_size_warning("\n".join(output))
 
@@ -891,6 +969,60 @@ def search_by_citation_key(
         return f"Error looking up citation key: {str(e)}"
 
 
+# Names advanced_search accepts beyond the per-item-type field names in the
+# schema: the aliases both backends resolve, `year`, and the item-level keys an
+# API item carries.
+_EXTRA_CONDITION_FIELDS = frozenset(
+    {"year", "key", "version", "parentItem", "dateAdded", "dateModified", "itemType"}
+)
+
+
+def _known_condition_fields() -> set[str]:
+    """Every field name a condition can meaningfully name, or an empty set when
+    the field schema is unavailable (nothing is then rejected)."""
+    from zotero_mcp import schema as _schema
+
+    try:
+        table = _schema.get_table()["itemTypes"]
+    except Exception:
+        return set()
+    names: set[str] = set()
+    for fields in table.values():
+        for actual, base in fields.items():
+            names.add(actual)
+            names.add(base)
+    if not names:
+        return set()
+    return names | _EXTRA_CONDITION_FIELDS | set(_semantics.FIELD_ALIASES)
+
+
+def _unknown_condition_field_error(
+    field: str, index: int, valid_operations: set[str]
+) -> str | None:
+    """An error naming close matches when `field` is not a field any backend
+    can match on, else None. Without it a typo ("titel") is a valid-looking
+    condition that matches nothing, and the tool answers "No items found"."""
+    known = _known_condition_fields()
+    if not known or field in known or field.lower() in _semantics.FIELD_ALIASES:
+        return None
+    import difflib
+
+    by_lower = {name.lower(): name for name in sorted(known)}
+    close: list[str] = []
+    for lowered in difflib.get_close_matches(field.lower(), list(by_lower), n=3, cutoff=0.6):
+        if by_lower[lowered] not in close:
+            close.append(by_lower[lowered])
+    hint = f" Did you mean: {', '.join(close)}?" if close else ""
+    return (
+        f"Error: Unknown field '{field}' in condition {index}.{hint} "
+        "Field names are Zotero field names and case-sensitive (title, date, "
+        "itemType, dateAdded, dateModified, publicationTitle, abstractNote, "
+        "extra, publisher, ...); the aliases creator, tag, collection and year "
+        "match in any case. "
+        f"Supported operations: {', '.join(sorted(valid_operations))}"
+    )
+
+
 @mcp.tool(
     name="zotero_advanced_search",
     description=(
@@ -929,7 +1061,7 @@ def search_by_citation_key(
 )
 @with_zotero_api_lock
 def advanced_search(
-    conditions: list[dict[str, str]] | str,
+    conditions: list[dict[str, str]] | dict[str, str] | str,
     join_mode: Literal["all", "any"] = "all",
     sort_by: str | None = None,
     sort_direction: Literal["asc", "desc"] = "asc",
@@ -985,6 +1117,13 @@ def advanced_search(
                     f"({parse_error})"
                 )
 
+        # One condition sent as a bare object, rather than a list of one, is
+        # a shape models produce often. Without `dict` on the annotation it was
+        # a raw pydantic list_type error at the boundary, and as a JSON string
+        # it reached here as "No search conditions provided".
+        if isinstance(conditions, dict) and conditions:
+            conditions = [conditions]
+
         if not isinstance(conditions, list) or not conditions:
             return "Error: No search conditions provided"
 
@@ -1030,6 +1169,8 @@ def advanced_search(
                 )
             if not field:
                 return f"Error: Condition {i} has an empty field"
+            if (unknown := _unknown_condition_field_error(field, i, valid_operations)):
+                return unknown
 
             parsed_conditions.append(
                 {"field": field, "operation": operation, "value": value}

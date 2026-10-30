@@ -1,7 +1,10 @@
+import contextlib
+import json
 import logging
 import os
 import re
 import sys
+import tempfile
 import threading
 from contextlib import contextmanager
 
@@ -66,6 +69,32 @@ def ensure_private_dir(path) -> None:
             )
     except OSError:
         pass
+
+
+def write_json_atomic(path, data) -> None:
+    """Write ``data`` as JSON to ``path``, owner-only, via a temp file and a rename.
+
+    A concurrent reader sees the old file or the new one, never half of it,
+    and a crash mid-write leaves the old file intact. The temp name is unique
+    per call, so concurrent writers (threads or processes) never share one,
+    and ``mkstemp`` creates it owner-only, so a credential is never readable
+    by others, even before the rename. A symlinked ``path`` is written through
+    (dotfile managers): replacing the link itself would leave the real file
+    stale.
+    """
+    from pathlib import Path
+
+    path = Path(path).resolve()
+    ensure_private_dir(path.parent)
+    fd, temp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_path)
+        raise
 
 
 def detect_install_flavor() -> str | None:
@@ -665,23 +694,21 @@ _UMLAUT_MAP = {
     'Ü': 'Ue', 'Ö': 'Oe', 'Ä': 'Ae',
 }
 
-# Dash-like Unicode characters to normalize to ASCII hyphen-minus
-_DASH_PATTERN = re.compile(r'[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]')
-
 MAX_SEARCH_VARIANTS = 15
 
 
 def _normalize_for_search(text: str) -> str:
-    """Normalize text for fuzzy matching: transliterate to ASCII, normalize dashes.
+    """Normalize text for fuzzy matching: transliterate to ASCII.
 
-    Uses ``unidecode`` for broad Unicode transliteration (handles CJK, Greek,
-    Cyrillic, diacritics, etc.) and a regex for dash-like characters.
+    ``unidecode`` handles CJK, Greek, Cyrillic and diacritics, and already
+    maps Unicode dashes to ASCII hyphens. A separate dash regex used to run
+    after it; it matched only non-ASCII characters in pure-ASCII output, so it
+    never changed anything, and it made this (called once per stored row by
+    ``zsearch_norm``) about seven times slower.
     """
     if not text:
         return text
-    result = unidecode(text)
-    result = _DASH_PATTERN.sub('-', result)
-    return result
+    return unidecode(text)
 
 
 def _generate_search_variants(query: str) -> list[str]:

@@ -60,7 +60,9 @@ def share(folder: str | Path, log: Callable[[str], None] = print, config_dir: Pa
         shutil.copy2(config, config.with_name(f"config.json.bak-{stamp}"))
         data = json.loads(config.read_text(encoding="utf-8"))
     data["state_dir"] = _portable(target)
-    config.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    from zotero_mcp.utils import write_json_atomic
+
+    write_json_atomic(config, data)
 
     if copied:
         log(f"Copied this computer's records to {target}: {', '.join(copied)}.")

@@ -34,6 +34,7 @@ from . import _runtime, batch_common, fulltext_cache, gemini_batch, openai_batch
 from . import ocr as _ocr
 from .chroma_client import ChromaClient, IndexReadError, create_chroma_client
 from .client import get_active_group_id, get_zotero_client
+from .client import read_config_for_update as _read_config_for_update
 
 # Re-exported so callers keep importing them from here, while the
 # ChromaDB-free definitions stay importable without this module (#485).
@@ -56,7 +57,14 @@ from .rerank import (  # noqa: F401  (re-exported)
     APIReranker,
     CrossEncoderReranker,
 )
-from .utils import _paginate, ensure_private_dir, format_creators, is_local_mode, suppress_stdout
+from .utils import (
+    _paginate,
+    ensure_private_dir,
+    format_creators,
+    is_local_mode,
+    suppress_stdout,
+    write_json_atomic,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -258,9 +266,69 @@ def _force_update_requested() -> bool:
     return os.getenv("ZOTERO_MCP_FORCE_UPDATE", "").strip().lower() in {"1", "true", "yes"}
 
 
+def _update_lock_path() -> Path:
+    """Where the cross-process update lock lives.
+
+    One function so the test suite can point it at a temp dir: tests that
+    run update_database() used to take the user's real lock, so two test
+    runs at once, or a test run during a real update, made each other skip.
+    """
+    return Path.home() / ".config" / "zotero-mcp" / "update.lock"
+
+
+# msvcrt.locking is a mandatory byte-range lock: the pid text at offset 0 must
+# stay readable for the process that loses the race, so the lock sits past it.
+_WIN_LOCK_OFFSET = 4096
+
+
+def _try_lock(fd) -> bool:
+    """Take a non-blocking exclusive lock on the open file; False if held."""
+    try:
+        import fcntl
+    except ImportError:
+        try:
+            import msvcrt  # Windows
+        except ImportError:
+            return True  # neither primitive: proceed unguarded, as before #267
+
+        fd.seek(_WIN_LOCK_OFFSET)
+        try:
+            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+        finally:
+            fd.seek(0)
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
+def _unlock(fd) -> None:
+    """Release the Windows lock explicitly before closing (POSIX: closing releases it).
+
+    Windows also drops a closed handle's locks, but "in a time that depends on
+    available system resources", so a quick next update could find it still held.
+    """
+    try:
+        import fcntl  # noqa: F401
+        return
+    except ImportError:
+        pass
+    try:
+        import msvcrt
+
+        fd.seek(_WIN_LOCK_OFFSET)
+        msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+    except Exception:
+        pass
+
+
 @contextlib.contextmanager
 def _acquire_update_lock(lock_path: Path):
-    """Non-blocking exclusive flock over an update-database run.
+    """Non-blocking exclusive lock over an update-database run.
 
     Yields True if the lock was acquired (caller should proceed), False if
     another process already holds it (caller should skip). This prevents the
@@ -272,29 +340,20 @@ def _acquire_update_lock(lock_path: Path):
     holder on a filesystem with quirky flock semantics) and the user knowingly
     accepts the small double-work risk.
 
-    Windows lacks ``fcntl``; there the same exclusion comes from
-    ``msvcrt.locking`` (see :func:`_acquire_update_lock_windows`). Only a
-    platform with neither degrades to a no-op that always proceeds.
+    ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on Windows (#267).
     """
     if _force_update_requested():
         yield True
         return
 
-    try:
-        import fcntl
-    except ImportError:
-        yield from _acquire_update_lock_windows(lock_path)
-        return
-
     ensure_private_dir(lock_path.parent)
     fd = None
+    acquired = False
     try:
         # "a" not "w": a process that loses the race must not truncate the
-        # holder's pid before flock fails. We truncate after acquiring.
+        # holder's pid before the lock fails. We truncate after acquiring.
         fd = open(lock_path, "a")
-        try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not _try_lock(fd):
             yield False
             return
         # Record our pid so a concurrent invocation can report the holder.
@@ -305,64 +364,12 @@ def _acquire_update_lock(lock_path: Path):
             fd.flush()
         except Exception:
             pass
+        acquired = True
         yield True
     finally:
         if fd is not None:
-            fd.close()
-
-
-# Byte offset of the Windows lock region: well past the pid the file holds,
-# so another process can still read the pid while the lock is held (a
-# locked byte refuses reads from other handles on Windows).
-_WIN_LOCK_OFFSET = 1 << 20
-
-
-def _acquire_update_lock_windows(lock_path: Path):
-    """Generator body of :func:`_acquire_update_lock` for Windows.
-
-    Without it every update on Windows ran unguarded, so the startup update,
-    a pre-search background update and a manual ``zotero-mcp update-db``
-    could index the same ChromaDB collection at once. ``msvcrt.locking`` is a
-    mandatory byte-range lock owned by the file handle: it is refused to any
-    other handle, in this process or another, and released by the OS if the
-    holder dies, so a crash cannot leave a stale lock.
-    """
-    try:
-        import msvcrt
-    except ImportError:
-        yield True
-        return
-
-    ensure_private_dir(lock_path.parent)
-    fd = None
-    locked = False
-    try:
-        # Create without truncating, then reopen for in-place writes.
-        open(lock_path, "a").close()
-        fd = open(lock_path, "r+")
-        fd.seek(_WIN_LOCK_OFFSET)
-        try:
-            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
-            locked = True
-        except OSError:
-            yield False
-            return
-        try:
-            fd.seek(0)
-            fd.truncate()
-            fd.write(str(os.getpid()))
-            fd.flush()
-        except Exception:
-            pass
-        yield True
-    finally:
-        if fd is not None:
-            if locked:
-                try:
-                    fd.seek(_WIN_LOCK_OFFSET)
-                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
+            if acquired:
+                _unlock(fd)
             fd.close()
 
 
@@ -415,6 +422,11 @@ _EXTRACTOR_REVISION = 2
 # the next re-embed.
 _MASS_DELETION_MIN_DOCS = 25
 _MASS_DELETION_MIN_FRACTION = 0.25
+
+# Item types that are never indexed as standalone documents. Both API
+# fetch paths use this; the local SQLite scan in local_db.py excludes the
+# same three types in SQL (#604).
+_NON_INDEXED_ITEM_TYPES = frozenset({"attachment", "note", "annotation"})
 
 
 def _extract_fulltext_batch(reader, items):
@@ -1068,6 +1080,57 @@ class ZoteroSemanticSearch:
         logger.warning(message)
         _report(f"\nWarning: {message}\n")
 
+    # Share of the model's input limit a passage may fill. Characters per token
+    # is an estimate, and the head of a passage is cut off if it overshoots.
+    CHUNK_FIT_MARGIN = 0.85
+
+    # Below this many tokens a single vector cannot hold a whole paper.
+    SMALL_CONTEXT_TOKENS = 2000
+
+    def _effective_chunk_size(self) -> int:
+        """``chunk_size`` capped so a passage fits the embedding model's limit.
+
+        The default chunk_size (1500 chars, ~350 tokens) is longer than
+        all-MiniLM-L6-v2 reads (256 tokens), which would silently cut the tail
+        off every passage. Models whose limit already fits are unchanged.
+        """
+        configured = int(self._chunking_config.get("chunk_size", 1500))
+        max_tokens = getattr(self.chroma_client, "embedding_max_tokens", None)
+        if not isinstance(max_tokens, (int, float)) or max_tokens <= 0:
+            return configured
+        ef = getattr(self.chroma_client, "embedding_function", None)
+        chars_per_token = getattr(ef, "chars_per_token", 4)
+        fit = max(1, int(max_tokens * chars_per_token * self.CHUNK_FIT_MARGIN))
+        if fit >= configured:
+            return configured
+        if not getattr(self, "_chunk_fit_logged", False):
+            self._chunk_fit_logged = True
+            logger.info(
+                f"Passage chunk_size reduced from {configured} to {fit} characters to fit "
+                f"the embedding model's {int(max_tokens)}-token input limit."
+            )
+        return fit
+
+    def _fulltext_fit_warning(self) -> str | None:
+        """Warning for item-level fulltext indexing on a small-context model.
+
+        Without chunking, an item's text is one vector truncated at the model's
+        input limit, so a PDF's body is dropped and only the start (usually
+        the abstract) stays searchable.
+        """
+        max_tokens = getattr(self.chroma_client, "embedding_max_tokens", None)
+        if not isinstance(max_tokens, (int, float)) or max_tokens >= self.SMALL_CONTEXT_TOKENS:
+            return None
+        if self._chunking_enabled:
+            return None
+        model = getattr(self.chroma_client, "embedding_model", None) or "The embedding model"
+        return (
+            f"Full text is being indexed as one vector per item, and {model} takes only "
+            f"{int(max_tokens)} tokens, so only the first ~{int(max_tokens)} tokens of each "
+            "item (usually the abstract) are searchable. Enable semantic_search.chunking in "
+            "config.json and rebuild with --force-rebuild to index whole papers."
+        )
+
     def _load_reranker_config(self) -> dict[str, Any]:
         """Load reranker configuration from file or use defaults."""
         return load_reranker_config(self.config_path)
@@ -1102,8 +1165,9 @@ class ZoteroSemanticSearch:
         Defaults to True so existing users auto-upgrade to fulltext indexing on
         their next sync. Users can opt out by setting
         `semantic_search.include_fulltext: false` in the config file.
-        Local mode (`ZOTERO_LOCAL=true`) keeps using `extract_fulltext` via
-        the local sqlite DB; this setting only governs web-API ingestion.
+        It governs the API-based path, which runs in web and local mode
+        alike; `extract_fulltext` (`update-db --fulltext`) replaces it with
+        extraction from the local sqlite DB.
         """
         if not self.config_path or not os.path.exists(self.config_path):
             return True
@@ -1383,6 +1447,20 @@ class ZoteroSemanticSearch:
             section.get("last_sync_version"), library_key
         )
 
+    def _config_for_update(self) -> dict | None:
+        """The config file for a read-modify-write, or None to skip the write.
+
+        A file that exists but cannot be parsed (a typo from hand-editing, or
+        another process caught mid-write) also holds the API key, the local
+        write key and the embedding settings; rewriting it from ``{}`` would
+        drop all of them, so the save is skipped and logged instead.
+        """
+        try:
+            return _read_config_for_update(self.config_path)
+        except OSError as e:
+            logger.error(f"Not saving index state: {e}")
+            return None
+
     def _save_update_config(
         self,
         last_sync_version: int | None = None,
@@ -1393,17 +1471,9 @@ class ZoteroSemanticSearch:
         if not self.config_path:
             return
 
-        config_dir = Path(self.config_path).parent
-        ensure_private_dir(config_dir)
-
-        # Load existing config or create new one
-        full_config = {}
-        if os.path.exists(self.config_path):
-            try:
-                with open(self.config_path) as f:
-                    full_config = json.load(f)
-            except Exception:
-                pass
+        full_config = self._config_for_update()
+        if full_config is None:
+            return
 
         # Update semantic search config
         if "semantic_search" not in full_config:
@@ -1425,8 +1495,7 @@ class ZoteroSemanticSearch:
                 full_config["semantic_search"]["last_sync_version"] = int(last_sync_version)
 
         try:
-            with open(self.config_path, "w") as f:
-                json.dump(full_config, f, indent=2)
+            write_json_atomic(self.config_path, full_config)
         except Exception as e:
             logger.error(f"Error saving update config: {e}")
 
@@ -1446,19 +1515,12 @@ class ZoteroSemanticSearch:
         """Record that the collection's metadata now matches ``version``."""
         if not self.config_path:
             return
-        config_dir = Path(self.config_path).parent
-        ensure_private_dir(config_dir)
-        full_config = {}
-        if os.path.exists(self.config_path):
-            try:
-                with open(self.config_path) as f:
-                    full_config = json.load(f)
-            except Exception:
-                pass
+        full_config = self._config_for_update()
+        if full_config is None:
+            return
         full_config.setdefault("semantic_search", {})["index_schema_version"] = int(version)
         try:
-            with open(self.config_path, "w") as f:
-                json.dump(full_config, f, indent=2)
+            write_json_atomic(self.config_path, full_config)
         except Exception as e:
             logger.error(f"Error saving index_schema_version: {e}")
 
@@ -1477,21 +1539,16 @@ class ZoteroSemanticSearch:
         """Persist the unattributed-doc count so later updates keep warning."""
         if not self.config_path:
             return
-        full_config = {}
-        if os.path.exists(self.config_path):
-            try:
-                with open(self.config_path) as f:
-                    full_config = json.load(f)
-            except Exception:
-                pass
+        full_config = self._config_for_update()
+        if full_config is None:
+            return
         section = full_config.setdefault("semantic_search", {})
         if count:
             section["backfill_unattributed"] = int(count)
         else:
             section.pop("backfill_unattributed", None)
         try:
-            with open(self.config_path, "w") as f:
-                json.dump(full_config, f, indent=2)
+            write_json_atomic(self.config_path, full_config)
         except Exception as e:
             logger.error(f"Error saving backfill_unattributed: {e}")
 
@@ -1838,7 +1895,7 @@ class ZoteroSemanticSearch:
         raises RuntimeError if local mode is not enabled. This path reads the
         local Zotero sqlite database and extracts PDF text on-disk.
 
-        When include_fulltext_via_api=True (web-API mode), fetches the
+        When include_fulltext_via_api=True (web or local API), fetches the
         server-side extracted fulltext that Zotero cloud has already built
         for each PDF — no local files required.
 
@@ -2436,53 +2493,39 @@ class ZoteroSemanticSearch:
         return creators
 
     def _fetch_fulltext_via_web_api(self, item_key: str) -> tuple[str, str]:
-        """Fetch fulltext for a top-level item via the Zotero web API.
+        """Fetch the fulltext Zotero already extracted for a top-level item.
 
-        Zotero's cloud keeps a server-side extracted text for every PDF that
-        the desktop client has ever indexed. Web-API mode can retrieve that
-        text without needing the PDF file to be present locally.
-
-        The fulltext usually lives on the PDF attachment child, not the
-        parent. We first try the parent's own key (covers the case where the
-        parent is itself an attachment), then cascade through PDF attachment
-        children.
+        Zotero keeps extracted text per PDF attachment, never under the parent
+        item's own key, so this walks the item's PDF attachment children and
+        returns the first that has any. It works against the web API and the
+        local API alike, without needing the PDF file.
 
         Returns:
-            (text, source) where source describes which endpoint supplied the
-            text (e.g. "web-api:parent", "web-api:attachment:<key>"). Empty
+            (text, source) where source is ``web-api:attachment:<key>``. Empty
             strings mean no fulltext is available for this item.
         """
-
-        def _extract_content(resp: Any) -> str:
-            if isinstance(resp, dict):
-                return str(resp.get("content", "") or "")
-            if isinstance(resp, str):
-                return resp
-            return ""
-
-        # 1. Try the item itself (works when item_key IS the attachment key).
-        try:
-            resp = self.zotero_client.fulltext_item(item_key)
-            text = _extract_content(resp)
-            if text.strip():
-                return text, "web-api:parent"
-        except Exception as e:
-            logger.debug(f"fulltext_item({item_key}) failed: {e}")
-
-        # 2. Walk PDF attachment children and try each in order.
         try:
             children = _paginate(self.zotero_client.children, item_key) or []
         except Exception as e:
             logger.debug(f"children({item_key}) failed: {e}")
             children = []
+        return self._fulltext_from_attachments(
+            [self._pdf_attachment_key(child) for child in children]
+        )
 
-        for child in children:
-            data = child.get("data", {}) if isinstance(child, dict) else {}
-            if data.get("itemType") != "attachment":
-                continue
-            if data.get("contentType") != "application/pdf":
-                continue
-            child_key = child.get("key") or data.get("key")
+    @staticmethod
+    def _pdf_attachment_key(child: Any) -> str | None:
+        """The key of ``child`` when it is a PDF attachment, else None."""
+        data = child.get("data", {}) if isinstance(child, dict) else {}
+        if data.get("itemType") != "attachment":
+            return None
+        if data.get("contentType") != "application/pdf":
+            return None
+        return child.get("key") or data.get("key") or None
+
+    def _fulltext_from_attachments(self, attachment_keys: list[str | None]) -> tuple[str, str]:
+        """Zotero's extracted text for the first of ``attachment_keys`` that has any."""
+        for child_key in attachment_keys:
             if not child_key:
                 continue
             try:
@@ -2490,14 +2533,49 @@ class ZoteroSemanticSearch:
             except Exception as e:
                 logger.debug(f"fulltext_item({child_key}) failed: {e}")
                 continue
-            text = _extract_content(resp)
+            text = str(resp.get("content", "") or "") if isinstance(resp, dict) else (
+                resp if isinstance(resp, str) else ""
+            )
             if text.strip():
                 return text, f"web-api:attachment:{child_key}"
-
         return "", ""
 
-    def _attach_web_fulltext(self, items: list[dict[str, Any]]) -> None:
-        """Populate `data.fulltext` on each item in place using the web API."""
+    # For a whole-library pass over at least this many items, one paged listing
+    # of the attachments is cheaper than asking for each item's children.
+    _BULK_ATTACHMENT_WALK_MIN_ITEMS = 25
+
+    def _pdf_attachment_keys_by_parent(self) -> dict[str, list[str]] | None:
+        """PDF attachment keys grouped by parent key, from one paged listing.
+
+        None when the listing fails, so the caller can fall back to asking
+        per item.
+        """
+        try:
+            rows = _paginate(self.zotero_client.items, itemType="attachment") or []
+        except Exception as e:
+            logger.debug(f"attachment listing failed, asking per item: {e}")
+            return None
+        by_parent: dict[str, list[str]] = {}
+        for row in rows:
+            key = self._pdf_attachment_key(row)
+            parent = (row.get("data") or {}).get("parentItem") if isinstance(row, dict) else None
+            if key and parent:
+                by_parent.setdefault(parent, []).append(key)
+        return by_parent
+
+    def _attach_web_fulltext(
+        self, items: list[dict[str, Any]], *, whole_library: bool = False
+    ) -> None:
+        """Populate `data.fulltext` on each item in place using Zotero's API.
+
+        Works against the web API and the local API alike: both serve the text
+        Zotero has already extracted for each PDF attachment.
+
+        ``whole_library`` says ``items`` is the entire library, which is when
+        listing every attachment once beats asking per item. For a handful of
+        changed items in a large library it would page through attachments
+        nobody needs, so the incremental path leaves it off.
+        """
         total = len(items)
         if not total:
             return
@@ -2507,6 +2585,11 @@ class ZoteroSemanticSearch:
         except Exception:
             pass
         fetched = 0
+        pdf_keys = (
+            self._pdf_attachment_keys_by_parent()
+            if whole_library and total >= self._BULK_ATTACHMENT_WALK_MIN_ITEMS
+            else None
+        )
         for idx, item in enumerate(items, 1):
             key = item.get("key", "")
             data = item.setdefault("data", {})
@@ -2516,7 +2599,14 @@ class ZoteroSemanticSearch:
                 continue
             if not key:
                 continue
-            text, source = self._fetch_fulltext_via_web_api(key)
+            # These are top-level items, never attachments themselves, so
+            # Zotero holds no text under their own key: ask for their PDF
+            # attachments only (the parent probe was a request per item that
+            # always came back empty).
+            if pdf_keys is not None:
+                text, source = self._fulltext_from_attachments(pdf_keys.get(key, []))
+            else:
+                text, source = self._fetch_fulltext_via_web_api(key)
             if text:
                 data["fulltext"] = text
                 data["fulltextSource"] = source
@@ -2589,9 +2679,9 @@ class ZoteroSemanticSearch:
             if not items:
                 break
 
-            # Filter out attachments and notes by default
+            # Filter out attachments, notes and annotations
             filtered_items = [
-                item for item in items if item.get("data", {}).get("itemType") not in ["attachment", "note"]
+                item for item in items if item.get("data", {}).get("itemType") not in _NON_INDEXED_ITEM_TYPES
             ]
 
             all_items.extend(filtered_items)
@@ -2604,7 +2694,7 @@ class ZoteroSemanticSearch:
             all_items = all_items[:limit]
 
         if include_fulltext:
-            self._attach_web_fulltext(all_items)
+            self._attach_web_fulltext(all_items, whole_library=not limit)
 
         self._tag_group_id(all_items)
 
@@ -2660,7 +2750,7 @@ class ZoteroSemanticSearch:
             item_type = item.get("data", {}).get("itemType")
             # Don't index attachments/notes as standalone entries; only
             # top-level research items participate in semantic search.
-            if item_type in {"attachment", "note", "annotation"}:
+            if item_type in _NON_INDEXED_ITEM_TYPES:
                 continue
             changed_items.append(item)
 
@@ -2958,11 +3048,13 @@ class ZoteroSemanticSearch:
             limit: Limit number of items to process (for testing)
             extract_fulltext: Whether to extract fulltext content from the
                 local Zotero sqlite database (requires ZOTERO_LOCAL=true)
-            include_fulltext: Whether to fetch server-side extracted
-                fulltext via the Zotero web API. Defaults to the
+            include_fulltext: Whether to fetch the fulltext Zotero has
+                already extracted for each PDF, through the API (web or
+                local; no PDF files are read). Defaults to the
                 `semantic_search.include_fulltext` config setting (True
-                unless explicitly disabled). Ignored in local mode since
-                `extract_fulltext` provides richer local extraction.
+                unless explicitly disabled). Ignored only when
+                `extract_fulltext` is set, which extracts richer text from
+                the local database instead.
             use_openai_batch: Deprecated in favour of `use_batch` /
                 `batch_provider`. Override for OpenAI Batch API indexing.
                 None uses `semantic_search.openai_batch.enabled`. Ignored
@@ -3012,7 +3104,7 @@ class ZoteroSemanticSearch:
         # update_database on startup while the user may also run
         # `zotero-mcp update-db` manually. A cross-process flock avoids
         # double work and potential ChromaDB corruption.
-        lock_path = Path.home() / ".config" / "zotero-mcp" / "update.lock"
+        lock_path = _update_lock_path()
         lock_cm = _acquire_update_lock(lock_path)
         acquired = lock_cm.__enter__()
         if not acquired:
@@ -3160,6 +3252,15 @@ class ZoteroSemanticSearch:
             if batch_enabled and self._chunking_enabled:
                 stats["chunking_ignored"] = True
                 self._warn_chunking_ignored_on_batch_path(active_batch_provider)
+
+            # Same silent loss without chunking: --fulltext extracts whole PDFs
+            # but a small-context model embeds only the first few hundred tokens.
+            # The batch path is left to its own warning above.
+            fit_warning = self._fulltext_fit_warning() if extract_fulltext and not batch_enabled else None
+            if fit_warning:
+                stats["fulltext_truncated"] = True
+                logger.warning(fit_warning)
+                _report(f"\nWarning: {fit_warning}\n")
 
             # In batch mode, defer destructive rebuilds until import so the
             # existing search index remains usable while the batch runs.
@@ -3638,7 +3739,7 @@ class ZoteroSemanticSearch:
         stats = {"processed": 0, "skipped": 0, "errors": 0}
 
         chunking = self._chunking_enabled
-        chunk_size = int(self._chunking_config.get("chunk_size", 1500))
+        chunk_size = self._effective_chunk_size() if chunking else 0
         overlap = int(self._chunking_config.get("overlap", 200))
         max_chunks = int(self._chunking_config.get("max_chunks_per_item", 20))
 
@@ -4234,7 +4335,7 @@ class ZoteroSemanticSearch:
                 "newer run covers the same items"
             )})
 
-        lock_path = Path.home() / ".config" / "zotero-mcp" / "update.lock"
+        lock_path = _update_lock_path()
         lock_cm = contextlib.nullcontext(True) if _skip_lock else _acquire_update_lock(lock_path)
         acquired = lock_cm.__enter__()
         if not acquired:
@@ -4908,6 +5009,7 @@ class ZoteroSemanticSearch:
             "chunking": {
                 "enabled": self._chunking_enabled,
                 "effective": self._chunking_enabled and not batch_active,
+                "max_tokens": getattr(self.chroma_client, "embedding_max_tokens", None),
             },
             "should_update": self.should_update_database(),
             "last_update": self.update_config.get("last_update"),

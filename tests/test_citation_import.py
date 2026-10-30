@@ -197,6 +197,28 @@ class TestAuthorParsing:
         c = _parse_bibtex_author_list("Cher")
         assert c == [{"creatorType": "author", "name": "Cher"}]
 
+    @pytest.mark.parametrize("sep", [" and\n  ", "\nand ", " and\t", "  and  "])
+    def test_split_on_and_surrounded_by_any_whitespace(self, sep):
+        """Exported .bib files wrap long author lists, so ``and`` often sits
+        next to a newline; it must still separate the names."""
+        c = _parse_bibtex_author_list(f"Smith, John{sep}Doe, Jane")
+        assert c == [
+            {"creatorType": "author", "firstName": "John", "lastName": "Smith"},
+            {"creatorType": "author", "firstName": "Jane", "lastName": "Doe"},
+        ]
+
+    def test_wrapped_author_list_survives_full_import(self):
+        bib = (
+            "@article{k,\n"
+            "  author = {Smith, John and Doe, Jane and\n"
+            "            Roe, Richard},\n"
+            "  title = {T}, year = {2020}\n}"
+        )
+        item = bibtex_entry_to_zotero(parse_bibtex(bib)[0], make_template)
+        assert [(c.get("lastName"), c.get("firstName")) for c in item["creators"]] == [
+            ("Smith", "John"), ("Doe", "Jane"), ("Roe", "Richard"),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Date parsing
@@ -731,3 +753,81 @@ class TestPreFlattenedIssnCaller:
         item = csl_json_to_zotero(entry, make_template)
         assert item["itemType"] == "journalArticle"
         assert item["title"] == "Eight Simple Guidelines"
+
+
+# ---------------------------------------------------------------------------
+# Native PMID / PMCID fields (#692)
+# ---------------------------------------------------------------------------
+
+class TestNativePubmedIds:
+    """Zotero 7.1+ has native ``PMID`` and ``PMCID`` fields on journal
+    articles. Written to Extra instead, the identifier an item was imported
+    by cannot be searched as ``PMID is …``. Extra stays the fallback for a
+    schema (or item type) without the field."""
+
+    BIB = """
+    @article{k1,
+      title={T},
+      journal={J},
+      year={2020},
+      pmid={12345678},
+      pmcid={PMC7654321},
+    }
+    """
+
+    def test_bibtex_writes_native_fields(self):
+        item = bibtex_entry_to_zotero(parse_bibtex(self.BIB)[0], schema_template)
+        assert item["PMID"] == "12345678"
+        assert item["PMCID"] == "PMC7654321"
+        assert "PMID" not in item["extra"]
+        assert "PMCID" not in item["extra"]
+
+    def test_bibtex_falls_back_to_extra_without_the_field(self):
+        item = bibtex_entry_to_zotero(parse_bibtex(self.BIB)[0], make_template)
+        assert "PMID" not in item
+        assert "PMID: 12345678" in item["extra"]
+        assert "PMCID: PMC7654321" in item["extra"]
+
+    def _csl(self, **extra):
+        return {"type": "article-journal", "title": "T",
+                "PMID": "12345678", "PMCID": "PMC7654321", **extra}
+
+    def test_csl_writes_native_fields(self):
+        item = csl_json_to_zotero(self._csl(), schema_template)
+        assert item["PMID"] == "12345678"
+        assert item["PMCID"] == "PMC7654321"
+        assert "PMID" not in item["extra"]
+
+    def test_csl_falls_back_to_extra_without_the_field(self):
+        item = csl_json_to_zotero(self._csl(), make_template)
+        assert "PMID: 12345678" in item["extra"]
+        assert "PMCID: PMC7654321" in item["extra"]
+
+    def test_csl_numeric_pmid(self):
+        item = csl_json_to_zotero(self._csl(PMID=12345678), schema_template)
+        assert item["PMID"] == "12345678"
+
+    def test_csl_journal_abbreviation_and_catalog(self):
+        item = csl_json_to_zotero(
+            self._csl(**{"container-title-short": "Stat Med", "source": "PubMed"}),
+            schema_template,
+        )
+        assert item["journalAbbreviation"] == "Stat Med"
+        assert item["libraryCatalog"] == "PubMed"
+        assert "container-title-short" not in item["extra"]
+        assert "source:" not in item["extra"]
+
+    def test_abbreviation_kept_in_extra_when_type_lacks_field(self):
+        item = csl_json_to_zotero(
+            {"type": "chapter", "title": "T", "container-title-short": "Abbr"},
+            schema_template,
+        )
+        assert "journalAbbreviation" not in item
+        assert "container-title-short: Abbr" in item["extra"]
+
+    def test_crossref_fixture_maps_abbreviation(self):
+        item = csl_json_to_zotero(
+            load_fixture("crossref_csl_journal_article.json"), schema_template
+        )
+        assert item["journalAbbreviation"] == "Journal of Business Venturing"
+        assert item["libraryCatalog"] == "Crossref"

@@ -1,6 +1,7 @@
 """Tests for zotero_attach_file (tools/write.attach_file) and its helpers."""
 
 import hashlib
+import mimetypes
 
 import pytest
 from conftest import DummyContext, FakeZotero, skip_on_windows
@@ -396,7 +397,8 @@ class TestAttachFileLocal:
         assert "absolute path" in result
 
     @pytest.mark.parametrize(
-        "name", ["notes.docx", "draft.odt", "memo.rtf", "scan.djvu", "book.epub"]
+        "name", ["notes.docx", "draft.odt", "memo.rtf", "scan.djvu", "book.epub",
+                 "paper.md", "data.yaml", "data.yml"]
     )
     def test_accepts_supplementary_types(self, name, monkeypatch, dummy_ctx):
         """Not PDF-only: the supporting-document types are attachable too."""
@@ -409,6 +411,38 @@ class TestAttachFileLocal:
         )
         assert "Unsupported file type" not in result
         assert fake.attachments[0]["files"][0][0] == name
+
+    @pytest.mark.parametrize(
+        "ext,ctype", [(".md", "text/markdown"), (".yaml", "text/yaml"), (".yml", "text/yaml")]
+    )
+    def test_text_attachments_get_a_text_content_type(self, ext, ctype, monkeypatch, dummy_ctx):
+        """pyzotero takes contentType from mimetypes inside attachment_both, and
+        by then mimetypes may say anything: application/yaml on Python 3.14,
+        the platform defaults after EbookLib's bare mimetypes.init(). Zotero
+        doesn't full-text index application/yaml or application/octet-stream."""
+        # Swapped in as the module functions so the real MIME database is left
+        # alone. Built before _patch_path_valid: the first MimeTypes() runs
+        # init(), which looks for system MIME files with os.path.isfile.
+        db = mimetypes.MimeTypes()
+        db.add_type("application/x-wrong", ext)
+        monkeypatch.setattr(mimetypes, "add_type", db.add_type)
+        monkeypatch.setattr(mimetypes, "guess_type", db.guess_type)
+        fake = FakeZoteroForAttach()
+        upload = fake.attachment_both
+        sent = []
+
+        def attachment_both(files, parentid=None, **kwargs):
+            sent.append(mimetypes.guess_type(files[0][1])[0])
+            return upload(files, parentid=parentid, **kwargs)
+
+        fake.attachment_both = attachment_both
+        _patch_write_client(monkeypatch, fake)
+        _patch_path_valid(monkeypatch)
+
+        server.attach_file(item_key="ITEM1", file_path=f"/Users/test/data{ext}", ctx=dummy_ctx)
+
+        assert sent == [ctype]
+        assert _helpers._guess_content_type(f"data{ext}") == ctype
 
     def test_rejects_bad_extension(self, monkeypatch, dummy_ctx):
         fake = FakeZoteroForAttach()
@@ -801,3 +835,80 @@ class TestAttachFileUrl:
         )
         assert len(fake.attachments) == 0
         assert "already present" in result
+
+
+# ---------------------------------------------------------------------------
+# PDF download ceilings: size and wall-clock
+# ---------------------------------------------------------------------------
+
+
+class EndlessResponse(FakeResponse):
+    """A body that never ends, like a huge file or a hostile server."""
+
+    def __init__(self, content_length=None):
+        super().__init__()
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+        self.closed = False
+        self.sent = 0
+
+    def iter_content(self, chunk_size=8192):
+        while not self.closed:
+            self.sent += chunk_size
+            yield b"%PDF" + b"0" * (chunk_size - 4)
+
+    def close(self):
+        self.closed = True
+
+
+class TestPdfDownloadCeilings:
+    def test_endless_body_stops_at_size_limit(self, monkeypatch, dummy_ctx):
+        monkeypatch.setattr(_helpers, "_PDF_MAX_BYTES", 1024 * 1024)
+        fake = FakeZoteroForAttach()
+        _patch_write_client(monkeypatch, fake)
+        resp = EndlessResponse()
+        _patch_guarded_get(monkeypatch, resp)
+
+        result = server.attach_file(
+            item_key="ITEM1", url="https://example.org/huge.pdf", ctx=dummy_ctx
+        )
+
+        assert "1 MB limit" in result
+        assert resp.closed
+        assert resp.sent < 2 * 1024 * 1024
+        assert fake.attachments == []
+
+    def test_declared_oversize_is_refused_before_reading(self, monkeypatch, dummy_ctx):
+        monkeypatch.setattr(_helpers, "_PDF_MAX_BYTES", 1024 * 1024)
+        fake = FakeZoteroForAttach()
+        _patch_write_client(monkeypatch, fake)
+        resp = EndlessResponse(content_length=5 * 1024 * 1024)
+        _patch_guarded_get(monkeypatch, resp)
+
+        result = server.attach_file(
+            item_key="ITEM1", url="https://example.org/huge.pdf", ctx=dummy_ctx
+        )
+
+        assert "over the 1 MB limit" in result
+        assert resp.sent == 0
+        assert fake.attachments == []
+
+    def test_slow_body_stops_at_deadline(self, monkeypatch, tmp_path):
+        clock = iter(range(0, 10_000, 50))
+        monkeypatch.setattr(_helpers.time, "monotonic", lambda: next(clock))
+        resp = EndlessResponse()
+
+        with pytest.raises(_helpers.PdfDownloadError, match="longer than"):
+            _helpers._stream_pdf_download(resp, str(tmp_path / "x.pdf"))
+        assert resp.closed
+
+    def test_normal_pdf_is_written_whole(self, tmp_path):
+        body = b"%PDF-1.4 " + b"x" * 200_000
+        path = tmp_path / "ok.pdf"
+        _helpers._stream_pdf_download(FakeResponse(content=body), str(path))
+        assert path.read_bytes() == body
+
+    def test_limits_are_generous_fixed_values(self):
+        # Scanned books run past 100 MB, and a slow connection needs minutes.
+        assert _helpers._PDF_MAX_BYTES == 500 * 1024 * 1024
+        assert _helpers._PDF_DOWNLOAD_DEADLINE == 300.0

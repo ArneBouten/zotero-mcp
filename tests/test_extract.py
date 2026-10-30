@@ -7,6 +7,7 @@ tolerant-vs-raising split between ``extract_file`` and the per-format
 functions.
 """
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -227,6 +228,68 @@ class TestExtractHtml:
         snapshot = tmp_path / "page.html"
         snapshot.write_text('<img alt="Figure 1" src="https://example.org/f1.png">')
         assert "![Figure 1](https://example.org/f1.png)" in extract_html(snapshot).text
+
+
+    def test_unclosed_table_cells_do_not_flood_empty_cells(self, tmp_path):
+        # html.parser nests unterminated <tr>/<td>; markdownify then prints a
+        # header-width blank row and ``| --- |`` row for every nested row.
+        rows = "".join(
+            f"<tr><td>{year}<td>{year * 3}<td>x{year}" for year in range(2000, 2060)
+        )
+        snapshot = tmp_path / "page.html"
+        snapshot.write_text(
+            "<table><thead><tr><th>Year<th>Triple<th>Tag<tbody>" + rows + "</table>"
+        )
+        text = extract_html(snapshot).text
+        assert len(text) < 3000
+        assert "|  |  |  |  |" not in text
+        assert "| --- | --- | --- | --- |" not in text
+        for year in range(2000, 2060):
+            assert str(year) in text and str(year * 3) in text and f"x{year}" in text
+
+    def test_small_tables_keep_their_shape(self, tmp_path):
+        snapshot = tmp_path / "page.html"
+        snapshot.write_text(
+            "<table><tr><th>A</th><th>B</th><th>C</th></tr>"
+            "<tr><td>1</td><td></td><td>3</td></tr></table>"
+        )
+        text = extract_html(snapshot).text
+        assert "| A | B | C |" in text
+        assert "| --- | --- | --- |" in text
+        assert "| 1 |  | 3 |" in text
+
+    def test_wide_tables_keep_their_separator_and_empty_cells(self, tmp_path):
+        # Five columns is past the scaffolding run length: a header with text
+        # keeps its separator row and a sparse data row keeps its empty cells.
+        snapshot = tmp_path / "page.html"
+        snapshot.write_text(
+            "<table><tr><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th></tr>"
+            "<tr><td>1</td><td></td><td></td><td></td><td></td></tr>"
+            "<tr><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr></table>"
+        )
+        text = extract_html(snapshot).text
+        assert "| A | B | C | D | E |" in text
+        assert "| --- | --- | --- | --- | --- |" in text
+        assert "| 1 |  |  |  |  |" in text
+    def test_deeply_nested_page_is_extracted_not_dropped(self, tmp_path):
+        # html.parser leaves unterminated tags nested, and markdownify blew
+        # the default recursion limit (1000) at roughly 300 levels.
+        depth = 1500
+        snapshot = tmp_path / "deep.html"
+        snapshot.write_text("<div>" * depth + "<p>deep body text</p>")
+        before = sys.getrecursionlimit()
+        assert "deep body text" in extract_html(snapshot).text
+        assert sys.getrecursionlimit() == before
+        assert extract_file(snapshot).text.strip() == "deep body text"
+
+    def test_absurdly_nested_page_still_fails_cleanly(self, tmp_path):
+        snapshot = tmp_path / "abyss.html"
+        snapshot.write_text("<div>" * 20000 + "<p>x</p>")
+        before = sys.getrecursionlimit()
+        with pytest.raises(RecursionError):
+            extract_html(snapshot)
+        assert sys.getrecursionlimit() == before
+        assert extract_file(snapshot) is None
 
 
 class TestExtractTextFile:
@@ -459,3 +522,139 @@ class TestOcrLayerFallback:
         fake_inspector(markdown=["", ""], text="all of it")
         doc = extract_pdf("scan.pdf", pages=[0, 1])
         assert "all of it" in doc.text
+
+
+class _CountingInspector(_FakeInspector):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.markdown_calls = []
+
+    def extract_pages_markdown(self, path, pages=None):
+        self.markdown_calls.append(pages)
+        return super().extract_pages_markdown(path, pages=pages)
+
+
+@pytest.fixture
+def counting_inspector(monkeypatch):
+    from zotero_mcp import extract
+
+    extract._parse_memo.clear()
+    fake = _CountingInspector(markdown=["p0", "p1", "p2", "p3"])
+    monkeypatch.setattr("zotero_mcp.extract._pdf_inspector", lambda: fake)
+    yield fake
+    extract._parse_memo.clear()
+
+
+class TestParseReuse:
+    """pdf-inspector's markdown pass costs the same for one page as for the
+    whole file (3.7-6 s on some 28-page papers), so reading a paper in chunks
+    must not re-run it for every range."""
+
+    def test_page_ranges_of_one_file_parse_it_once(self, counting_inspector, tmp_path):
+        pdf = tmp_path / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 one")
+        first = extract_pdf(pdf, pages=[0, 1], reuse=True)
+        second = extract_pdf(pdf, pages=[2, 3], reuse=True)
+        head = extract_pdf(pdf, max_pages=3, reuse=True)
+        assert len(counting_inspector.markdown_calls) == 1
+        assert first.pages == ("p0", "p1") and first.page_numbers == (0, 1)
+        assert second.pages == ("p2", "p3") and second.page_numbers == (2, 3)
+        assert head.pages == ("p0", "p1", "p2") and head.truncated
+        assert head.page_count == 4
+
+    def test_without_reuse_every_call_parses(self, counting_inspector, tmp_path):
+        pdf = tmp_path / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 one")
+        extract_pdf(pdf, pages=[0])
+        extract_pdf(pdf, pages=[1])
+        assert counting_inspector.markdown_calls == [[0], [1]]
+
+    def test_a_changed_file_is_parsed_again(self, counting_inspector, tmp_path):
+        pdf = tmp_path / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 one")
+        extract_pdf(pdf, pages=[0], reuse=True)
+        pdf.write_bytes(b"%PDF-1.4 one, edited")
+        extract_pdf(pdf, pages=[0], reuse=True)
+        assert len(counting_inspector.markdown_calls) == 2
+
+    def test_out_of_range_pages_are_dropped_like_the_uncached_path(
+        self, counting_inspector, tmp_path
+    ):
+        pdf = tmp_path / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 one")
+        doc = extract_pdf(pdf, pages=[3, 9], reuse=True)
+        assert doc.page_numbers == (3,)
+        assert not extract_pdf(pdf, pages=[9], reuse=True).pages
+
+    def test_memo_is_bounded(self, counting_inspector, tmp_path, monkeypatch):
+        from zotero_mcp import extract
+
+        monkeypatch.setattr(extract, "_MEMO_MAX_ENTRIES", 2)
+        for i in range(4):
+            pdf = tmp_path / f"p{i}.pdf"
+            pdf.write_bytes(b"%PDF-1.4 " + bytes([65 + i]))
+            extract_pdf(pdf, pages=[0], reuse=True)
+        assert len(extract._parse_memo) == 2
+
+    def test_memo_skips_documents_over_the_character_budget(
+        self, counting_inspector, tmp_path, monkeypatch
+    ):
+        from zotero_mcp import extract
+
+        monkeypatch.setattr(extract, "_MEMO_MAX_CHARS", 3)
+        pdf = tmp_path / "big.pdf"
+        pdf.write_bytes(b"%PDF-1.4 big")
+        extract_pdf(pdf, pages=[0], reuse=True)
+        assert not extract._parse_memo
+
+    def test_ocr_flags_stay_absolute_in_a_reused_slice(self, monkeypatch, tmp_path):
+        from zotero_mcp import extract
+
+        extract._parse_memo.clear()
+        fake = _CountingInspector(markdown=["a", "", "c"])
+        monkeypatch.setattr("zotero_mcp.extract._pdf_inspector", lambda: fake)
+        pdf = tmp_path / "scan.pdf"
+        pdf.write_bytes(b"%PDF-1.4 s")
+        doc = extract_pdf(pdf, pages=[1, 2], reuse=True)
+        assert doc.page_numbers == (1, 2) and doc.needs_ocr == (1,)
+        extract._parse_memo.clear()
+
+    def test_page_count_reads_the_memo(self, counting_inspector, tmp_path, monkeypatch):
+        pdf = tmp_path / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 one")
+        extract_pdf(pdf, pages=[0], reuse=True)
+        monkeypatch.setattr(counting_inspector, "classify_pdf", lambda p: 1 / 0)
+        assert pdf_page_count(pdf) == 4
+
+    def test_scanner_text_layer_is_not_reparsed_whole_on_every_read(
+        self, monkeypatch, tmp_path
+    ):
+        """A PDF whose whole-document parse falls back to the text layer cannot
+        be sliced by page; later reads must not repeat that whole parse."""
+        from zotero_mcp import extract
+
+        extract._parse_memo.clear()
+        fake = _CountingInspector(markdown=["", "", ""], text="scanned text")
+        monkeypatch.setattr("zotero_mcp.extract._pdf_inspector", lambda: fake)
+        pdf = tmp_path / "scan.pdf"
+        pdf.write_bytes(b"%PDF-1.4 s")
+        extract_pdf(pdf, pages=[0], reuse=True)
+        assert fake.markdown_calls == [None, [0]]  # whole parse, then the subset
+        extract_pdf(pdf, pages=[1], reuse=True)
+        assert fake.markdown_calls == [None, [0], [1]]
+        extract._parse_memo.clear()
+
+
+class TestReaderOptsIntoReuse:
+    def test_reader_passes_reuse_only_when_asked(self, monkeypatch):
+        from zotero_mcp import local_db
+
+        seen = []
+        monkeypatch.setattr(
+            local_db, "extract_file", lambda p, **kw: seen.append(kw) or None
+        )
+        indexer = local_db.LocalZoteroReader(db_path="x.sqlite")
+        interactive = local_db.LocalZoteroReader(db_path="x.sqlite", reuse_pdf_parse=True)
+        indexer._extract_doc_from_file(Path("a.pdf"))
+        interactive._extract_doc_from_file(Path("a.pdf"))
+        assert [kw["reuse"] for kw in seen] == [False, True]

@@ -21,6 +21,11 @@ assemble page-joined text anywhere else.
 from __future__ import annotations
 
 import logging
+import os
+import re
+import sys
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,12 +45,12 @@ _HTML_SUFFIXES = frozenset({".html", ".htm", ".xhtml"})
 # don't want it in the semantic index.
 _TEXTUAL_SUFFIXES = frozenset({
     ".txt", ".vtt", ".srt", ".sbv", ".md", ".markdown", ".rst",
-    ".csv", ".tsv", ".json", ".xml", ".log", ".text",
+    ".csv", ".tsv", ".json", ".xml", ".log", ".text", ".yaml", ".yml",
 })
 _TEXTUAL_CONTENT_TYPES = frozenset({
     "text/plain", "text/vtt", "text/markdown", "text/csv",
     "text/tab-separated-values", "text/srt", "application/json",
-    "application/xml", "text/xml",
+    "application/xml", "text/xml", "application/yaml",
 })
 
 _MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
@@ -114,6 +119,98 @@ def _doc_from_pages(
     )
 
 
+# Parse memo for interactive reads. pdf-inspector's Markdown pass costs about
+# the same for one page as for the whole document (3.7-6 s on some 28-page
+# papers, and it holds the GIL), so a model reading a paper in chunks would
+# pay it on every call. Callers that opt in with ``reuse=True`` share one
+# whole-document parse per file, keyed on path, mtime and size so an edited
+# file is re-read. Bounded by entry count and by total characters, so a few
+# thousand-page books cannot pin memory.
+_MEMO_MAX_ENTRIES = 3
+_MEMO_MAX_CHARS = 8_000_000
+
+_ParseKey = tuple[str, int, int]
+_parse_memo: "OrderedDict[_ParseKey, ExtractedDoc]" = OrderedDict()
+_memo_lock = threading.Lock()
+_parse_lock = threading.Lock()
+
+
+def _parse_key(path: str) -> _ParseKey | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (path, st.st_mtime_ns, st.st_size)
+
+
+def _memo_get(key: _ParseKey | None) -> ExtractedDoc | None:
+    if key is None:
+        return None
+    with _memo_lock:
+        doc = _parse_memo.get(key)
+        if doc is not None:
+            _parse_memo.move_to_end(key)
+        return doc
+
+
+def _memo_put(key: _ParseKey, doc: ExtractedDoc) -> None:
+    if len(doc.text) > _MEMO_MAX_CHARS:
+        return
+    with _memo_lock:
+        _parse_memo[key] = doc
+        _parse_memo.move_to_end(key)
+        while len(_parse_memo) > _MEMO_MAX_ENTRIES or (
+            sum(len(d.text) for d in _parse_memo.values()) > _MEMO_MAX_CHARS
+            and len(_parse_memo) > 1
+        ):
+            _parse_memo.popitem(last=False)
+
+
+def _extract_pdf_reused(
+    path: str, pages: list[int] | None, max_pages: int | None,
+) -> ExtractedDoc | None:
+    """Serve a page subset from the memoized whole-document parse.
+
+    Returns ``None`` when the whole document cannot be parsed page by page
+    (a parse error, or the whole-document text-layer fallback), so the caller
+    runs its ordinary subset path and keeps its error and fallback behaviour.
+    """
+    key = _parse_key(path)
+    whole = _memo_get(key)
+    if whole is None and key is not None:
+        with _parse_lock:
+            whole = _memo_get(key)
+            if whole is None:
+                try:
+                    whole = extract_pdf(path)
+                except Exception:
+                    return None
+                # Kept even when it is not page by page (a scanner's text
+                # layer): the next read then skips straight to the subset
+                # path instead of parsing the whole file a second time.
+                _memo_put(key, whole)
+    if whole is None or whole.page_numbers != tuple(range(whole.page_count)):
+        return None
+
+    total = whole.page_count
+    truncated = False
+    if pages is not None:
+        wanted = [p for p in pages if 0 <= p < total]
+    elif max_pages is not None and max_pages > 0:
+        wanted = list(range(min(max_pages, total)))
+        truncated = len(wanted) < total
+    else:
+        return whole
+    return _doc_from_pages(
+        [whole.pages[p] for p in wanted],
+        page_count=total,
+        source="pdf",
+        page_numbers=tuple(wanted),
+        needs_ocr=tuple(p for p in wanted if p in whole.needs_ocr),
+        truncated=truncated,
+    )
+
+
 def pdf_page_count(file_path: str | Path) -> int:
     """Return the number of pages in a PDF.
 
@@ -125,6 +222,9 @@ def pdf_page_count(file_path: str | Path) -> int:
         ImportError: pdf-inspector is not installed.
         ValueError: the file is missing, empty, or not a PDF.
     """
+    memoized = _memo_get(_parse_key(str(file_path)))
+    if memoized is not None:
+        return memoized.page_count
     return _pdf_inspector().classify_pdf(str(file_path)).page_count
 
 
@@ -133,6 +233,7 @@ def extract_pdf(
     *,
     pages: list[int] | None = None,
     max_pages: int | None = None,
+    reuse: bool = False,
 ) -> ExtractedDoc:
     """Extract Markdown from a PDF.
 
@@ -143,6 +244,12 @@ def extract_pdf(
             pages. Mutually exclusive with ``max_pages``.
         max_pages: Extract only the first N pages. ``None`` or a
             non-positive value means the whole document.
+        reuse: Parse the whole document once and serve this and later
+            requests for the same unchanged file from a small in-process
+            memo. For interactive reads that revisit a file (page-range
+            reads, ``zotero_get_item_fulltext``); leave it off for bulk
+            indexing, which reads each file once and relies on the cap to
+            skip pages.
 
     Raises:
         ImportError: pdf-inspector is not installed.
@@ -150,6 +257,11 @@ def extract_pdf(
     """
     if pages is not None and max_pages is not None:
         raise TypeError("pass either pages or max_pages, not both")
+
+    if reuse and (pages is not None or max_pages is not None):
+        reused = _extract_pdf_reused(str(file_path), pages, max_pages)
+        if reused is not None:
+            return reused
 
     pdf_inspector = _pdf_inspector()
     path = str(file_path)
@@ -321,10 +433,101 @@ def _html_converter():
     return _SnapshotConverter(heading_style="ATX")
 
 
+#: A run of four or more empty (or ``---``) table cells is layout scaffolding.
+_EMPTY_CELL_RUN = re.compile(r"\|(?:[ \t]*\|){4,}")
+_SEPARATOR_RUN = re.compile(r"\|(?: ?-{3,} ?\|){4,}")
+#: A separator inside a line with other cells never occurs in a real table row.
+_NESTED_SEPARATOR = re.compile(r"\|(?: ?-{3,} ?\|){2,}")
+
+
+def _collapse_table_scaffolding(markdown: str) -> str:
+    """Shorten the runs of empty table cells markdownify emits for layout tables.
+
+    ``html.parser`` does not close an unterminated ``<td>``/``<tr>``, so a
+    snapshot whose table omits those end tags (legal HTML) nests every row
+    inside the previous one, and markdownify then prints, for each nested
+    row, a blank header line and a ``| --- |`` line as wide as the whole
+    table. On a 74-row statistics table that was 200K of ``|  |  |`` and
+    ``| --- | --- |`` around 17K of data, with a single line of 125K
+    characters.
+
+    Only that scaffolding is shortened, so real tables keep their shape: a
+    line of nothing but empty cells, a separator line under such a blank
+    header, and a line that carries a separator in the middle of its cells.
+    A header with text keeps its separator, and a data row keeps its empty
+    cells. Every cell with text is kept.
+    """
+    out = []
+    for line in markdown.split("\n"):
+        if line.startswith("|"):
+            stripped = line.rstrip()
+            if _EMPTY_CELL_RUN.fullmatch(stripped):
+                line = "|  |"
+            elif _SEPARATOR_RUN.fullmatch(stripped):
+                if out and out[-1] == "|  |":
+                    line = "| --- |"
+            elif _NESTED_SEPARATOR.search(line):
+                line = _SEPARATOR_RUN.sub("| --- |", _EMPTY_CELL_RUN.sub("|  |", line))
+            if line in ("|  |", "| --- |") and out and out[-1] == line:
+                continue
+        out.append(line)
+    return "\n".join(out)
+#: Recursion limit for a retry after a snapshot overflowed the default one.
+#: markdownify recurses once or twice per nesting level, and html.parser does
+#: not close unterminated tags, so a long page of ``<li>`` or ``<td>`` without
+#: end tags nests hundreds of levels deep. 5000 covers DOM depths up to about
+#: 2000; a page nested deeper than that is generated markup rather than text
+#: and keeps failing over to the caller's fallback instead of ballooning (one
+#: 3,830-level snapshot converts to 29M characters in 18 s and 1.5 GB).
+_DEEP_RECURSION_LIMIT = 5000
+#: Stack for the retry thread. CPython before 3.11 spends C stack on every
+#: Python call and worker threads can have as little as 512 KB, so the retry
+#: gets its own rather than risking a crash at the raised limit.
+_DEEP_STACK_BYTES = 64 * 1024 * 1024
+_deep_lock = threading.Lock()
+
+
+def _convert_html(text: str) -> str:
+    """Markdown for ``text``, retrying once with more stack for deep pages."""
+    try:
+        return _html_converter().convert(text)
+    except RecursionError as first:
+        result: dict[str, object] = {}
+
+        def convert() -> None:
+            try:
+                result["text"] = _html_converter().convert(text)
+            except BaseException as exc:  # handed back to the caller's thread
+                result["error"] = exc
+
+        # The recursion limit and the default thread stack size are both
+        # process-wide, so one deep conversion at a time, restored afterwards.
+        with _deep_lock:
+            limit = sys.getrecursionlimit()
+            stack = threading.stack_size()
+            try:
+                sys.setrecursionlimit(max(limit, _DEEP_RECURSION_LIMIT))
+                try:
+                    threading.stack_size(_DEEP_STACK_BYTES)
+                    worker = threading.Thread(target=convert, daemon=True)
+                    worker.start()
+                except (RuntimeError, ValueError):
+                    raise first from None
+                finally:
+                    threading.stack_size(stack)
+                worker.join()
+            finally:
+                sys.setrecursionlimit(limit)
+        if "error" in result:
+            raise result["error"]  # type: ignore[misc]
+        return result["text"]  # type: ignore[return-value]
+
+
 def extract_html(file_path: str | Path) -> ExtractedDoc:
     """Convert an HTML snapshot to Markdown, without embedded image data."""
+    markdown = _convert_html(_read_text(file_path)).strip()
     return _doc_from_pages(
-        [_html_converter().convert(_read_text(file_path)).strip()],
+        [_collapse_table_scaffolding(markdown)],
         page_count=1,
         source="html",
     )
@@ -441,6 +644,7 @@ def extract_file(
     ctype: str | None = None,
     *,
     max_pages: int | None = None,
+    reuse: bool = False,
 ) -> ExtractedDoc | None:
     """Extract text from an attachment, dispatching on extension.
 
@@ -453,7 +657,7 @@ def extract_file(
     suffix = path.suffix.lower()
     try:
         if suffix == ".pdf":
-            return extract_pdf(path, max_pages=max_pages)
+            return extract_pdf(path, max_pages=max_pages, reuse=reuse)
         if suffix in _HTML_SUFFIXES:
             return extract_html(path)
         return extract_text_file(path)

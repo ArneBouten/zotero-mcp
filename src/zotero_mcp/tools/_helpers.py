@@ -11,6 +11,7 @@ import re
 import socket
 import tempfile
 import threading
+import time
 from ipaddress import ip_address
 from urllib.parse import urljoin, urlparse
 
@@ -33,6 +34,7 @@ from pyzotero.errors import (
 
 from zotero_mcp import client as _client
 from zotero_mcp import utils as _utils
+from zotero_mcp.extract import pdf_page_count
 from zotero_mcp.identifiers import (
     TITLE_TAG_RE,
     arxiv_identity,
@@ -338,6 +340,14 @@ def item_template_for(zot, item_type: str, link_mode: str | None = None) -> dict
         return _local_item_template(zot, item_type, link_mode)
 
 
+# Uploads take their contentType from mimetypes, in attach_files and inside
+# pyzotero, and its answer for these depends on the Python version and the
+# platform's MIME database (application/octet-stream, application/yaml, ...).
+# application/yaml is the registered type (RFC 9512), but Zotero full-text
+# indexes PDF, EPUB and its own text types, and that isn't one of them.
+_TEXT_ATTACHMENT_TYPES = {".md": "text/markdown", ".yaml": "text/yaml", ".yml": "text/yaml"}
+
+
 def attach_files(zot, pairs, parentid=None) -> dict:
     """Attach files as child items. *pairs* is [(display_title, file_path)].
 
@@ -348,6 +358,10 @@ def attach_files(zot, pairs, parentid=None) -> dict:
     ``{"success": [...], "unchanged": [...], "failure": [...]}`` shape is the
     same either way.
     """
+    # On every call, not once at import: the first time EbookLib has to guess
+    # an EPUB item's type it runs a bare mimetypes.init(), which drops these.
+    for ext, ctype in _TEXT_ATTACHMENT_TYPES.items():
+        mimetypes.add_type(ctype, ext)
     try:
         return zot.attachment_both(pairs, parentid=parentid)
     except Exception as exc:
@@ -1262,6 +1276,40 @@ def _title_search_query(title):
     return " ".join(cleaned.split()) or None
 
 
+def _sqlite_doi_candidate_keys(doi, ctx=None) -> list[str] | None:
+    """Keys of items whose DOI field contains `doi`, read from zotero.sqlite.
+
+    None means "cannot answer here" and the caller falls back to the API
+    search. That fallback is a ``qmode='everything'`` quick search, which the
+    Web API needs because it cannot search the DOI field — but against the
+    local API it is a full-text scan of the whole library, run once per DOI.
+    On a large library a batch of 11 DOIs held Zotero at 100% CPU for
+    minutes. In local mode the DOI is a column we can read directly.
+
+    ``contains`` rather than ``is`` so a stored ``https://doi.org/…`` form is
+    still a candidate; the caller's exact normalized comparison decides.
+    """
+    if not _utils.is_local_mode() or _utils.get_search_backend() != "sqlite":
+        return None
+    from zotero_mcp.library import _sqlite_reader
+
+    try:
+        reader = _sqlite_reader()
+        if reader is None:
+            return None
+        rows = reader.advanced_search_sql(
+            [{"field": "DOI", "operation": "contains", "value": doi}],
+            group_id=_client.get_active_group_id(),
+        )
+    except Exception as e:
+        if ctx is not None:
+            ctx.warning(f"SQLite DOI lookup failed (using the API search): {e}")
+        return None
+    if rows is None:
+        return None
+    return [row["key"] for row in rows]
+
+
 def find_existing_items(zot, *, doi=None, arxiv_id=None, isbn=None, url=None,
                         title=None, ctx=None) -> list[dict]:
     """Find non-attachment items already in the library by a normalized id.
@@ -1378,6 +1426,19 @@ def find_existing_items(zot, *, doi=None, arxiv_id=None, isbn=None, url=None,
                 ctx.warning(f"Existing-item search failed (treating as no match): {e}")
             return None
 
+    def _fetch(key):
+        # Same policy as _search: a throttle propagates, any other failure
+        # (e.g. a key the DB snapshot has but the API no longer does) costs
+        # this one candidate, not the import.
+        try:
+            return zot.item(key)
+        except (TooManyRetriesError, TooManyRequestsError):
+            raise
+        except Exception as e:
+            if ctx is not None:
+                ctx.warning(f"Could not fetch dedup candidate {key}: {e}")
+            return None
+
     def _confirm(candidates):
         matches = []
         for item in candidates or []:
@@ -1398,6 +1459,15 @@ def find_existing_items(zot, *, doi=None, arxiv_id=None, isbn=None, url=None,
             if _matches(data):
                 matches.append(item)
         return matches
+
+    if doi:
+        keys = _sqlite_doi_candidate_keys(doi, ctx)
+        if keys is not None:
+            # The DOI field itself was searched, so a miss is final: neither
+            # pass below could confirm anything this lookup did not find.
+            # Candidates are fetched through ``zot`` so the versions returned
+            # are the ones the write path will be checked against.
+            return _confirm(_fetch(k) for k in keys)
 
     matches = _confirm(_search(query, "everything"))
     if matches:
@@ -1557,6 +1627,107 @@ _arxiv_identity = arxiv_identity
 _MAX_PDF_REDIRECTS = 5
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
+#: Ceiling on one downloaded PDF. The URL comes from the caller or a
+#: third-party metadata API, and the download runs under the global API lock,
+#: so without a ceiling a huge or endless response fills the disk and keeps
+#: every other write tool waiting until it ends. Generous on purpose: scanned
+#: books run to a few hundred MB.
+_PDF_MAX_BYTES = 500 * 1024 * 1024
+#: Wall-clock ceiling on one download. ``requests``' timeout only bounds each
+#: read, so a server that sends a byte every few seconds never trips it. With
+#: the size cap in place this only has to catch a stalled server.
+_PDF_DOWNLOAD_DEADLINE = 300.0
+
+
+class PdfDownloadError(Exception):
+    """A PDF download was stopped for being too large or too slow."""
+
+
+#: A single page range, "2137-2143", "S12-S20" or the abbreviated "123-45".
+_PAGE_RANGE_RE = re.compile(r"^\s*([A-Za-z]*)(\d+)\s*[-\u2010-\u2015]+\s*([A-Za-z]*)(\d+)\s*$")
+
+#: A PDF with fewer pages than this share of the item's page range is taken
+#: for a preview. Publishers' previews are one or two pages of the article,
+#: so the ratio only needs to separate "a fraction" from "all of it", and it
+#: leaves room for a preprint typeset more tightly than the journal.
+_PREVIEW_PAGE_RATIO = 0.6
+
+
+def _expected_page_count(pages):
+    """Number of pages a ``pages`` field like ``"2137-2143"`` spans, or ``None``.
+
+    ``None`` for anything that is not one plain range: a single page, an
+    article number, a list of ranges, roman numerals, or a range whose
+    prefixes differ. ``None`` turns the preview check off, so a guess here
+    would only ever cost a real PDF.
+    """
+    m = _PAGE_RANGE_RE.match(str(pages or ""))
+    if not m:
+        return None
+    first_prefix, first, last_prefix, last = m.groups()
+    if last_prefix and last_prefix.lower() != first_prefix.lower():
+        return None
+    if len(last) < len(first) and int(last) < int(first):
+        last = first[:len(first) - len(last)] + last
+    count = int(last) - int(first) + 1
+    if count < 2 or count > 1000:
+        return None
+    return count
+
+
+def _looks_like_preview(filepath, expected_pages, ctx):
+    """True when the PDF at ``filepath`` has well under ``expected_pages``.
+
+    A PDF that cannot be counted is given the benefit of the doubt.
+    """
+    try:
+        actual = pdf_page_count(filepath)
+    except Exception:
+        return False
+    if actual < 1 or actual >= expected_pages * _PREVIEW_PAGE_RATIO:
+        return False
+    ctx.info(
+        f"Downloaded PDF has {actual} page(s) but the item spans "
+        f"{expected_pages}, likely a preview. Not attaching it"
+    )
+    return True
+
+
+def _stream_pdf_download(resp, filepath: str, deadline: float = _PDF_DOWNLOAD_DEADLINE) -> None:
+    """Write a streamed PDF response to ``filepath``.
+
+    Raises ``PdfDownloadError`` (after closing the response) once the body
+    passes the size ceiling or the download runs past ``deadline`` seconds.
+    The caller's temp directory removes the partial file.
+    """
+    max_bytes = _PDF_MAX_BYTES
+    limit_mb = max_bytes // (1024 * 1024)
+    try:
+        declared = int(resp.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    if declared > max_bytes:
+        resp.close()
+        raise PdfDownloadError(
+            f"PDF is {declared // (1024 * 1024)} MB, over the {limit_mb} MB limit"
+        )
+    started = time.monotonic()
+    total = 0
+    with open(filepath, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=65536):
+            total += len(chunk)
+            if total > max_bytes:
+                resp.close()
+                raise PdfDownloadError(
+                    f"PDF download passed the {limit_mb} MB limit"
+                )
+            if time.monotonic() - started > deadline:
+                resp.close()
+                raise PdfDownloadError(
+                    f"PDF download took longer than {int(deadline)} s"
+                )
+            f.write(chunk)
+
 
 def _url_resolves_to_public_host(url: str) -> bool:
     """Return ``True`` only if ``url`` is http(s) and its host resolves
@@ -1627,12 +1798,16 @@ def _guarded_pdf_get(pdf_url, ctx):
     return None
 
 
-def _download_and_attach_pdf(write_zot, item_key, pdf_url, doi, ctx):
+def _download_and_attach_pdf(write_zot, item_key, pdf_url, doi, ctx, expected_pages=None):
     """Download a PDF from a URL and attach it to a Zotero item.
 
     The URL is fetched through ``_guarded_pdf_get`` (SSRF guard + manual
     redirect re-validation), since it originates from third-party metadata
     APIs rather than the user.
+
+    ``expected_pages`` is how many pages the item's page range spans, when
+    known. A download with far fewer is a publisher preview and is not
+    attached; see ``_looks_like_preview``.
 
     Returns the WebDAV-status suffix string on success (``""`` when WebDAV
     is not configured, otherwise something like ``" (uploaded to WebDAV
@@ -1653,9 +1828,7 @@ def _download_and_attach_pdf(write_zot, item_key, pdf_url, doi, ctx):
         with tempfile.TemporaryDirectory() as tmpdir:
             filename = f"{doi.replace('/', '_')}.pdf"
             filepath = os.path.join(tmpdir, filename)
-            with open(filepath, "wb") as f:
-                for chunk in pdf_resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            _stream_pdf_download(pdf_resp, filepath)
 
             if os.path.getsize(filepath) < 1000:
                 ctx.info("Downloaded file too small, likely not a real PDF")
@@ -1670,6 +1843,12 @@ def _download_and_attach_pdf(write_zot, item_key, pdf_url, doi, ctx):
                 if not f.read(5).startswith(b"%PDF"):
                     ctx.info("Downloaded file is not a PDF (no %PDF header)")
                     return None
+
+            # A first-page preview passes every check above. Its page count
+            # is the one thing that gives it away, and only when the item
+            # says how long the article is.
+            if expected_pages and _looks_like_preview(filepath, expected_pages, ctx):
+                return None
 
             suffix = _webdav_first_attach(
                 write_zot,
@@ -1796,6 +1975,7 @@ def _guess_content_type(filename):
         "djvu": "image/vnd.djvu",
         "html": "text/html",
         "txt": "text/plain",
+        **{e.lstrip("."): t for e, t in _TEXT_ATTACHMENT_TYPES.items()},
         "doc": "application/msword",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "rtf": "application/rtf",
@@ -2151,6 +2331,57 @@ def _try_unpaywall(doi, ctx):
         return None
 
 
+def _openalex_pdf_urls(work):
+    """Every ``pdf_url`` in an OpenAlex work record, best first, no repeats.
+
+    ``best_oa_location`` leads, then the open-access locations, then the
+    rest. Closed locations are kept because OpenAlex marks a location closed
+    when it cannot read a licence for it, and such a copy often downloads
+    fine. The GEOMAR repository copy of 10.1175/jcli-d-12-00821.1 is one, on
+    a work whose ``open_access.is_oa`` is false and for which Unpaywall has
+    nothing.
+    """
+    locations = [loc for loc in (work.get("locations") or []) if isinstance(loc, dict)]
+    ordered = [work.get("best_oa_location") or {}]
+    ordered += [loc for loc in locations if loc.get("is_oa")]
+    ordered += [loc for loc in locations if not loc.get("is_oa")]
+
+    urls = []
+    for loc in ordered:
+        pdf_url = loc.get("pdf_url")
+        if pdf_url and pdf_url not in urls:
+            urls.append(pdf_url)
+    return urls
+
+
+def _try_openalex(doi, ctx):
+    """Try OpenAlex for PDF URLs across all the locations it knows of.
+
+    Unlike the other sources this returns a list or ``None``, because
+    OpenAlex often lists several copies and the first can be the paywalled
+    publisher one.
+    """
+    try:
+        resp = requests.get(
+            f"https://api.openalex.org/works/https://doi.org/{doi}",
+            params={"mailto": "zotero-mcp@users.noreply.github.com",
+                    "select": "best_oa_location,locations"},
+            headers={"User-Agent": _utils.USER_AGENT},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return None
+
+        urls = _openalex_pdf_urls(resp.json())
+        if urls:
+            ctx.info(f"OpenAlex: found {len(urls)} PDF location(s)")
+            return urls
+        return None
+    except Exception as e:
+        ctx.info(f"OpenAlex lookup failed: {e}")
+        return None
+
+
 def _try_arxiv_from_crossref(crossref_metadata, ctx):
     """Check CrossRef metadata for an arXiv ID and return a PDF URL."""
     if not crossref_metadata:
@@ -2251,7 +2482,7 @@ class OaPdfRequiredError(Exception):
 
 
 def _try_attach_oa_pdf(write_zot, item_key, doi, ctx, crossref_metadata=None,
-                       attach_mode="auto", page_pdf_url=None):
+                       attach_mode="auto", page_pdf_url=None, pages=None):
     """Attempt to find and attach an open-access PDF for a DOI.
 
     attach_mode: 'auto' downloads and uploads the first working OA PDF;
@@ -2264,7 +2495,12 @@ def _try_attach_oa_pdf(write_zot, item_key, doi, ctx, crossref_metadata=None,
     advertised, when one was read. Publishers running OJS, Atypon,
     Silverchair, Highwire and Springer all publish it, and it is how the
     browser connector finds a PDF the aggregators below have never heard
-    of. Tried first; see the source list.
+    of. Tried after Unpaywall and OpenAlex; see the source list.
+
+    pages: the item's Zotero ``pages`` field, for example ``"2137-2143"``.
+    Falls back to CrossRef's ``page``. When either gives a page range, a
+    download with well under that many pages is taken for a preview and the
+    cascade moves on to the next source.
     """
     if attach_mode == "none":
         return "skipped (attach_mode=none)"
@@ -2282,7 +2518,14 @@ def _try_attach_oa_pdf(write_zot, item_key, doi, ctx, crossref_metadata=None,
     #
     # Behind Unpaywall it still does the thing it was added for: for a
     # paper no aggregator has indexed, it is the only source there is.
-    sources = [("Unpaywall", lambda: _try_unpaywall(doi, ctx))]
+    #
+    # OpenAlex sits between the two for the same reason. It knows of
+    # repository copies in institutional archives that Unpaywall does not
+    # count as open access, and those are full text.
+    sources = [
+        ("Unpaywall", lambda: _try_unpaywall(doi, ctx)),
+        ("OpenAlex", lambda: _try_openalex(doi, ctx)),
+    ]
     if page_pdf_url:
         sources.append(("the publisher's page", lambda: page_pdf_url))
     sources += [
@@ -2291,12 +2534,24 @@ def _try_attach_oa_pdf(write_zot, item_key, doi, ctx, crossref_metadata=None,
         ("PubMed Central", lambda: _try_pmc(doi, ctx)),
     ]
 
+    expected_pages = _expected_page_count(
+        pages or (crossref_metadata or {}).get("page")
+    )
+
     found_urls = []  # Track URLs found but not downloadable
+    # OpenAlex usually lists the publisher's PDF too, the same URL the
+    # landing page advertises; one failed download of it is enough.
+    tried_urls = set()
 
     for source_name, find_url in sources:
         try:
-            pdf_url = find_url()
-            if pdf_url:
+            found = find_url()
+            # OpenAlex returns a list, every other source one URL or None.
+            candidates = [found] if isinstance(found, str) else list(found or [])
+            for pdf_url in candidates:
+                if pdf_url in tried_urls:
+                    continue
+                tried_urls.add(pdf_url)
                 ctx.info(f"Trying PDF from {source_name}: {pdf_url}")
                 found_urls.append((source_name, pdf_url))
 
@@ -2305,7 +2560,8 @@ def _try_attach_oa_pdf(write_zot, item_key, doi, ctx, crossref_metadata=None,
                         return f"PDF linked (source: {source_name})"
                 else:  # "auto" or "required" — try download only
                     webdav_suffix = _download_and_attach_pdf(
-                        write_zot, item_key, pdf_url, doi, ctx
+                        write_zot, item_key, pdf_url, doi, ctx,
+                        expected_pages=expected_pages,
                     )
                     if webdav_suffix is not None:
                         return f"PDF attached (source: {source_name}){webdav_suffix}"

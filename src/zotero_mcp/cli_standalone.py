@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 
 from zotero_mcp import cli_json as _cli_json
@@ -30,6 +31,7 @@ from zotero_mcp.cli import (
     _print_update_stats,
     obfuscate_config_for_display,
     setup_zotero_environment,
+    tolerate_console_encoding,
 )
 
 # ---------------------------------------------------------------------------
@@ -112,13 +114,14 @@ def _reports_failure(text: str) -> bool:
 
     Tools that fail without raising lead with one of a few fixed phrasings
     ("Error: ...", "Error creating ...", "Failed to ...", "Could not ...",
-    "Cannot ..."). Only the opening words count: a success message may quote
+    "Cannot ...", "Semantic search error: ...", "Collection not found: ...").
+    Only the opening words count: a success message may quote
     an error further down, and must stay a success.
     """
     global _FAILURE_RE
     if _FAILURE_RE is None:
-        import re
-        _FAILURE_RE = re.compile(r"^[\s#*>]*(Error\b|Failed to\b|Could not\b|Cannot\b)")
+        _FAILURE_RE = re.compile(r"^[\s#*>]*(Error\b|Failed to\b|Could not\b|Cannot\b"
+                                 r"|Semantic search error\b|Collection not found\b)")
     return bool(_FAILURE_RE.match(text))
 
 
@@ -284,6 +287,9 @@ def cmd_search(args):
             search_all_libraries=getattr(args, "all_libraries", False), ctx=ctx,
         )
 
+    if _reports_failure(result):
+        _out(args, "search", text=result)
+
     if _json_mode(args):
         keys = _keys_from_markdown(result)
         items = _fetch_projected(_read_backend(), keys,
@@ -322,10 +328,20 @@ def cmd_get(args):
         print(result)
     elif sub == "fulltext":
         result = retrieval.get_item_fulltext(item_key=args.item_key, ctx=ctx)
-        _out(args, "get fulltext",
-             data={"item_key": args.item_key, "text": result, "chars": len(result)}
-             if json_mode else None,
-             text=result)
+        # A failure leads with "Error"; a success leads with the item's
+        # metadata heading ("# Error-correcting codes" is a fine title). Only
+        # structured data skips _out's failure check, so a failure must not
+        # be wrapped as data.
+        failed = result.startswith("Error")
+        data = None
+        if json_mode and not failed:
+            data = {"item_key": args.item_key, "text": result, "chars": len(result)}
+            # The TRUNCATED heading is prose; scripts reading data.chars need it as fields.
+            m = re.search(r"\(pages 1-(\d+) of (\d+) — TRUNCATED\)", result)
+            data["truncated"] = bool(m)
+            if m:
+                data["pages_read"], data["page_count"] = int(m.group(1)), int(m.group(2))
+        _out(args, "get fulltext", data=data, text=result)
     elif sub == "bibtex":
         result = retrieval.get_item_metadata(item_key=args.item_key, format="bibtex", ctx=ctx)
         _out(args, "get bibtex",
@@ -345,6 +361,16 @@ def cmd_get(args):
             collection_key=args.collection_key, detail=args.detail, limit=args.limit,
             offset=getattr(args, "offset", 0), ctx=ctx,
         )
+        # A key that names no collection in the active library, or a failed
+        # lookup, has to fail -- otherwise it reads as an empty collection
+        # (#606).
+        if _reports_failure(result) or result.startswith("Collection not found"):
+            code = "not_found" if result.startswith("Collection not found") else "tool_error"
+            if json_mode:
+                _cli_json.emit_error("get collection-items", result.strip(), code=code)
+            else:
+                print(result, file=sys.stderr)
+            sys.exit(1)
         if json_mode:
             keys = _keys_from_markdown(result)
             _cli_json.emit("get collection-items", {
@@ -431,7 +457,7 @@ def cmd_annotations(args):
             return
         print(result)
     elif args.subcommand == "create":
-        _out(args, "annotations create", text=annotations.create_annotation(
+        text = annotations.create_annotation(
             attachment_key=args.attachment_key, page=args.page,
             text=getattr(args, "text", None),
             rect=_parse_rect(getattr(args, "rect", None)),
@@ -439,7 +465,13 @@ def cmd_annotations(args):
             comment=getattr(args, "comment", None),
             color=_resolve_color(args.color),
             tags=_split_csv(getattr(args, "tags", None)), ctx=ctx,
-        ))
+        )
+        if getattr(args, "open", False) and not _reports_failure(text):
+            import re
+            match = re.search(r"\*\*Annotation Key:\*\* (\w+)", text)
+            _launch_url(_reader_url(args.attachment_key, page=args.page,
+                                    annotation_key=match and match.group(1)))
+        _out(args, "annotations create", text=text)
     elif args.subcommand == "batch":
         _annotations_batch(args, annotations, ctx)
     elif args.subcommand == "update":
@@ -652,7 +684,8 @@ def cmd_notes(args):
         ))
     elif args.subcommand == "update":
         note_text = sys.stdin.read() if args.text == "-" else args.text
-        _out(args, "notes update", text=annotations.update_note(item_key=args.item_key, note_text=note_text, ctx=ctx))
+        _out(args, "notes update", text=annotations.update_note(item_key=args.item_key, note_text=note_text,
+                                                                append=getattr(args, "append", False), ctx=ctx))
     elif args.subcommand == "delete":
         _out(args, "notes delete", text=annotations.delete_note(item_key=args.item_key, ctx=ctx))
     else:
@@ -708,6 +741,12 @@ def cmd_add(args):
             isbn=args.isbn, collections=collections, tags=tags,
             if_exists=if_exists, create_missing_collections=create_missing,
             ctx=ctx,
+        ))
+    elif args.subcommand == "pmid":
+        _out(args, "add pmid", text=write_mod.add_by_pmid(
+            pmid=args.pmid, collections=collections, tags=tags,
+            attach_mode=args.attach_mode, if_exists=if_exists,
+            create_missing_collections=create_missing, ctx=ctx,
         ))
     elif args.subcommand == "bibtex":
         bibtex = sys.stdin.read() if args.bibtex == "-" else args.bibtex
@@ -986,20 +1025,40 @@ def cmd_db(args):
         sys.exit(1)
 
 
+_SWITCH_IS_PER_PROCESS = (
+    "This only lasts for this zotero-cli command: each command runs in a new "
+    "process, so the next one is back on the default library. To target this "
+    "library in later commands, set "
+    "`ZOTERO_LIBRARY_ID={library_id} ZOTERO_LIBRARY_TYPE={library_type}`."
+)
+
+
 def cmd_library(args):
     setup_zotero_environment()
     search_mod, retrieval, annotations, write_mod, _client = _import_tools()
     ctx = _ctx(args)
 
     if args.action == "switch":
-        _out(args, "library switch", text=retrieval.switch_library(
+        text = retrieval.switch_library(
             library_id=args.library_id, library_type=args.library_type, ctx=ctx,
-        ))
+        )
+        # The switch lives in this process only, and every zotero-cli command
+        # is a new process: the tool's "All tools now operate on this library"
+        # was true for the MCP server but not here (#606). Failure messages
+        # do not contain it, so they pass through unchanged.
+        text = text.replace(
+            retrieval.SWITCH_SUCCESS_NOTE,
+            _SWITCH_IS_PER_PROCESS.format(
+                library_id=args.library_id, library_type=args.library_type,
+            ),
+        )
+        _out(args, "library switch", text=text)
     elif args.action == "list":
         _out(args, "library list", text=retrieval.list_libraries(ctx=ctx))
     elif args.action == "reset":
         _client.clear_active_library()
-        print("Switched back to default library configuration.")
+        print("zotero-cli always starts on the default library "
+              "(ZOTERO_LIBRARY_ID/TYPE); nothing to reset.")
     else:
         print(f"Unknown library action: {args.action}", file=sys.stderr)
         sys.exit(1)
@@ -1094,10 +1153,26 @@ def cmd_read(args):
     """Read a page range out of an item's PDF, as text or as page images."""
     rect = _parse_rect(getattr(args, "rect", None))
     as_image = getattr(args, "format", "text") == "image"
+    find = getattr(args, "find", None)
     if rect is not None and not as_image:
         raise _cli_json.CliError("--rect needs --format image", code="bad_rect")
+    if find is not None and as_image:
+        raise _cli_json.CliError("--find searches text; it cannot go with --format image",
+                                 code="bad_find")
+    if find is None and args.start_page is None:
+        _fail(args, "read", "--start-page is required (a page range with no start is a typo; "
+                            "use --find to search instead)", "missing_start_page")
     setup_zotero_environment()
     from zotero_mcp.tools import read_pdf as read_pdf_mod
+
+    if find is not None:
+        result = read_pdf_mod.find_in_pdf(
+            args.item_key, find, args.start_page, args.end_page,
+            context=getattr(args, "context", 12), ctx=_ctx(args),
+        )
+        _out(args, "read", data=result if _json_mode(args) else None,
+             text=read_pdf_mod.format_find(result))
+        return
 
     if as_image:
         import os
@@ -1220,6 +1295,107 @@ def cmd_path(args):
     _out(args, "path",
          data={"item_key": args.item_key, "text": text} if _json_mode(args) else None,
          text=text)
+
+
+def _reveal(path) -> None:
+    """Show a file in the system file manager, so the install dialog's file picker is one drag away."""
+    import os
+    import subprocess
+    if sys.platform == "darwin":
+        subprocess.run(["open", "-R", str(path)], check=False)
+    elif sys.platform == "win32":
+        subprocess.run(["explorer", f"/select,{path}"], check=False)
+    else:
+        subprocess.run(["xdg-open", os.path.dirname(str(path))], check=False)
+
+
+def cmd_plugin(args):
+    """Where the packaged Zotero Agent plugin is, and how to install it."""
+    from pathlib import Path
+    name = "zotero-agent.xpi"
+    here = Path(__file__).resolve().parent
+    # Wheels carry it in chat_plugin/; a source checkout has it after `npm run build`.
+    xpi = next((p for p in (here / "chat_plugin" / name, here.parents[1] / "plugin" / "dist" / name)
+                if p.is_file()), None)
+    if xpi is None:
+        _fail(args, "plugin",
+              f"{name} is not built. Run `npm run build` in plugin/ of the zotero-mcp "
+              "repo, or download it from https://github.com/54yyyu/zotero-mcp/releases/latest",
+              "plugin_missing")
+    if args.path:
+        _out(args, "plugin", data={"path": str(xpi)}, text=str(xpi))
+        return
+    if args.reveal:
+        _reveal(xpi)
+    _out(args, "plugin", data={"path": str(xpi)}, text=(
+        f"Zotero Agent plugin: {xpi}\n"
+        "Install it in Zotero: Tools > Plugins, click the gear, Install Plugin From File, "
+        "and choose that file.\n"
+        "Setup and first run: https://github.com/54yyyu/zotero-mcp/blob/main/docs/chat-plugin.md"))
+
+
+def _reader_url(attachment_key: str, *, page: int | None = None,
+                annotation_key: str | None = None) -> str:
+    """A zotero://open-pdf link that Zotero's own protocol handler resolves.
+
+    page is 1-based and positional (Zotero subtracts one to get pageIndex),
+    the same numbering `read` uses, not the printed page label.
+    """
+    from urllib.parse import urlencode
+
+    from zotero_mcp import client as _client
+    group_id = _client.get_active_group_id()
+    library = f"groups/{group_id}" if group_id else "library"
+    params = {}
+    if annotation_key:
+        params["annotation"] = annotation_key
+    elif page:
+        params["page"] = page
+    query = f"?{urlencode(params)}" if params else ""
+    return f"zotero://open-pdf/{library}/items/{attachment_key}{query}"
+
+
+def _launch_url(url: str) -> None:
+    import os
+    import subprocess
+    if sys.platform == "darwin":
+        subprocess.run(["open", url], check=True)
+    elif sys.platform == "win32":
+        os.startfile(url)  # noqa: S606 -- a zotero:// link, not a path
+    else:
+        subprocess.run(["xdg-open", url], check=True)
+
+
+def cmd_open(args):
+    """Show an item's PDF in the Zotero reader, at a page or on an annotation."""
+    if not args.item_key and not args.annotation:
+        _fail(args, "open", "pass an item or attachment key, or --annotation KEY", "bad_args")
+    setup_zotero_environment()
+    from zotero_mcp import client as _client
+    zot = _client.get_zotero_client()
+
+    if args.annotation:
+        # The reader needs the annotation's own attachment in the link, so
+        # derive it rather than trusting a key the caller may have mixed up.
+        ann = zot.item(args.annotation)
+        attachment_key = ann.get("data", {}).get("parentItem")
+        if ann.get("data", {}).get("itemType") != "annotation" or not attachment_key:
+            _fail(args, "open", f"{args.annotation} is not an annotation", "not_annotation")
+    else:
+        item = zot.item(args.item_key)
+        attachment = (_client.get_attachment_details(zot, item, priority=("pdf",))
+                      or _client.get_attachment_details(zot, item))
+        if attachment is None:
+            _fail(args, "open", f"No attachment found for {args.item_key}", "no_attachment")
+        attachment_key = attachment.key
+
+    url = _reader_url(attachment_key, page=args.page, annotation_key=args.annotation)
+    _launch_url(url)
+    _out(args, "open",
+         data={"attachment_key": attachment_key, "page": args.page,
+               "annotation_key": args.annotation, "url": url}
+         if _json_mode(args) else None,
+         text=f"Opened in Zotero: {url}")
 
 
 def cmd_batch(args):
@@ -1393,6 +1569,8 @@ def build_parser() -> argparse.ArgumentParser:
     ac.add_argument("--color", default="#ffd400",
                     help=f"Hex, or a Zotero color name: {', '.join(ZOTERO_COLORS)}")
     ac.add_argument("--tags", help="Comma-separated tags")
+    ac.add_argument("--open", action="store_true",
+                    help="Then show the new annotation in the Zotero reader")
     ab = a_sub.add_parser("batch", help="Create many annotations from JSON Lines in one run")
     ab.add_argument("--attachment-key", required=True,
                     help="Attachment for lines that do not name their own")
@@ -1416,14 +1594,17 @@ def build_parser() -> argparse.ArgumentParser:
     nl.add_argument("--limit", type=int, default=20)
     nl.add_argument("--full", action="store_true")
     nl.add_argument("--raw-html", action="store_true")
-    nc = n_sub.add_parser("create", help="Create a note")
+    _note_text_help = ("Markdown ($math$, tables, zotero:// links, plus <u> <s> <sub> <sup> <mark> "
+                       "<span style=\"color:red\">) or note HTML; - reads stdin")
+    nc = n_sub.add_parser("create", help="Create a note (Markdown or HTML, converted to Zotero's note format)")
     nc.add_argument("--item-key", required=True)
     nc.add_argument("--title")
-    nc.add_argument("--text", help="Note text (use - to read from stdin)")
+    nc.add_argument("--text", help=_note_text_help)
     nc.add_argument("--tags")
-    nu = n_sub.add_parser("update", help="Update a note")
+    nu = n_sub.add_parser("update", help="Replace (or --append to) a note's text")
     nu.add_argument("--item-key", required=True)
-    nu.add_argument("--text", help="New text (use - for stdin)")
+    nu.add_argument("--text", help=_note_text_help)
+    nu.add_argument("--append", action="store_true", help="Add the text at the end instead of replacing the note")
     nd = n_sub.add_parser("delete", help="Delete a note")
     nd.add_argument("--item-key", required=True)
 
@@ -1468,6 +1649,11 @@ def build_parser() -> argparse.ArgumentParser:
     aisbn = add_sub.add_parser("isbn", help="Add book by ISBN")
     aisbn.add_argument("isbn")
     _add_common_flags(aisbn)
+    apmid = add_sub.add_parser("pmid", help="Add item(s) by PubMed ID, keeping the PMID")
+    apmid.add_argument("pmid", help="One PMID, or several comma-separated")
+    _add_common_flags(apmid)
+    apmid.add_argument("--attach-mode", choices=["auto", "linked_url", "import_file", "none", "required"],
+                       default="auto")
     abib = add_sub.add_parser("bibtex", help="Add items from BibTeX")
     abib.add_argument("--bibtex",
                       help="Inline BibTeX (use - to read from stdin)")
@@ -1520,8 +1706,9 @@ def build_parser() -> argparse.ArgumentParser:
     e_p.add_argument("--tags", help="Replace all tags (comma-separated)")
     e_p.add_argument("--add-tags")
     e_p.add_argument("--remove-tags")
-    e_p.add_argument("--collections", help="Add to collections (comma-separated keys)")
-    e_p.add_argument("--collection-names", help="Add to collections (comma-separated names)")
+    e_p.add_argument("--collections", help="Replace the item's collections (comma-separated keys); "
+                     "use `collections manage --add-to` to add without removing")
+    e_p.add_argument("--collection-names", help="Replace the item's collections (comma-separated names)")
     e_p.add_argument("--doi")
     e_p.add_argument("--url")
     e_p.add_argument("--extra")
@@ -1590,9 +1777,16 @@ def build_parser() -> argparse.ArgumentParser:
     # read -- page ranges out of an item's PDF
     rd_p = sub.add_parser("read", help="Read a page range from an item's PDF")
     rd_p.add_argument("item_key")
-    rd_p.add_argument("--start-page", type=int, required=True)
+    rd_p.add_argument("--start-page", type=int, default=None,
+                      help="First page (required unless --find is given)")
     rd_p.add_argument("--end-page", type=int, default=None,
-                      help="Defaults to --start-page (a single page)")
+                      help="Defaults to --start-page (a single page); with --find, the last page")
+    rd_p.add_argument("--find", metavar="TEXT",
+                      help="Locate TEXT instead of reading: ranked pages with short snippets "
+                           "(ignores case, punctuation and hyphenation); --start-page/--end-page "
+                           "narrow the search")
+    rd_p.add_argument("--context", type=int, default=12,
+                      help="With --find: words of context on each side of a match (1-60, default 12)")
     rd_p.add_argument("--format", choices=["text", "image"], default="text",
                       help="image writes PNG page images (up to 10 pages) for math, figures and tables")
     rd_p.add_argument("--rect", help="With --format image: crop the start page to x,y,width,height "
@@ -1650,6 +1844,17 @@ def build_parser() -> argparse.ArgumentParser:
     pth_p = sub.add_parser("path", help="Show an attachment's path on disk")
     pth_p.add_argument("item_key")
 
+    # plugin
+    pl_p = sub.add_parser("plugin", help="Locate the Zotero Agent plugin (.xpi) and show how to install it")
+    pl_p.add_argument("--path", action="store_true", help="Print only the path to the .xpi")
+    pl_p.add_argument("--reveal", action="store_true", help="Also show the .xpi in the file manager")
+
+    # open -- point the Zotero reader at a page or an annotation
+    op_p = sub.add_parser("open", help="Open an item's PDF in the Zotero reader at a page or annotation")
+    op_p.add_argument("item_key", nargs="?", help="Item or attachment key (not needed with --annotation)")
+    op_p.add_argument("--page", type=int, help="1-based page position, as `read` counts pages")
+    op_p.add_argument("--annotation", help="Annotation key to jump to and select")
+
     # batch
     b_p = sub.add_parser("batch", help="Update tags/Extra fields across many items")
     b_p.add_argument("--item-keys", help="Comma-separated item keys")
@@ -1691,6 +1896,8 @@ _CMD_MAP = {
     "coverage": cmd_coverage,
     "synthesize": cmd_synthesize,
     "path": cmd_path,
+    "plugin": cmd_plugin,
+    "open": cmd_open,
     "batch": cmd_batch,
 }
 
@@ -1718,11 +1925,14 @@ Commands returning structured data
   get recent            data.items[]
   get collections       data.collections[]
   get tags              data.tags[]
-  get fulltext          data.text, data.chars
+  get fulltext          data.text, data.chars, data.truncated (+ pages_read, page_count)
+  read --find           data.mode, data.matches[] (page, hits, snippets[]),
+                        data.more_pages[], data.hits, data.total_pages
   get bibtex            data.bibtex
   annotations list      the annotations payload
   notes list            data.notes[] -- with both .text and .html
   config                data.settings
+  plugin                data.path
 
 Every other command returns {"text": "<the markdown it would have
 printed>"}. That is deliberate: those commands' answers really are status
@@ -1748,6 +1958,7 @@ fields are not removed or retyped without bumping it. Parse defensively.
 
 
 def main():
+    tolerate_console_encoding()
     parser = build_parser()
     args = parser.parse_args()
 

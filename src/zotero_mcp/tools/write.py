@@ -40,7 +40,10 @@ from zotero_mcp.tools import _helpers
 CROSSREF_TYPE_MAP = _helpers.CROSSREF_TYPE_MAP
 
 # Shared by add_from_file and attach_file. URL attach mode is PDF-only.
-_ATTACH_ALLOWED_EXTS = {".pdf", ".epub", ".djvu", ".doc", ".docx", ".odt", ".rtf"}
+# .json stays out: _SOURCE_TYPE_BY_EXT merges this set last, and `add x.json`
+# must remain a CSL-JSON import (#703).
+_ATTACH_ALLOWED_EXTS = {".pdf", ".epub", ".djvu", ".doc", ".docx", ".odt", ".rtf",
+                        ".md", ".yaml", ".yml"}
 
 
 def _resolve_collections_arg(
@@ -879,6 +882,21 @@ def batch_update(
             "remove_tags, set_keys, and/or remove_keys."
         )
 
+    # Resolve a query/tag selection once and hand both halves the same keys.
+    # Searching again for the Extra half would run after the tag half has
+    # already edited tags, so tag='to-read' + remove_tags=['to-read'] found
+    # nothing and the Extra edits were silently dropped.
+    if tag_action and extra_action and not item_keys:
+        try:
+            item_keys = _search_item_keys(
+                _client.get_zotero_client(), query, _normalize_tag_selector(tag),
+                _helpers._normalize_limit(limit, default=50),
+            )
+        except Exception as e:
+            return f"Error selecting items: {_helpers.format_zotero_error(e)}"
+        if not item_keys:
+            return "No items found matching the given query/tag filters"
+
     reports = []
     if tag_action:
         reports.append(batch_update_tags(
@@ -898,7 +916,8 @@ def batch_update(
     description=(
         "Create a new collection (project/folder) in your Zotero library. "
         "To create a subcollection, pass parent_collection (not parent_key) as either "
-        "a collection key (8-character string like 'KMMQDFQ4') or a collection name. "
+        "a collection key (8-character string like 'KMMQDFQ4'), a collection name, "
+        "or a 'Parent/Child' path when the name is shared. "
         "Use zotero_search_collections to find collection keys."
     )
 )
@@ -917,11 +936,12 @@ def create_collection(
     try:
         ctx.info(f"Creating collection '{name}'")
 
-        # Resolve parent_collection name if it doesn't look like a key
-        parent_key = parent_collection
-        if parent_collection and not re.match(r'^[A-Z0-9]{8}$', parent_collection):
+        # A key, name or 'parent/child' path. A name shared by several
+        # collections is an error listing them, not the first match.
+        parent_key = None
+        if parent_collection:
             try:
-                keys = _helpers._resolve_collection_names(read_zot, [parent_collection], ctx=ctx)
+                keys = _helpers.resolve_collection_specs(read_zot, [parent_collection], ctx=ctx)
                 parent_key = keys[0] if keys else None
             except ValueError as e:
                 return f"Error resolving parent collection: {_helpers.format_zotero_error(e)}"
@@ -996,7 +1016,7 @@ def delete_collection(
         "Rename a collection or move it under a different parent, keeping its "
         "key, subcollections and item membership (#517). collection_key: the "
         "8-character key of the collection to change. name: the new name, or "
-        "omit to keep it. parent_collection: key or name of the new parent; "
+        "omit to keep it. parent_collection: key, name or 'Parent/Child' path of the new parent; "
         "a collection cannot be moved under itself or one of its own "
         "subcollections. to_top_level=True moves it out of any parent. Pass "
         "at least one change. Use zotero_search_collections to find keys. "
@@ -1043,15 +1063,15 @@ def update_collection(
             changes.append(f"renamed to \"{name}\"")
 
         if parent_collection:
-            parent_key = parent_collection
-            if not re.match(r"^[A-Z0-9]{8}$", parent_collection):
-                try:
-                    keys = _helpers._resolve_collection_names(read_zot, [parent_collection], ctx=ctx)
-                except ValueError as e:
-                    return f"Error resolving parent collection: {_helpers.format_zotero_error(e)}"
-                parent_key = keys[0] if keys else None
-                if not parent_key:
-                    return f"Error: parent collection not found: {parent_collection}"
+            # A key, name or 'parent/child' path; an ambiguous name is an
+            # error listing the candidates, not the first match.
+            try:
+                keys = _helpers.resolve_collection_specs(read_zot, [parent_collection], ctx=ctx)
+            except ValueError as e:
+                return f"Error resolving parent collection: {_helpers.format_zotero_error(e)}"
+            parent_key = keys[0] if keys else None
+            if not parent_key:
+                return f"Error: parent collection not found: {parent_collection}"
             # Zotero accepts a parent that is the collection itself or one of
             # its descendants and the tree then disappears from the desktop
             # client, so refuse the cycle here.
@@ -2622,9 +2642,7 @@ def _add_by_arxiv(arxiv_id, collections, tags, write_zot, ctx, attach_mode="auto
             with tempfile.TemporaryDirectory() as tmpdir:
                 filename = f"arxiv_{arxiv_id.replace('/', '_')}.pdf"
                 filepath = os.path.join(tmpdir, filename)
-                with open(filepath, "wb") as f:
-                    for chunk in pdf_resp.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                _helpers._stream_pdf_download(pdf_resp, filepath)
                 webdav_suffix = _helpers._webdav_first_attach(
                     write_zot,
                     filename,
@@ -3684,6 +3702,23 @@ def _attachment_sig(data: dict) -> tuple | None:
     )
 
 
+def _has_children(write_zot, item_key: str) -> bool:
+    """Whether an attachment has children (annotations, an embedded note).
+
+    Annotations are asked for by type: Zotero's local API leaves them out of
+    a plain children listing. An unanswerable check counts as "has children":
+    the caller then moves the attachment instead of trashing it, which can
+    never lose anything.
+    """
+    try:
+        return bool(
+            write_zot.children(item_key, limit=1)
+            or write_zot.children(item_key, itemType="annotation", limit=1)
+        )
+    except Exception:
+        return True
+
+
 def _keeper_rank(entry: dict) -> tuple:
     """Sort key for keeper selection — the lowest-sorting member is the keeper.
 
@@ -3761,13 +3796,18 @@ def _merge_plan(write_zot, keeper_key: str, dup_keys: list[str]) -> dict:
         if kc.get("data", {}).get("itemType") == "attachment"
     }
     keeper_attachment_sigs.discard(None)
-    skipped_attachment_count = sum(
-        1
+    # A copy of a file the keeper already has is left on the duplicate and
+    # trashed with it, unless it carries annotations or a note of its own:
+    # those live on that copy, not on the keeper's, so it moves instead.
+    skip_attachment_keys = {
+        child.get("key")
         for dup in duplicates
         for child in dup["children"]
         if child.get("data", {}).get("itemType") == "attachment"
         and _attachment_sig(child.get("data", {})) in keeper_attachment_sigs
-    )
+        and not _has_children(write_zot, child.get("key"))
+    }
+    skipped_attachment_count = len(skip_attachment_keys)
 
     return {
         "keeper_key": keeper_key,
@@ -3782,6 +3822,7 @@ def _merge_plan(write_zot, keeper_key: str, dup_keys: list[str]) -> dict:
         "children_to_move": total_children_to_move - skipped_attachment_count,
         "skipped_attachment_count": skipped_attachment_count,
         "keeper_attachment_sigs": keeper_attachment_sigs,
+        "skip_attachment_keys": skip_attachment_keys,
     }
 
 
@@ -3847,8 +3888,9 @@ def _execute_merge(write_zot, plan: dict, ctx) -> dict:
                 fresh_child = write_zot.item(child_key)
                 child_data = fresh_child.get("data", {})
                 if (
-                    child_data.get("itemType") == "attachment"
+                    child_key in plan["skip_attachment_keys"]
                     and _attachment_sig(child_data) in plan["keeper_attachment_sigs"]
+                    and not _has_children(write_zot, child_key)
                 ):
                     result["skipped_dupes"].append(child_key)
                     continue
@@ -4983,9 +5025,10 @@ def _attach_from_url(write_zot, item_key, url, filename, ctx):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         filepath = os.path.join(tmpdir, filename)
-        with open(filepath, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+        try:
+            _helpers._stream_pdf_download(resp, filepath)
+        except _helpers.PdfDownloadError as e:
+            return f"Error: {e}."
         if os.path.getsize(filepath) < 1000:
             return (
                 "Error: Downloaded file is under 1 KB — likely an error "
@@ -5444,6 +5487,7 @@ def _create_and_attach_batch(
                         crossref_metadata=(crossref_by_doi or {}).get(doi),
                         attach_mode=attach_mode,
                         page_pdf_url=(page_pdf_by_doi or {}).get(doi),
+                        pages=item_data.get("pages"),
                     )
                 except _helpers.OaPdfRequiredError as e:
                     error = (
@@ -5663,6 +5707,51 @@ def add_by_bibtex(
         return f"Error adding by BibTeX: {_helpers.format_zotero_error(e)}"
 
 
+_EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+
+
+def add_by_pmid(
+    pmid: str | list[str],
+    collections: list[str] | str | None = None,
+    tags: list[str] | str | None = None,
+    attach_mode: str = "auto",
+    if_exists: Literal["duplicate", "file", "skip"] = "duplicate",
+    create_missing_collections: bool = False,
+    *,
+    ctx: Context
+) -> str:
+    """Add items by PubMed ID, from PubMed's full XML record (E-utilities
+    efetch), mapped the way Zotero's PubMed translator maps it. Unlike a DOI
+    import through CrossRef, the item keeps its PMID and PMCID, so it can be
+    found again by the identifier it was added by, and it carries the
+    abstract, MeSH headings, keywords and language that CrossRef lacks.
+    """
+    pmids = pmid if isinstance(pmid, list) else re.split(r"[\s,]+", str(pmid))
+    pmids = [p.strip() for p in pmids if p and p.strip()]
+    bad = [p for p in pmids if not p.isdigit()]
+    if not pmids or bad:
+        return f"Error: a PMID is digits only: {', '.join(bad) or '(none given)'}"
+    try:
+        resp = requests.get(_EFETCH_URL, timeout=30, params={
+            "db": "pubmed", "retmode": "xml", "id": ",".join(pmids),
+            "tool": "zotero-mcp"})
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+    except (requests.RequestException, ET.ParseError) as e:
+        return f"Error: PubMed lookup failed: {e}"
+    records = [_citation_import.pubmed_xml_to_csl(a) for a in root.findall("PubmedArticle")]
+    got = {r["PMID"] for r in records}
+    missing = [p for p in pmids if p not in got]
+    if missing:
+        # Books (PubmedBookArticle) and unknown IDs land here.
+        return f"Error: PubMed returned no journal-article record for PMID {', '.join(missing)}"
+    return add_by_csl_json(
+        csl_json=records, collections=collections, tags=tags,
+        attach_mode=attach_mode, if_exists=if_exists,
+        create_missing_collections=create_missing_collections, ctx=ctx,
+    )
+
+
 def add_by_csl_json(
     csl_json: str | list | dict | None = None,
     file_path: str | None = None,
@@ -5763,7 +5852,7 @@ def add_by_csl_json(
 # zotero_add_item — the single public add facade
 # ---------------------------------------------------------------------------
 
-_ADD_SOURCE_TYPES = ("doi", "url", "isbn", "bibtex", "csl_json", "file")
+_ADD_SOURCE_TYPES = ("doi", "url", "isbn", "pmid", "bibtex", "csl_json", "file")
 
 _BIBTEX_EXTS = {".bib", ".bibtex"}
 _CSL_JSON_EXTS = {".json", ".csljson"}
@@ -5927,7 +6016,7 @@ def detect_source_type(source: str) -> str:
 
     raise ValueError(
         f"Could not tell what kind of source '{s[:80]}' is. Pass source_type "
-        "explicitly (doi, url, isbn, bibtex, csl_json, or file); note that "
+        "explicitly (doi, url, isbn, pmid, bibtex, csl_json, or file); note that "
         "file paths must be absolute and ISBNs must pass their checksum."
     )
 
@@ -5939,8 +6028,8 @@ def detect_source_type(source: str) -> str:
         "CSL JSON, or a local file. Use for every 'add this to Zotero' "
         "request. "
         "source: the identifier, URL, citation text, or ABSOLUTE file "
-        "path. DOI/URL/ISBN also take many at once (list or "
-        "comma/newline-separated), each resolved independently. "
+        "path. DOI/URL/ISBN/PMID also take many at once (list or "
+        "comma/newline-separated). "
         "BibTeX/CSL JSON may be inline (many entries per call) or a path "
         "to .bib/.bibtex/.json/.csljson; documents are .pdf, .epub, .docx "
         "and similar. "
@@ -5973,7 +6062,7 @@ def detect_source_type(source: str) -> str:
 def add_item(
     source: str,
     source_type: Literal[
-        "auto", "doi", "url", "isbn", "bibtex", "csl_json", "file"
+        "auto", "doi", "url", "isbn", "pmid", "bibtex", "csl_json", "file"
     ] = "auto",
     collections: list[str] | str | None = None,
     tags: list[str] | str | None = None,
@@ -6026,6 +6115,8 @@ def add_item(
         return add_by_url(url=source, attach_mode=attach_mode, **common)
     if resolved == "isbn":
         return add_by_isbn(isbn=source, **common)
+    if resolved == "pmid":
+        return add_by_pmid(pmid=source, attach_mode=attach_mode, **common)
     if resolved == "file":
         return add_from_file(file_path=source, title=title, **common)
     # BibTeX / CSL JSON arrive either inline or as a path to a citation file.

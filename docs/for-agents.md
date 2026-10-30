@@ -9,7 +9,7 @@ Zotero MCP connects a [Zotero](https://www.zotero.org/) library to AI assistants
 | Entry point | What it is | Use it when |
 |---|---|---|
 | `zotero-cli` | A command-line client with `--json` output on every command | **You can run shell commands.** It costs no context until used. |
-| `zotero-mcp serve` | An MCP server exposing ~38 tools by default | Your client speaks MCP but has no shell (Claude Desktop, ChatGPT). |
+| `zotero-mcp serve` | An MCP server exposing ~41 tools by default | Your client speaks MCP but has no shell (Claude Desktop, ChatGPT). |
 
 Both read the same configuration. If you have a shell, prefer `zotero-cli`: the MCP server's tool schemas cost about 13.4k tokens on every request whether or not they are used.
 
@@ -75,6 +75,7 @@ Search modes: `items` (default: title, author, phrase), `semantic` (meaning; nee
 
 ```bash
 zotero-cli --json outline ITEM_KEY                              # find the section
+zotero-cli --json read ITEM_KEY --find "robustness check"       # which pages say it, with snippets
 zotero-cli --json read ITEM_KEY --start-page 3 --end-page 8     # read only those pages
 ```
 
@@ -84,6 +85,7 @@ Extracted text is reliable for prose and **unreliable for math, figures and tabl
 zotero-cli --json read ITEM_KEY --start-page 4 --format image                               # PNG paths
 zotero-cli --json read ITEM_KEY --start-page 4 --format image --rect 0.35,0.49,0.3,0.05     # zoom in
 zotero-cli path ITEM_KEY                                                                    # the PDF on disk
+zotero-cli open ITEM_KEY --page 4                                                           # show it in the Zotero reader
 ```
 
 ### Annotating a paper

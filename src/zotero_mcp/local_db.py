@@ -382,11 +382,21 @@ _CONDITION_FIELD_ALIASES = {
 #
 # abstractNote, DOI, extra and url have no mappings and take the plain forms.
 # Every name passed here is a core Zotero field, hence `fields` rather than
-# `fieldsCombined`; revisit if a caller-supplied name ever reaches these.
-def _field_id(field_name: str) -> str:
+# `fieldsCombined`. A caller-supplied name (advanced search on any field) never
+# reaches the interpolating form: it is checked against the `fields` table and
+# bound as a parameter (``bound=True``, see `_resolved_field_subquery`).
+_BOUND_FIELD_ID = "(SELECT fieldID FROM fields WHERE fieldName = ?)"
+
+
+def _field_id(field_name: str, bound: bool = False) -> str:
     """The fieldID as an uncorrelated scalar subquery, which SQLite evaluates
     once per statement. Joining `fields` instead scans it for every outer row
-    (it has no index on fieldName): 3x slower on the keyword search."""
+    (it has no index on fieldName): 3x slower on the keyword search.
+
+    ``bound=True`` emits a ``?`` placeholder in place of the name, for a name
+    that did not come from this module's own constants."""
+    if bound:
+        return _BOUND_FIELD_ID
     return f"(SELECT fieldID FROM fields WHERE fieldName = '{field_name}')"
 
 
@@ -422,12 +432,15 @@ def _base_field_resolved_subquery(
     item_alias: str = "i",
     value_expr: str = "v.value",
     extra_where: str = "",
+    bound: bool = False,
 ) -> str:
     """`_base_field_resolved_join` as a correlated scalar subquery, the shape
     a WHERE condition needs. ``value_expr`` lets the date variants (display
-    half, ISO prefix, year) share it.
+    half, ISO prefix, year) share it. ``bound`` leaves the field name as two
+    ``?`` placeholders (the caller binds the name twice, ahead of its other
+    parameters).
     """
-    field_id = _field_id(base_field_name)
+    field_id = _field_id(base_field_name, bound)
     return (
         f"(SELECT {value_expr} FROM itemData d "
         f"JOIN itemDataValues v ON d.valueID = v.valueID "
@@ -449,6 +462,14 @@ def _plain_field_subquery(field_name: str, item_alias: str = "i") -> str:
 
 # Single-valued fields resolvable to one scalar SQL expression correlated on
 # the outer query's `i` (items) / `it` (itemTypes) aliases.
+def _resolved_field_subquery() -> str:
+    """Scalar subquery for any validated Zotero field, the field name bound
+    twice. A base field resolves per item type (publisher of a thesis is
+    `university`); any other field has no mapping and falls back to its own
+    ID, so one form serves both."""
+    return _base_field_resolved_subquery("", bound=True)
+
+
 _SIMPLE_FIELD_SQL = {
     # `title` and `publicationTitle` are base fields — a case's title lives in
     # caseName, a webpage's publicationTitle in websiteTitle (#570). Matching
@@ -460,6 +481,7 @@ _SIMPLE_FIELD_SQL = {
     # "date" is handled separately below (_DATE_DISPLAY_SQL / _DATE_RANGE_SQL)
     # — it needs an operator-aware expression, unlike every other field here.
     "DOI": _plain_field_subquery("DOI"),
+    "url": _plain_field_subquery("url"),
     "publicationTitle": _base_field_resolved_subquery("publicationTitle"),
     "dateAdded": "i.dateAdded",
     "dateModified": "i.dateModified",
@@ -788,6 +810,76 @@ def note_local_write() -> None:
 _snapshot_lock = threading.Lock()
 _snapshots: dict[str, tuple[tuple, str, float, int]] = {}
 
+#: Snapshot directories are named ``zotero_mcp_db_<pid>_<random>`` so a later
+#: process can tell whose they are. Copies from before the pid was recorded
+#: are only removed once they are this old.
+_SNAPSHOT_PREFIX = "zotero_mcp_db_"
+_LEGACY_SNAPSHOT_MAX_AGE = 7 * 24 * 3600
+_swept_stale_snapshots = False
+
+
+_IS_WINDOWS = os.name == "nt"
+
+
+def _pid_alive(pid: int) -> bool:
+    if _IS_WINDOWS:
+        # os.kill(pid, 0) is not a liveness probe on Windows: signal 0 equals
+        # CTRL_C_EVENT there, so it can send Ctrl+C to processes on the
+        # console, and a failure is a generic OSError. Say "alive" and let the
+        # sweep fall back to the age rule.
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # Exists but belongs to someone else (EPERM), or the platform
+        # cannot tell: keep the directory.
+        return True
+    return True
+
+
+def _sweep_stale_snapshots() -> None:
+    """Remove snapshot directories left behind by processes that are gone.
+
+    ``_remove_snapshots`` runs at exit, but not when the process is stopped
+    by a signal: SIGTERM from launchd, systemd or Docker, or SIGKILL. Each
+    such stop used to leave a full copy of the user's library in the temp
+    directory, one per restart. Runs once per process, before its first copy.
+    """
+    global _swept_stale_snapshots
+    if _swept_stale_snapshots:
+        return
+    _swept_stale_snapshots = True
+    tmp = tempfile.gettempdir()
+    try:
+        names = os.listdir(tmp)
+    except OSError:
+        return
+    now = time.time()
+    for name in names:
+        if not name.startswith(_SNAPSHOT_PREFIX):
+            continue
+        path = os.path.join(tmp, name)
+        owner = name[len(_SNAPSHOT_PREFIX):].split("_", 1)[0]
+        try:
+            if owner.isdigit() and "_" in name[len(_SNAPSHOT_PREFIX):]:
+                pid = int(owner)
+                if pid == os.getpid():
+                    continue
+                # Where liveness cannot be probed (Windows) only old copies go.
+                if _pid_alive(pid) and not (
+                    _IS_WINDOWS and now - os.path.getmtime(path) >= _LEGACY_SNAPSHOT_MAX_AGE
+                ):
+                    continue
+            elif now - os.path.getmtime(path) < _LEGACY_SNAPSHOT_MAX_AGE:
+                continue
+            if not os.path.isdir(path) or os.path.islink(path):
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+
 
 @atexit.register
 def _remove_snapshots() -> None:
@@ -849,7 +941,8 @@ def _wal_snapshot_path(db_path: str) -> str | None:
                     # next read after the interval picks the change up. A copy
                     # made before our own latest write skips this, once.
                     return cached[1]
-            snap_dir = tempfile.mkdtemp(prefix="zotero_mcp_db_")
+            _sweep_stale_snapshots()
+            snap_dir = tempfile.mkdtemp(prefix=f"{_SNAPSHOT_PREFIX}{os.getpid()}_")
             snap = os.path.join(snap_dir, "zotero.sqlite")
             try:
                 shutil.copyfile(source, snap)
@@ -1066,11 +1159,13 @@ class LocalZoteroReader:
     # never write into the user's real cache directory.
     extraction_workers: int = 1
     fulltext_cache_enabled: bool = False
+    reuse_pdf_parse: bool = False
     config_path: str | None = None
     #: OCR for scanned PDFs (zotero_mcp.ocr.OcrSettings); None = no OCR.
     #: Only the indexing path sets it — see zotero_mcp.ocr.
     ocr_settings = None
     _library_labels: dict[int, tuple[int, str]] | None = None
+    _field_names: frozenset[str] | None = None
 
     def __init__(
         self,
@@ -1081,6 +1176,7 @@ class LocalZoteroReader:
         fulltext_cache_enabled: bool = False,
         config_path: str | None = None,
         ocr_settings=None,
+        reuse_pdf_parse: bool = False,
     ):
         """
         Initialize the local database reader.
@@ -1106,6 +1202,9 @@ class LocalZoteroReader:
                 fulltext cache directory next to it.
             ocr_settings: zotero_mcp.ocr.OcrSettings to recognise scanned
                 PDFs while indexing; None (the default) never runs OCR.
+            reuse_pdf_parse: Serve repeat reads of an unchanged PDF from the
+                in-process parse memo (``extract_pdf(reuse=True)``). For
+                interactive tools; indexing leaves it off.
         """
         self.db_path = db_path or self._find_zotero_db()
         self._connection: sqlite3.Connection | None = None
@@ -1113,6 +1212,7 @@ class LocalZoteroReader:
         # index for them; valid for the lifetime of one connection.
         self._scan_choice: dict[tuple[int, ...], bool] = {}
         self._library_labels: dict[int, tuple[int, str]] | None = None
+        self._field_names: frozenset[str] | None = None
         self.pdf_max_pages: int | None = pdf_max_pages
         self.attachment_priority: tuple[str, ...] = normalize_attachment_priority(
             attachment_priority
@@ -1121,6 +1221,7 @@ class LocalZoteroReader:
         self.fulltext_cache_enabled: bool = fulltext_cache_enabled
         self.config_path: str | None = config_path
         self.ocr_settings = ocr_settings
+        self.reuse_pdf_parse: bool = reuse_pdf_parse
 
     def _find_zotero_db(self) -> str:
         """
@@ -1206,6 +1307,7 @@ class LocalZoteroReader:
             return False
         self.close()
         self._library_labels = None
+        self._field_names = None
         return True
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -1240,10 +1342,20 @@ class LocalZoteroReader:
         Returns the configured ``extensions.zotero.baseAttachmentPath`` or
         ``None`` if the preference is not set or cannot be read. The
         preference lives in the profile directory's prefs.js; a prefs.js
-        next to the database is also checked for unusual setups.
+        next to the database is also checked for unusual setups. If multiple
+        profiles exist, prefer the profile whose configured data directory
+        contains this reader's database.
         """
-        prefs_files = [Path(self.db_path).parent / "prefs.js"]
-        prefs_files.extend(_profile_prefs_files())
+        db_parent = Path(self.db_path).expanduser().parent
+        profile_prefs = _profile_prefs_files()
+        matching_profile_prefs = []
+        for prefs_path in profile_prefs:
+            data_dir = _read_string_pref(prefs_path, "extensions.zotero.dataDir")
+            if data_dir and Path(data_dir).expanduser().resolve() == db_parent.resolve():
+                matching_profile_prefs.append(prefs_path)
+
+        prefs_files = [db_parent / "prefs.js"]
+        prefs_files.extend(matching_profile_prefs or profile_prefs)
         for prefs_path in prefs_files:
             if not prefs_path.exists():
                 continue
@@ -1378,7 +1490,7 @@ class LocalZoteroReader:
         (#448).
         """
         max_pages = self._resolve_pdf_max_pages()
-        doc = extract_file(file_path, max_pages=max_pages)
+        doc = extract_file(file_path, max_pages=max_pages, reuse=self.reuse_pdf_parse)
         if self.ocr_settings is not None:
             doc = with_ocr(doc, file_path, max_pages=max_pages, settings=self.ocr_settings)
         return doc
@@ -2229,8 +2341,19 @@ class LocalZoteroReader:
 
         return matching_items
 
-    def search_notes_local(self, query: str, limit: int = 20) -> list[dict]:
-        """Search notes in the local Zotero database by text content."""
+    def search_notes_local(
+        self, query: str, limit: int = 20, group_id: int | None = None
+    ) -> list[dict] | None:
+        """Search notes in the local Zotero database by text content.
+
+        Scoped like the other local searches: ``group_id`` 0 is the personal
+        library, a groupID one group, None every user/group library. Returns
+        None when the requested library isn't in this database.
+        """
+        lib_ids = self._resolve_scope_library_ids(group_id)
+        if lib_ids is None:
+            return None
+        lib_placeholders = ",".join("?" * len(lib_ids))
         conn = self._get_connection()
         cursor = conn.cursor()
         pattern = f"%{query}%"
@@ -2247,12 +2370,17 @@ class LocalZoteroReader:
             + _base_field_resolved_join("ptitle", "title", item_alias="pi")
             + """
             WHERE n.note LIKE ?
+            AND i.libraryID IN (""" + lib_placeholders + """)
             AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
-            LIMIT ?
-        """, (pattern, limit))
+        """, (pattern, *lib_ids))
 
+        # The limit applies after the clean-text filter below: an SQL LIMIT
+        # let markup-only hits (e.g. "zotero" inside Zotero 7 citation URIs)
+        # use up the budget and hide real matches.
         results = []
-        for row in cursor.fetchall():
+        for row in cursor:
+            if len(results) >= limit:
+                break
             note_html = row[1] or ""
             # Post-filter: skip if query only matches HTML tags, not content
             from zotero_mcp.utils import clean_html
@@ -2269,8 +2397,17 @@ class LocalZoteroReader:
             })
         return results
 
-    def search_annotations_local(self, query: str, limit: int = 20) -> list[dict]:
-        """Search annotations in the local Zotero database by text or comment."""
+    def search_annotations_local(
+        self, query: str, limit: int = 20, group_id: int | None = None
+    ) -> list[dict] | None:
+        """Search annotations in the local Zotero database by text or comment.
+
+        ``group_id`` scopes the search exactly as in ``search_notes_local``.
+        """
+        lib_ids = self._resolve_scope_library_ids(group_id)
+        if lib_ids is None:
+            return None
+        lib_placeholders = ",".join("?" * len(lib_ids))
         conn = self._get_connection()
         cursor = conn.cursor()
         pattern = f"%{query}%"
@@ -2290,9 +2427,10 @@ class LocalZoteroReader:
             + _base_field_resolved_join("gptitle", "title", item_alias="gpi")
             + """
             WHERE (ia.text LIKE ? OR ia.comment LIKE ?)
+            AND i.libraryID IN (""" + lib_placeholders + """)
             AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
             LIMIT ?
-        """, (pattern, pattern, limit))
+        """, (pattern, pattern, *lib_ids, limit))
 
         # Map integer annotation types to names
         type_map = {1: "highlight", 2: "note", 3: "image", 4: "ink", 5: "underline"}
@@ -2597,7 +2735,30 @@ class LocalZoteroReader:
         resolved = _CONDITION_FIELD_ALIASES.get(field_lower, field)
         if resolved in _SIMPLE_FIELD_SQL:
             return _scalar_condition(_SIMPLE_FIELD_SQL[resolved], operation, value)
+        # Any other real Zotero field (extra, publisher, volume, ISBN, url, ...).
+        # The name must be a row of the `fields` table, matched exactly as the
+        # client-side path matches it; it is bound, never interpolated. A name
+        # the database does not know stays unsupported, so the caller keeps
+        # its existing fallback for it.
+        #
+        # Ordering operators stay on the fallback: `compare` orders numerically
+        # when both sides parse as numbers (volume > 9 holds for "12"), while
+        # SQL would order the stored text ("12" < "9"). Date, year, dateAdded
+        # and dateModified have SQL forms of their own, above.
+        if (
+            resolved in self._known_field_names()
+            and operation not in _semantics.RANGE_OPS
+        ):
+            sql, params = _scalar_condition(_resolved_field_subquery(), operation, value)
+            return sql, [resolved, resolved, *params]
         return None
+
+    def _known_field_names(self) -> frozenset[str]:
+        """Names in the database's `fields` table (cached per reader)."""
+        if self._field_names is None:
+            rows = self._get_connection().execute("SELECT fieldName FROM fields").fetchall()
+            self._field_names = frozenset(r[0] for r in rows)
+        return self._field_names
 
     def _fetch_creators(self, conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, list[dict]]:
         if not item_ids:
@@ -2781,6 +2942,10 @@ class LocalZoteroReader:
         # "Author Year" query, the very form the tool recommends, match
         # nothing: no single field holds both the name and the year.
         terms = _quicksearch_terms(query)
+        if not terms and query:
+            # Only blanks (or empty quotes): nothing to match, as when a word
+            # folds to nothing below. An empty query is the filter-only case.
+            return []
         if not terms:
             # A blank query is a *filter-only* search — "every item carrying
             # this tag" — which is exactly what zotero_search_by_tag asks for
@@ -2789,37 +2954,45 @@ class LocalZoteroReader:
             # quietly mean "return the whole library".
             if not (tag or item_type):
                 return None
+        # Both sides are folded through zsearch_norm, as in advanced search:
+        # Zotero's own quick search (the pyzotero path) matches "indice",
+        # "índice" and "Índice" alike, while SQLite's LIKE folds ASCII case
+        # only. The variants still add what normalize() does not do, such as
+        # dash/space swaps and umlaut expansion (Müller -> Mueller).
+        norm = _semantics.SQLITE_NORM_FUNCTION
         term_groups: list[str] = []
         like_params: list = []
         for term in terms:
             like_clauses: list[str] = []
-            for variant in _generate_search_variants(term):
-                # Escaped, but deliberately not zsearch_norm-folded: this
-                # free-text path matches by OR-ing _generate_search_variants,
-                # which also covers dash/space and umlaut *expansion*
-                # (Müller -> Mueller) that normalize() does not do. Folding
-                # here as well would over-match relative to the pyzotero path.
+            variants = _generate_search_variants(term)
+            folded = list(dict.fromkeys(_semantics.normalize(v) for v in variants))
+            # A word unidecode drops entirely (an emoji) folds to "", and
+            # LIKE '%%' would match every item.
+            folded = [v for v in folded if v.strip()]
+            if variants and not folded:
+                return []
+            for variant in folded:
                 pattern = f"%{_semantics.escape_like(variant)}%"
-                like_clauses.append("title_val.value LIKE ? ESCAPE '\\'")
+                like_clauses.append(f"{norm}(title_val.value) LIKE ? ESCAPE '\\'")
                 like_params.append(pattern)
                 like_clauses.append("date_val.value LIKE ? ESCAPE '\\'")
                 like_params.append(pattern)
                 like_clauses.append(
                     f"EXISTS (SELECT 1 FROM itemCreators ic JOIN creators c ON ic.creatorID = c.creatorID "
-                    f"WHERE ic.itemID = i.itemID AND {_CREATOR_NAME_EXPR} LIKE ? ESCAPE '\\')"
+                    f"WHERE ic.itemID = i.itemID AND {norm}({_CREATOR_NAME_EXPR}) LIKE ? ESCAPE '\\')"
                 )
                 like_params.append(pattern)
                 if qmode == "everything":
-                    like_clauses.append("abstract_val.value LIKE ? ESCAPE '\\'")
+                    like_clauses.append(f"{norm}(abstract_val.value) LIKE ? ESCAPE '\\'")
                     like_params.append(pattern)
                     like_clauses.append(
                         "EXISTS (SELECT 1 FROM itemTags itg JOIN tags t ON itg.tagID = t.tagID "
-                        "WHERE itg.itemID = i.itemID AND t.name LIKE ? ESCAPE '\\')"
+                        f"WHERE itg.itemID = i.itemID AND {norm}(t.name) LIKE ? ESCAPE '\\')"
                     )
                     like_params.append(pattern)
                     like_clauses.append(
                         "EXISTS (SELECT 1 FROM itemNotes n WHERE "
-                        "(n.parentItemID = i.itemID OR n.itemID = i.itemID) AND n.note LIKE ? ESCAPE '\\')"
+                        f"(n.parentItemID = i.itemID OR n.itemID = i.itemID) AND {norm}(n.note) LIKE ? ESCAPE '\\')"
                     )
                     like_params.append(pattern)
             term_groups.append("(" + " OR ".join(like_clauses) + ")")
