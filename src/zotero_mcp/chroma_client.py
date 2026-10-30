@@ -28,7 +28,7 @@ from zotero_mcp.embeddings.providers import (  # noqa: F401
     ensure_embedding_functions_registered,
 )
 from zotero_mcp.embeddings.registry import create_embedding_function, merge_env_config
-from zotero_mcp.index_generation import refresh_if_changed_elsewhere
+from zotero_mcp.index_generation import drop_cached_system, refresh_if_changed_elsewhere
 from zotero_mcp.utils import ensure_private_dir, install_hint, suppress_stdout
 
 try:
@@ -42,6 +42,16 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
+
+def _stale_index_error(exc: BaseException) -> bool:
+    """ChromaDB's error when the cached vector index and the stored records disagree.
+
+    ChromaDB is not process-safe: while another process writes the index, a
+    process that loaded it earlier finds ids in its vector index that the
+    records no longer match ("Error executing plan: Internal error: Error
+    finding id").
+    """
+    return "error finding id" in str(exc).lower()
 
 
 class IndexReadError(RuntimeError):
@@ -365,12 +375,36 @@ class ChromaClient:
             else:
                 query_kwargs["query_texts"] = query_texts
 
-            results = self.collection.query(**query_kwargs)
+            try:
+                results = self.collection.query(**query_kwargs)
+            except Exception as e:
+                if not _stale_index_error(e) or not self._reopen():
+                    raise
+                # Another process changed the index under this one's cached copy.
+                logger.info("The index changed in another process during this search; reloaded it and retried.")
+                results = self.collection.query(**query_kwargs)
             logger.info(f"Semantic search returned {len(results.get('ids', [[]])[0])} results")
             return results
         except Exception as e:
             logger.error(f"Error performing semantic search: {e}")
             raise
+
+    def _reopen(self) -> bool:
+        """Load the index afresh from disk (drop the cached system, reconnect). True if done."""
+        persist = getattr(self, "persist_directory", None)
+        if not persist:
+            return False
+        try:
+            drop_cached_system(persist)
+            with suppress_stdout():
+                self.client = chromadb.PersistentClient(
+                    path=persist, settings=Settings(anonymized_telemetry=False, allow_reset=True))
+                self.collection = self.client.get_collection(
+                    name=self.collection_name, embedding_function=self.embedding_function)
+            return True
+        except Exception as e:
+            logger.warning(f"Could not reload the index after a stale read: {e}")
+            return False
 
     def delete_documents(self, ids: list[str]) -> None:
         """

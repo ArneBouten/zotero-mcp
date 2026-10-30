@@ -79,6 +79,17 @@ def refresh_if_changed_elsewhere(persist_directory: str | os.PathLike) -> bool:
     """
     if not changed_elsewhere(persist_directory):
         return False
+    return drop_cached_system(persist_directory)
+
+
+def drop_cached_system(persist_directory: str | os.PathLike) -> bool:
+    """Remove ChromaDB's cached system for the directory from its registry.
+
+    Also used when a search fails with ChromaDB's "Error finding id": another
+    process is writing the index right now (an update has not finished, so it
+    has not recorded a new generation yet) and this process's cached vector
+    index no longer matches the stored records.
+    """
     try:
         from chromadb.api.shared_system_client import SharedSystemClient
     except Exception:
