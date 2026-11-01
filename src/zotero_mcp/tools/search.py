@@ -914,12 +914,9 @@ def search_by_tag(
         "metadata, or a not-found message if no item has that key. "
         "citekey: the citation key exactly as assigned by BetterBibTeX "
         "(case-sensitive). "
-        "In local mode: queries the running Better BibTeX plugin via its "
-        "HTTP API (Zotero desktop must be running and have BBT installed). "
-        "In web mode: scans the 'Extra' field of items for 'Citation Key:' "
-        "lines — slower, and may miss items whose keys aren't persisted to "
-        "Extra. "
-        "Requires the Better BibTeX plugin in the user's Zotero install. "
+        "Matches Zotero's native citationKey field, then any 'Citation Key:' "
+        "line in Extra. In web mode a key the API's search does not surface "
+        "is found by scanning the library, which is slower on large libraries. "
         "For partial-key or free-text lookup, use zotero_search_items. "
         "Example: zotero_search_by_citation_key(citekey='hasan2026mcp') → "
         "metadata for that single item."
@@ -1690,7 +1687,7 @@ def semantic_search(
             if rerank.get("applied"):
                 output.append(
                     f"*Ranked by {rerank.get('model')} over "
-                    f"{rerank.get('candidates')} candidate passages.*"
+                    f"{rerank.get('candidates')} candidates.*"
                 )
             else:
                 output.append(
@@ -1938,12 +1935,26 @@ def get_search_database_status(*, ctx: Context) -> str:
         output.append("## Collection Information")
         output.append(f"**Name:** {collection_info.get('name', 'Unknown')}")
         output.append(f"**Document Count:** {collection_info.get('count', 0)}")
+        if collection_info.get("pending_writes"):
+            output.append(
+                f"**Pending Writes:** {collection_info['pending_writes']} "
+                "(logged but not yet applied; applied when the index is next opened)"
+            )
         output.append(f"**Embedding Model:** {collection_info.get('embedding_model', 'Unknown')}")
         output.append(f"**Database Path:** {collection_info.get('persist_directory', 'Unknown')}")
 
         if collection_info.get("initialized") is False and not collection_info.get("error"):
             output.append("**Status:** Not initialized — run zotero_update_search_database first.")
-        if collection_info.get('error'):
+        if collection_info.get("unreadable"):
+            # A damaged index reads as 0 documents; say so, with what to run (#747).
+            from zotero_mcp.chroma_client import unreadable_index_message
+
+            output.append("**Status:** Unreadable — the index is damaged, not empty.")
+            output.append("")
+            output.append("```")
+            output.append(unreadable_index_message(collection_info, update_config.get("last_update")))
+            output.append("```")
+        elif collection_info.get('error'):
             output.append(f"**Error:** {collection_info['error']}")
         integrity = _index_integrity(
             collection_info.get("persist_directory"), collection_info.get("name")

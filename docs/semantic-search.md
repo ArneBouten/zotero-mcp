@@ -64,6 +64,13 @@ Raise `timeout` if indexing reports `Read timed out`; lower
 `request_batch_size` to make each request cover less GPU work, which usually
 fixes timeouts more reliably than raising the timeout alone.
 
+For Ollama and OpenAI-compatible servers, `max_input_tokens` caps the text sent
+per document (default 8000). Set it below the server's limit when indexing
+reports an input that is too large, for example llama-server's
+`input (N tokens) is too large to process`. It is counted with OpenAI's
+tokenizer, so leave headroom for the model's own: `3000` for a model served
+with a 4096-token batch.
+
 ### OpenAI Batch API
 
 When you choose OpenAI, setup also asks whether database updates should use
@@ -134,7 +141,12 @@ zotero-mcp update-db --force-rebuild
 
 # Check database status
 zotero-mcp db-status
+
+# Rebuild an unreadable index from its own files, without re-embedding
+zotero-mcp repair-db
 ```
+
+`repair-db` is for an index that ChromaDB can no longer read, typically after an interrupted update; see [Repairing an unreadable index](troubleshooting.md#repairing-an-unreadable-index).
 
 How much of each PDF is extracted, and which attachment is read when an item has several, is set in [Text extraction settings](configuration.md#text-extraction-settings).
 
@@ -268,14 +280,15 @@ provider's key in the environment the server runs in (`VOYAGE_API_KEY`,
 
 Any other endpoint that takes `{model, query, documents, top_n}` and answers
 with `{index, relevance_score}` records works with `base_url` and
-`api_key_env` in place of `provider`.
+`api_key_env` in place of `provider`. `timeout` (seconds, default 30) bounds
+each call; one retry follows a 429 or 5xx answer.
 
 **Privacy:** with a hosted provider, every search sends the query and the text
 of the candidate passages — dozens of excerpts from your library — to that
 provider. The local cross-encoder sends nothing anywhere.
 
 Search results say how they were ordered: *"Ranked by voyage/rerank-3 over 80
-candidate passages"*, with the re-ranker's score as **Relevance** and the
+candidates"*, with the re-ranker's score as **Relevance** and the
 embedding similarity alongside. If a hosted call fails — a wrong model name,
 an expired key, a timeout — the search still answers, in embedding order, and
 says why: *"re-ranking with voyage/rerank-3 failed (HTTP 401 …)"*.

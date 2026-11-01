@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from zotero_mcp import citations, computer_files as cf
+from zotero_mcp import citations, maintenance
+from zotero_mcp import computer_files as cf
 from zotero_mcp import fulltext_fetch as ff
-from zotero_mcp import maintenance
 from zotero_mcp import metadata_audit as ma
 
 

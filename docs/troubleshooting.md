@@ -84,6 +84,24 @@ zotero-mcp update-db --fulltext
 
 The rebuild copies every passage whose vector is intact into a fresh index — vectors, text and metadata as stored, nothing re-embedded — and keeps the old index as `chroma_db-before-rebuild-<timestamp>`. Items with a damaged passage are left out; the following `update-db` indexes them again from their text (a few embedding calls). It needs free disk space of about twice the index size.
 
+<a id="repairing-an-unreadable-index"></a>
+
+### Repairing an unreadable index
+
+When ChromaDB cannot read the index, `db-status` and `zotero_get_search_database_status` say the index is unreadable and show ChromaDB's error (for example `Failed to apply logs to the metadata segment`), the size of the index, the last successful update and when the index was last written. A last write after the last successful update means an update was most likely interrupted part way through. `update-db` and semantic search stop with the same explanation instead of failing later with ChromaDB's error alone. `repair-db` rebuilds the index from its own files without calling the embedding provider:
+
+```bash
+zotero-mcp repair-db --dry-run   # report what can be recovered; changes nothing
+zotero-mcp repair-db             # rebuild the index
+zotero-mcp update-db --fulltext  # embed the items repair-db left out
+```
+
+It reads the vectors from the index's HNSW files and the documents and metadata from `chroma.sqlite3`, and keeps an item only if all of its chunks have a document and a vector and their metadata agree. The rest are left out and listed in a report next to the index. The new index replaces the old one, which is kept as `chroma_db.broken-<timestamp>`; delete it once search works. The rebuild needs free disk space of about the size of the old index. `update-db --fulltext` skips items that are already indexed, so it only embeds the ones left out. Without `--fulltext`, `update-db` reads only items changed since the last sync and does not pick them up.
+
+`repair-db` cannot help when the vector files are missing or in a format it does not know (it says so); rebuild with `update-db --force-rebuild` then. On an unreadable index, `--force-rebuild` renames it to `chroma_db.broken-<timestamp>` and builds a new one, so nothing is deleted.
+
+Stop any running zotero-mcp server (quit the MCP client that started it) before repairing or rebuilding. A server that has the index open keeps the old files, and opening a damaged index makes ChromaDB try again to apply its pending writes to it.
+
 ## Update issues
 
 - **Update command fails**: Check your internet connection and try `zotero-mcp update --force`
