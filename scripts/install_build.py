@@ -7,8 +7,8 @@ Claude Desktop starts zotero-mcp.exe from Python 3.12's Scripts folder
     uv run --no-project scripts/install_build.py      (or: py -3.12 scripts\\install_build.py)
 
 Close Claude Desktop first: Windows can't replace zotero-mcp.exe while it runs. Or add
---while-running: the running exe is renamed aside and the new build starts with the next
-Claude Desktop restart.
+--while-running: the code is unpacked next to the running launcher and starts with the next
+Claude Desktop restart (dependencies unchanged).
 Never use `zotero-mcp update` or `pip install --upgrade zotero-mcp-server`:
 those replace this build with the plain PyPI release.
 
@@ -56,29 +56,38 @@ def server_running() -> bool:
     return "zotero-mcp.exe" in out.lower()
 
 
-def move_running_exes() -> list[str]:
-    """Windows can't overwrite a running .exe but can rename it: move zotero-mcp*.exe aside so
-    pip can install the new ones. The running servers keep the old code until Claude Desktop
-    restarts them. Old copies from earlier installs that no longer run go to _old."""
-    scripts = subprocess.run(
-        [*target_python(), "-c", "import sys,os;print(os.path.join(os.path.dirname(sys.executable),'Scripts'))"],
-        capture_output=True, text=True,
-    ).stdout.strip()
-    folder = Path(scripts)
-    moved = []
+def overlay_install(whl: str) -> None:
+    """Install this build's code while zotero-mcp.exe runs (--while-running).
+
+    Windows refuses to replace or rename the running zotero-mcp.exe launcher, so pip can't install
+    over it. The launcher only starts zotero_mcp.cli, so it doesn't need replacing: unpack the
+    wheel's package and metadata straight into site-packages instead. The old metadata goes to
+    ~/.config/zotero-mcp/_old. Running servers keep the code they loaded until Claude Desktop
+    restarts them. Dependencies are not touched: when a build needs new ones, close Claude
+    Desktop and run without --while-running.
+    """
+    import zipfile
+
+    site = Path(subprocess.run(
+        [*target_python(), "-c", "import sysconfig;print(sysconfig.get_paths()['purelib'])"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip())
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    old_dir = folder / "_old"
-    for stale in folder.glob("zotero-mcp*.exe.old-*"):
-        try:
-            old_dir.mkdir(exist_ok=True)
-            stale.rename(old_dir / stale.name)
-        except OSError:
-            pass  # still running from an earlier install
-    for exe in folder.glob("zotero-mcp*.exe"):
-        target = exe.with_name(f"{exe.name}.old-{stamp}")
-        exe.rename(target)
-        moved.append(target.name)
-    return moved
+    old_dir = STATE_FILE.parent / "_old" / f"dist-info-{stamp}"
+    for info in site.glob("zotero_mcp_server-*.dist-info"):
+        old_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(info), str(old_dir / info.name))
+    n = 0
+    with zipfile.ZipFile(whl) as z:
+        for name in z.namelist():
+            if name.endswith("/") or ".data/" in name:
+                continue
+            dest = site / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(name) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+            n += 1
+    print(f"  unpacked {n} files into {site} (old metadata in {old_dir})")
 
 
 def main() -> int:
@@ -87,9 +96,9 @@ def main() -> int:
         if not while_running:
             print("zotero-mcp.exe is running (Claude Desktop, or an index update it started).")
             print("Quit Claude Desktop (tray icon -> Quit), wait a moment, and run this again,")
-            print("or run it with --while-running: the new build is then used after Claude Desktop restarts.")
+            print("or run it with --while-running: the new code is then used after Claude Desktop restarts.")
             return 1
-        print("zotero-mcp.exe is running; moved aside: " + ", ".join(move_running_exes()))
+        print("zotero-mcp.exe is running: installing the code without replacing the launcher.")
 
     try:
         subprocess.run([*target_python(), "--version"], check=True, capture_output=True)
@@ -119,8 +128,11 @@ def main() -> int:
         print("Installing it for Claude Desktop (py -3.12) ...")
         # 1. dependencies (new ones only; what is there stays), 2. this build's code, always replaced,
         #    even when the version number did not change.
-        run([*target_python(), "-m", "pip", "install", "--disable-pip-version-check", f"{whl}[{EXTRAS}]", *EXTRA_PACKAGES])
-        run([*target_python(), "-m", "pip", "install", "--disable-pip-version-check", "--force-reinstall", "--no-deps", whl])
+        if while_running and server_running():
+            overlay_install(whl)
+        else:
+            run([*target_python(), "-m", "pip", "install", "--disable-pip-version-check", f"{whl}[{EXTRAS}]", *EXTRA_PACKAGES])
+            run([*target_python(), "-m", "pip", "install", "--disable-pip-version-check", "--force-reinstall", "--no-deps", whl])
 
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(
