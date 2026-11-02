@@ -864,6 +864,42 @@ def batch_update_extra(
         return f"Error in batch extra update: {str(e)}"
 
 
+
+# Cowork reaches this server through a bridge that stops waiting for a reply after about 60 s,
+# while the call keeps running on the PC. Long item lists in the write tools therefore run in
+# chunks, and no new chunk starts after the time budget: the reply lists the keys still to do,
+# so the caller sends exactly those instead of guessing what finished (two weeks of Cowork
+# sessions to 2026-11-02: ~35 such timeouts and retries in 16 sessions).
+_CHUNK_KEYS = 10
+
+
+def _call_budget_s() -> float:
+    try:
+        return float(os.getenv("ZOTERO_MCP_CALL_BUDGET", "35"))
+    except ValueError:
+        return 35.0
+
+
+def _run_in_chunks(keys: list[str], run_chunk, tool_name: str) -> str:
+    start = _time.monotonic()
+    reports: list[str] = []
+    done = 0
+    for i in range(0, len(keys), _CHUNK_KEYS):
+        if i and _time.monotonic() - start > _call_budget_s():
+            break
+        chunk = keys[i:i + _CHUNK_KEYS]
+        reports.append(run_chunk(chunk))
+        done = i + len(chunk)
+    out = "\n\n".join(r for r in reports if r)
+    left = keys[done:]
+    if left:
+        out += (
+            f"\n\nStopped after {done} of {len(keys)} items so this reply arrives in time. "
+            f"Call {tool_name} again with the same arguments and item_keys={json.dumps(left)}."
+        )
+    return out
+
+
 @mcp.tool(
     name="zotero_batch_update",
     description=(
@@ -921,6 +957,19 @@ def batch_update(
             "Error: Must provide at least one action — add_tags, "
             "remove_tags, set_keys, and/or remove_keys."
         )
+
+    if item_keys:
+        chunk_keys = _helpers._normalize_str_list_input(item_keys, "item_keys")
+        if len(chunk_keys) > _CHUNK_KEYS:
+            return _run_in_chunks(
+                chunk_keys,
+                lambda chunk: batch_update(
+                    item_keys=chunk, query=query, tag=tag, add_tags=add_tags,
+                    remove_tags=remove_tags, set_keys=set_keys, remove_keys=remove_keys,
+                    limit=limit, ctx=ctx,
+                ),
+                "zotero_batch_update",
+            )
 
     # Resolve a query/tag selection once and hand both halves the same keys.
     # Searching again for the Extra half would run after the tag half has
@@ -1265,6 +1314,15 @@ def manage_collections(
             return "Error: No item keys provided."
         if not add_specs and not remove_specs:
             return "Error: Must specify add_to and/or remove_from."
+        if len(keys) > _CHUNK_KEYS:
+            return _run_in_chunks(
+                keys,
+                lambda chunk: manage_collections(
+                    item_keys=chunk, add_to=add_specs or None,
+                    remove_from=remove_specs or None, ctx=ctx,
+                ),
+                "zotero_set_item_collections",
+            )
 
         # Resolve specs (keys, names, or '/'-paths) to live collection keys
         # before doing any work. Resolution also validates existence — Zotero

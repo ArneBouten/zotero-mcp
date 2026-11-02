@@ -6,7 +6,9 @@ Claude Desktop starts zotero-mcp.exe from Python 3.12's Scripts folder
 
     uv run --no-project scripts/install_build.py      (or: py -3.12 scripts\\install_build.py)
 
-Close Claude Desktop first: Windows can't replace zotero-mcp.exe while it runs.
+Close Claude Desktop first: Windows can't replace zotero-mcp.exe while it runs. Or add
+--while-running: the running exe is renamed aside and the new build starts with the next
+Claude Desktop restart.
 Never use `zotero-mcp update` or `pip install --upgrade zotero-mcp-server`:
 those replace this build with the plain PyPI release.
 
@@ -54,11 +56,40 @@ def server_running() -> bool:
     return "zotero-mcp.exe" in out.lower()
 
 
+def move_running_exes() -> list[str]:
+    """Windows can't overwrite a running .exe but can rename it: move zotero-mcp*.exe aside so
+    pip can install the new ones. The running servers keep the old code until Claude Desktop
+    restarts them. Old copies from earlier installs that no longer run go to _old."""
+    scripts = subprocess.run(
+        [*target_python(), "-c", "import sys,os;print(os.path.join(os.path.dirname(sys.executable),'Scripts'))"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    folder = Path(scripts)
+    moved = []
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    old_dir = folder / "_old"
+    for stale in folder.glob("zotero-mcp*.exe.old-*"):
+        try:
+            old_dir.mkdir(exist_ok=True)
+            stale.rename(old_dir / stale.name)
+        except OSError:
+            pass  # still running from an earlier install
+    for exe in folder.glob("zotero-mcp*.exe"):
+        target = exe.with_name(f"{exe.name}.old-{stamp}")
+        exe.rename(target)
+        moved.append(target.name)
+    return moved
+
+
 def main() -> int:
+    while_running = "--while-running" in sys.argv
     if server_running():
-        print("zotero-mcp.exe is running (Claude Desktop, or an index update it started).")
-        print("Quit Claude Desktop (tray icon -> Quit), wait a moment, and run this again.")
-        return 1
+        if not while_running:
+            print("zotero-mcp.exe is running (Claude Desktop, or an index update it started).")
+            print("Quit Claude Desktop (tray icon -> Quit), wait a moment, and run this again,")
+            print("or run it with --while-running: the new build is then used after Claude Desktop restarts.")
+            return 1
+        print("zotero-mcp.exe is running; moved aside: " + ", ".join(move_running_exes()))
 
     try:
         subprocess.run([*target_python(), "--version"], check=True, capture_output=True)
