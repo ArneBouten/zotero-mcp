@@ -599,6 +599,18 @@ def load_semantic_search_config(semantic_config_path: Path) -> dict:
 
 def update_claude_config(config_path, zotero_mcp_path, local=True, api_key=None, library_id=None, library_type="user", semantic_config=None):
     """Update Claude Desktop config to add zotero-mcp."""
+    # Arne's build: when the Zotero extension is installed, Claude Desktop already
+    # starts the server through it; a config entry would run a second copy.
+    try:
+        from zotero_mcp.claude_extension import extension_installed
+
+        if extension_installed():
+            print("The Zotero extension is installed in Claude Desktop; not adding a "
+                  f"claude_desktop_config.json entry to {config_path}. Change its settings in "
+                  "Claude Desktop under Settings > Extensions > Zotero.")
+            return True
+    except Exception:
+        pass
     # Create directory if it doesn't exist
     config_dir = config_path.parent
     config_dir.mkdir(parents=True, exist_ok=True)

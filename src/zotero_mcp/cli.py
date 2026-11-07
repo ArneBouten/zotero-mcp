@@ -71,6 +71,17 @@ def load_claude_desktop_env_vars():
         return {}
     from zotero_mcp.setup_helper import find_existing_claude_configs
 
+    # Arne's build: Claude Desktop starts the server through the Zotero
+    # extension, whose settings (keys encrypted) are the current ones.
+    try:
+        from zotero_mcp.claude_extension import load_extension_env
+
+        extension_env = load_extension_env()
+        if extension_env:
+            return extension_env
+    except Exception:
+        pass
+
     try:
         # More than one Claude Desktop build can be installed (issue #392);
         # use the first config that actually configures the zotero server.

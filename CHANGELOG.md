@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2+arne.72] - 2026-11-07
+
+### Changed
+
+- **Settings from the Claude Desktop extension.** Claude Desktop now starts this build through Arne's "zotero" extension instead of a `claude_desktop_config.json` entry, with the API keys stored encrypted as extension settings. CLI commands (`update-db`, `setup-info`, the Zotero actions) read the same settings through the new `claude_extension.py`, which decrypts them on Windows for the signed-in user (Electron safeStorage: AES-256-GCM with the DPAPI-protected key in Claude Desktop's `Local State`); a config entry is still read when there is no extension. `zotero-mcp setup` no longer adds a config entry while the extension is installed, which would start a second server.
 ## [0.15.2+arne.70] - 2026-11-01
 
 ### Changed

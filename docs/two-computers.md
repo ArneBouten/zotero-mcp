@@ -151,11 +151,15 @@ Then, once per computer:
    SerpAPI, Tavily, Parallel, ZenRows, Unpaywall e-mail) from the other computer
    (USB stick or a password manager; never into git or OneDrive). `config.json`
    holds no keys; the template's `client_env` has only the Unpaywall e-mail address.
-2. **Claude Desktop:** *Settings → Developer → Edit Config*, and copy the
-   `zotero` entry of `mcpServers` from the other computer, with `command` set to
-   the `zotero-mcp.exe` path the installer printed (backslashes doubled). The
-   `env` block (Gemini and Voyage keys, `ZOTERO_LOCAL`, `ZOTERO_MCP_WORD_AUTHOR`)
-   must be the same on both.
+2. **Claude Desktop:** install the Zotero extension (since 07-11-2026; it replaces the
+   `zotero` entry in `claude_desktop_config.json`):
+   `uv run --no-project python -I "$env:USERPROFILE\OneDrive\Personal\Software\Claude extensions\install_mcpb.py" "$env:USERPROFILE\OneDrive\Personal\Software\Claude extensions\Zotero\dist\Zotero.mcpb"`,
+   then enter the keys under *Settings → Extensions → Zotero* (Zotero, Gemini, Voyage and
+   OpenRouter; Claude Desktop stores them encrypted). If the computer still has the old
+   config entry, `tools\import_config_settings.py` in that folder moves its values into the
+   extension, encrypted, and takes the entry out (run it in the desktop session, not over SSH).
+   CLI commands read the same settings (`claude_extension.py`), and `zotero-mcp setup` no longer
+   adds a config entry while the extension is installed.
 3. **Shared state:** the settings template already points `state_dir` at the
    OneDrive folder's `state` and turns the shared store on; on a computer that
    had its own records, run

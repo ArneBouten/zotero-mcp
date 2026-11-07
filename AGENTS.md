@@ -19,5 +19,11 @@ GitHub. See `docs/two-computers.md`.
   into `arne/main` (never rebase: the history is on two computers), keep this
   build's versions of `background_update` and the two-computer code, run the
   tests, and set the version to `<new upstream version>+arne.N`.
+- Claude Desktop starts this server through the extension "zotero" (since 07-11-2026; source and
+  `.mcpb` in OneDrive\Personal\Software\Claude extensions\Zotero, installed with install_mcpb.py
+  there), not through a claude_desktop_config.json entry. Its keys are extension settings that
+  Claude Desktop stores encrypted; the CLI reads them through `claude_extension.py`. Keep the
+  display name lowercase (the tools are `mcp__remote-devices__zotero__*`), never add a config
+  entry back, and check on both PCs that the installed extension matches `dist\Zotero.mcpb`.
 - Never run `zotero-mcp update` or `pip install --upgrade zotero-mcp-server`,
   and never `--force-rebuild` the search index unless the embedding model changes.
