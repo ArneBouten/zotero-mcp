@@ -85,6 +85,17 @@ def no_ocr_language_data(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_installed_claude_extension(monkeypatch):
+    """The CLI and setup read the Zotero extension installed in Claude Desktop
+    (zotero_mcp.claude_extension), which would put the developer's own keys
+    and settings into the results on a computer that has it. None here; the
+    extension tests pass their own folders."""
+    from zotero_mcp import claude_extension
+
+    monkeypatch.setattr(claude_extension, "claude_data_roots", lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def isolate_local_write_state(monkeypatch, tmp_path):
     """Keep local-write config and capability probing out of the tests.
 
