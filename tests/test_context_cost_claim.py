@@ -110,3 +110,32 @@ class TestReportShape:
     def test_encoding_is_recorded(self, report):
         """A token count without its tokenizer is not a measurement."""
         assert report["encoding"]
+
+
+#: Ceilings on the tool surface each profile sends on every request
+#: (name + description + input schema + output schema, cl100k_base), measured
+#: with the ``[semantic]`` extra installed; a base install lists fewer tools
+#: and lands lower. Set a little above the measured value so wording tweaks
+#: pass but growth fails. If a change legitimately needs more, raise the
+#: number here and say why in the PR: that is a choice, not an accident.
+#: This build adds full-text fetching, metadata checks, the citation graph and
+#: Word citations to the default surface (measured 15-11-2026: default 11,329,
+#: none 10,169, all 14,623), so its ceilings sit above upstream's 8,200 / 7,100
+#: / 11,500.
+SURFACE_CEILINGS = {
+    "(unset - default)": 11_700,
+    "none": 10_500,
+    "all": 15_000,
+}
+
+
+class TestSurfaceCeiling:
+    @pytest.mark.parametrize("profile", sorted(SURFACE_CEILINGS))
+    def test_profile_stays_under_its_ceiling(self, report, profile):
+        row = next(r for r in report["mcp"] if r["profile"] == profile)
+        ceiling = SURFACE_CEILINGS[profile]
+        top = ", ".join(f"{n} {t}" for n, t in list(row["per_tool"].items())[:5])
+        assert row["tokens"] <= ceiling, (
+            f"{profile}: tool surface is {row['tokens']} tokens, over its "
+            f"{ceiling} ceiling. Heaviest tools: {top}. Trim before raising it."
+        )

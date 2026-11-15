@@ -30,9 +30,12 @@ def _computer(tmp_path, name):
     db = chromadb.PersistentClient(path=str(tmp_path / name / "chroma"), settings=Settings(anonymized_telemetry=False))
     c = ChromaClient.__new__(ChromaClient)
     c.client = db
+    c.persist_directory = str(tmp_path / name / "chroma")
     c.collection_name = "zotero_library"
     c.collection = db.get_or_create_collection("zotero_library", embedding_function=None)
     c.embedding_function = _EF()
+    # The shared log works on the one-collection layout (an unmigrated index).
+    c._unmigrated = True
     c.index_sync = None
     store = EmbeddingStore("ns", root=tmp_path / "shared" / "emb", index_dir=tmp_path / name / "emb-idx",
                            computer=name)
@@ -54,8 +57,11 @@ def _add(c, key, **kw):
 
 
 def _state(c):
-    got = c.collection.get(include=["documents", "metadatas"])
-    return sorted(zip(got["ids"], got["documents"], [tuple(sorted(m.items())) for m in got["metadatas"]]))
+    rows = []
+    for collection in c.collections():
+        got = collection.get(include=["documents", "metadatas"])
+        rows += zip(got["ids"], got["documents"], [tuple(sorted(m.items())) for m in got["metadatas"]])
+    return sorted(rows)
 
 
 def test_what_one_indexes_the_other_copies_exactly(tmp_path):
@@ -198,6 +204,9 @@ def test_reset_publishes_papers_that_were_not_indexed_again_as_removed(tmp_path)
     time.sleep(0.01)
     ef, pc.embedding_function = pc.embedding_function, None  # chromadb rejects the test's stand-in
     pc.reset_collection()
+    # A reset index keeps passages in their own collection; the laptop's stays in one.
+    assert pc.separate_passages()
+    pc._passages()
     pc.embedding_function = ef
     _add(pc, "AAA")
     pc.index_sync.publish()

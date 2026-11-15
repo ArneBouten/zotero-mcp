@@ -1,7 +1,7 @@
 # Zotero Agent plugin: design
 
 A side panel inside Zotero (library view and reader tabs) that chats with an agent. The agent is a normal
-ACP agent (Claude Code, Codex, pi) run on the user's own subscription, or on an API key. It uses `zotero-cli`
+ACP agent (Claude Code, Codex, pi, OpenCode) run on the user's own subscription, or on an API key. It uses `zotero-cli`
 and its skill for everything Zotero. The panel adds three things: the agent's **context** (what is open, which
 page, what is selected), a **good chat UI**, and **one-click setup**. Nothing in the agent is restricted: web,
 paper search outside the library, shell, files: it does what it would do in a terminal.
@@ -22,7 +22,7 @@ Zotero main window ── #tabs-deck lives in an hbox below the tab bar; we appe
  └ agent/    ACP client, backends, bridge locator/installer, brief.   (no DOM, no Zotero; Spawner injected)
 ```
 
-`agent/` and `ui/` never import each other; both import only `types.ts`. `zotero/` wires them.
+`agent/` and `ui/` never import each other; both import only `types.ts` and `i18n.ts` (pure strings, below). `zotero/` wires them.
 
 ### Facts measured on this machine (Zotero 10.0.5, Gecko 140, macOS)
 
@@ -30,7 +30,25 @@ Zotero main window ── #tabs-deck lives in an hbox below the tab bar; we appe
 - A Dock-launched app has a short PATH. Resolve `node`, `npx`, `claude`, `codex`, `pi`, `uv`, `zotero-cli` through the
   login shell (`$SHELL -lc`), then pass that PATH to every child.
 - ACP bridge for Claude: npm `@agentclientprotocol/claude-agent-acp` (0.85.1 tested; `@zed-industries/claude-code-acp`
-  is deprecated). Codex: `@agentclientprotocol/codex-acp`. pi: `pi-acp`. Verify with `npm view` before pinning.
+  is deprecated). Codex: `@agentclientprotocol/codex-acp`. pi: `pi-acp`. Verify with `npm view` before pinning. OpenCode
+  needs no bridge: `opencode acp` is the agent (1.19.5 measured; backends.ts has the shape), so it needs no Node either.
+- `session_info_update` titles, read from the pinned bridge sources on 2026-11-13 (live timing not re-measured; the
+  panel consumes them wherever they arrive, and names a chat by its own fallback chain until one does):
+  claude-agent-acp 0.85.1 has a whole `session-titles` module: Claude Code's own auto-titling never runs under the
+  Agent SDK, so at the first turn's end (idle) the bridge asks `generate_session_title` (a ~2 s background small-model
+  call, once per session, ≥10 chars of trailing user+assistant text), adopts a user `/rename` or earlier title
+  (`customTitle`) and latches, caps at 256 chars, and never re-sends an unchanged title. codex-acp 2.1.1 echoes
+  Codex's own thread renames (`thread/name/updated`, `title: null` when unset — the panel ignores null), and on
+  `session/load` pushes the stored thread name, else a *fallback* title built from the first user message: on the wire
+  that fallback is indistinguishable from a generated title, so an agent-named chat can be re-titled with the question
+  text when Codex cannot generate. pi-acp 0.0.34 sends `session_info_update` with only `_meta.piAcp` queue state
+  around every turn (no `title`: dropped by the non-empty rule) and a titled one only for its explicit `/name`
+  command. OpenCode's `acp` server (dev, ≥1.19.5) never sends a titled update: its titles exist only in
+  `session/list`, so OpenCode chats keep the panel's own fallback name. Re-probed live on v2.2.7 (2026-11-13,
+  `opencode acp` over stdio): still zero `session_info_update` in a whole first turn, but `session/list` already
+  serves an LLM-generated title right after it ("Greeting" for a one-word probe), beside `"New session - <ISO
+  timestamp>"` placeholders for sessions that never got a turn — so the panel pulls the list for OpenCode
+  (`titlesViaList` in backends.ts) instead of waiting for a push that never comes.
 - `initialize` (protocolVersion 1) then `session/new {cwd, mcpServers: []}` works, and the bridge reports the signed-in
   account (`_auth/status_update`: "Claude Max") so subscription mode needs no key. `session/new` returns `modes`
   (`default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`) and `configOptions`.
@@ -295,6 +313,14 @@ sent once with the brief, never per turn; the brief's own cap stays about the co
   ends, or SVG with nothing drawable left, shows as a code block.
 - **Lazy**: `mdview.ts` imports `diagram.ts` dynamically on the first svg block; esbuild bundles it as a lazily initialised
   module, so a chat without diagrams never runs it, and its stylesheet is added to the shadow root on first use.
+- **Mermaid** (`ui/mermaid.ts`, #823): agents answer with ```` ```mermaid ```` anyway, so the common part is drawn: flowcharts
+  (layered layout: longest-path ranks with cycles reversed, a dummy per crossed rank and one per edge label, barycentre
+  ordering with subgraphs kept together, S-curves between ranks) and sequence diagrams (columns sized by their messages, blocks
+  as frames). The result is SVG text in palette names that goes through the same parse, sanitize, fit, card and export as an
+  agent's own; anything else is null and stays code. Not the mermaid library: 5.5 MB minified (1.6 MB gzipped, 2026-11-12,
+  12.3.0) against a 0.98 MB panel, measuring text with getBBox and handing back markup to parse; this is 22 kB, renders a
+  60-node chart in a few ms, and lives in the same lazy module. The guide says only that a plain flowchart or sequence may be
+  Mermaid.
 - Light and dark; follows Zotero's theme (`host.theme()`); keyboard accessible; works from 300 px to 700 px wide.
 - Appearance (`ui/appearance.ts` validates and applies it, `ui/styles-look.ts` draws it): glass (default on), accent (default
   Mono), background (default Plain), text size, density. `Look` writes data attributes and CSS variables on `.zmc`, so a change
@@ -382,6 +408,47 @@ scripts, `zotero-cli` and the agent's shell are the tools.
   settings card renders: one directory listing and a stat per `SKILL.md`, re-read only when its mtime changed (6 ms
   first scan, 0 ms after, in the harness).
 
+## Languages (src/i18n.ts, src/locales/)
+
+The panel's own words (buttons, labels, settings, status and setup messages, notices, tooltips, aria-labels, empty
+states, the welcome, the reader's Translate popup) are in English, Simplified and Traditional Chinese, Japanese, German,
+French, Spanish and Brazilian Portuguese. What the agent reads stays English: the brief and guides (`agent/brief.ts`),
+the `<zotero-context>` block, skill invocations, `zotero-cli` commands. Model, backend and file names, and the preview's
+scenario content (`ui/fake-*.ts`), are not translated; nor is the "Translate into" list (`LANGUAGES`), which names
+languages for the translator, not the interface.
+
+- **`t(key, vars)`**: a flat catalog per language, `src/locales/<id>.ts`, keys by where they show
+  (`settings.agent.ready`, `composer.placeholder`). `{name}` is filled in; a message with a count is an object of plural
+  forms picked by `Intl.PluralRules` (`{ one: "{n} source", other: "{n} sources" }`; Chinese and Japanese have only
+  `other`). English (`en.ts`) is the source and the fallback for a missing key. `Key` is `keyof typeof en`, and every other
+  catalog is typed `Record<Key, Msg>`, so a typo, a missing key or an extra one is a type error; `test/i18n.test.ts` also
+  checks placeholders, `code` spans and plural categories per language. No library.
+- **Which language**: the Settings > Appearance "Interface language" (`PanelSettings.uiLanguage`, "" = Automatic), else
+  Zotero's locale (`host.locale()`, `Zotero.locale`): zh-CN/SG to zh-Hans, zh-TW/HK/MO to zh-Hant, pt-* to pt-BR, any
+  other language we have to itself, anything else English (`locales/languages.ts`). Each copy of panel.js (the panel, the
+  Settings pane, the reader's Translate) sets it as it draws.
+- **A change** redraws the panel (`Panel.relabel`: header, feed and composer built again from the same chat, session,
+  chips and draft) and comes back to Settings at the Appearance card; the Settings pane re-renders. A label is never a
+  module constant: `t()` runs when the element is drawn. Notices already in a saved chat stay in the language they were
+  written in.
+- **Startup**: plugin.js shows two words before panel.js is read (the toolbar button's tooltip, the reader's Translate
+  button); they are `STARTUP_WORDS` in `locales/languages.ts`, so startup reads no catalog. The tooltip is set when the
+  window opens, so a language change reaches it at the next start.
+- **Not translated by us**: a bridge's permission option names in English (in another language the buttons say ours, by
+  ACP kind: Allow once, Always allow, Deny); the agent's own notices and errors that come from the bridge; command output
+  in the fix log.
+- **The default prompts** are in the interface language when a new user's settings are first read; once edited they are
+  saved as written.
+- **Terms**: Zotero's own translations for Zotero's concepts, taken from its locale files (item, collection, annotation,
+  note, library, attachment, tag, reader, Settings > Advanced, the local-API checkbox). The per-language glossary is in
+  `src/locales/README.md`. zh-Hans and zh-Hant are for the maintainer to review; the others say "(beta)" in the list until a
+  native speaker has read them.
+- **Size**: the catalogs are 31 KB (English) to 66 KB (Japanese) each minified and all bundled in panel.js (a lazy load would need a
+  file read in Zotero, the pane and the preview alike for about 5 ms of parse time saved); `test/budget.test.ts` was raised
+  for them (below).
+- **Layout**: German and French run about 30% longer than English. The behavior suite runs its no-overflow scenarios at
+  300 px in German, French, Portuguese, Japanese and Traditional Chinese as well as English.
+
 ## Zotero glue (zotero/)
 
 - Injection: described above; toolbar button in `#zotero-tabs-toolbar`; `Cmd+Shift+L`-style toggle; remembers open/closed and width.
@@ -440,7 +507,9 @@ scripts, `zotero-cli` and the agent's shell are the tools.
   unavailable") is a notice, never text in front of the translation. Codex: `CODEX_CONFIG` read-only
   sandbox, approval never, web search off (its rollout file is still kept; codex-acp has no ephemeral thread). pi: pi-acp's
   `PI_ACP_PI_COMMAND` is a script running the user's pi with `--no-tools --no-extensions --no-skills --no-prompt-templates
-  --no-context-files --no-session`. Every permission request is refused anyway. The selected text is untrusted PDF content;
+  --no-context-files --no-session`. OpenCode: `OPENCODE_CONFIG_CONTENT` denies every tool but read/glob/grep and anything
+  outside its folder, `OPENCODE_DISABLE_CLAUDE_CODE=1` (denying all tools makes Zen's free models refuse the request; live
+  test passed on Big Pickle 2026-11-12). Every permission request is refused anyway. The selected text is untrusted PDF content;
   the prompt says to translate instructions, never follow them.
 - **Prompt** (`TRANSLATOR_PROMPT`, the whole system prompt; Codex and pi get it on the first prompt): measured live on Claude
   Haiku, Codex 6 Luna (low) and pi qwen38-27b (off), `test/live/translate.live.ts`: a sentence, a word, a hyphen-broken
@@ -486,7 +555,7 @@ test with real Claude Code (`ZMC_LIVE=1`), one tiny prompt, no library writes.
 
 What matters is that the plugin never slows Zotero's own startup, so that is the number under test: with the panel closed,
 Zotero waits for this plugin only while it reads `plugin.js` (6 KB) and runs `startup()`, measured at 0 to 1 ms and capped at 50
-(`test/zotero/budget.js`). `panel.js` (UI, agent runtime, katex, marked: about 600 KB minified) is read the first time the panel opens
+(`test/zotero/budget.js`). `panel.js` (UI, agent runtime, katex, marked, the eight language catalogs: about 950 KB minified, about 35 ms to load in Zotero) is read the first time the panel opens
 (about 35 ms, capped at 150) and never at startup; Zotero's Settings pane reads its own copy only when it is opened (`test/zotero/prefpane.js`). Bundle size is not otherwise a concern, within reason (hundreds of KB are fine,
 tens of MB are not): `test/budget.test.ts` only catches a blow-up. Redundancy is the thing to avoid: no helper, setting or layer without a
 user or a failure it protects against. Every agent-written layer gets a simplify pass before it is called done.

@@ -27,6 +27,8 @@ def _client(tmp_path):
     c.collection_name = "zotero_library"
     c.collection = db.get_or_create_collection("zotero_library", embedding_function=None)
     c.index_sync = None
+    # One collection for articles and passages, as in an index not yet migrated.
+    c._unmigrated = True
     return c
 
 

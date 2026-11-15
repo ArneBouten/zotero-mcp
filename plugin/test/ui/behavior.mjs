@@ -368,6 +368,137 @@ await test("history: resume, continue, delete; new chat clears", async (p) => {
   assert.ok(await p.locator(".empty").isVisible());
 });
 
+const ended = (p, n) => p.waitForFunction((k) => window.__zmc.shadow.querySelectorAll(`.msg--assistant[data-state="end_turn"]`).length >= k, n, { timeout: 8000 });
+
+await test("chat title: the paper names the chat; the header edit saves on Enter, cancels on Esc, blank does nothing", async (p) => {
+  await send(p, "what is the callback gap?"); // the default context is the open reader: the paper's title names the chat
+  await ended(p, 1);
+  await p.waitForFunction(() => window.__zmc.shadow.querySelector(".hd__title")?.textContent.includes("Are Emily and Greg"));
+  assert.ok(!(await p.locator(".hd__title").getAttribute("hidden")));
+  await p.locator(".hd__title").click();
+  await p.locator(".hd__title-input").fill("a name I typed");
+  await p.locator(".hd__title-input").press("Escape");
+  assert.match(await p.locator(".hd__title").innerText(), /Are Emily and Greg/, "Esc keeps the name");
+  await p.locator(".hd__title").click();
+  await p.locator(".hd__title-input").fill("   ");
+  await p.locator(".hd__title-input").press("Enter");
+  assert.match(await p.locator(".hd__title").innerText(), /Are Emily and Greg/, "a blank rename changes nothing");
+  await p.locator(".hd__title").click();
+  await p.locator(".hd__title-input").fill("My own name");
+  await p.locator(".hd__title-input").press("Enter");
+  await p.waitForFunction(() => window.__zmc.shadow.querySelector(".hd__title")?.textContent === "My own name");
+  await send(p, "retitle this please"); // the agent names the session mid-turn
+  await ended(p, 2);
+  assert.equal(await p.locator(".hd__title").innerText(), "My own name", "a user rename is final: the agent's title no longer wins");
+  const locked = await sim(p, async () => (await window.__zmc.host.sessions()).find((s) => s.title === "My own name")?.titleLocked);
+  assert.equal(locked, true, "the store carries the lock");
+});
+
+await test("chat title: the agent's own summary replaces the paper name while the chat is untouched", async (p) => {
+  await send(p, "retitle: summarize the discussion");
+  await ended(p, 1);
+  await p.waitForFunction(() => window.__zmc.shadow.querySelector(".hd__title")?.textContent === "The audit-study question, summarised by the agent");
+  await p.locator('button[aria-label="History"]').click();
+  assert.match(await p.locator(".hrow__t").first().innerText(), /summarised by the agent/, "the history row carries the agent's name");
+});
+
+await test("history: rename from a row; the row, the store and the open chat's header follow", async (p) => {
+  await send(p, "hello there");
+  await ended(p, 1);
+  await p.locator('button[aria-label="History"]').click();
+  await p.locator(".hrow__ren").first().hover();
+  await p.locator(".hrow__ren").first().click();
+  await p.locator(".hrow__edit").fill("A clearer name");
+  await p.locator(".hrow__edit").press("Enter");
+  await p.waitForFunction(() => window.__zmc.shadow.querySelector(".hrow__t")?.textContent === "A clearer name");
+  const stored = await sim(p, async () => { const s = (await window.__zmc.host.sessions()).sort((a, b) => b.updatedAt - a.updatedAt)[0]; return [s.title, s.titleLocked]; });
+  assert.deepEqual(stored, ["A clearer name", true]);
+  await p.keyboard.press("Escape"); // back to the chat, which is the one just renamed
+  assert.equal(await p.locator(".hd__title").innerText(), "A clearer name", "the open chat's header follows a rename done in the list");
+});
+
+await test("chat title: Enter or Esc during IME composition neither saves nor cancels the rename (header and history row)", async (p) => {
+  await send(p, "hello there");
+  await ended(p, 1);
+  await p.locator(".hd__title").click();
+  await p.locator(".hd__title-input").fill("zhongwen");
+  await p.locator(".hd__title-input").dispatchEvent("keydown", { key: "Enter", isComposing: true, bubbles: true });
+  await p.locator(".hd__title-input").dispatchEvent("keydown", { key: "Escape", isComposing: true, bubbles: true });
+  assert.equal(await p.locator(".hd__title-input").count(), 1, "the edit is still open: that Enter picked a candidate");
+  await p.locator(".hd__title-input").press("Enter");
+  await p.waitForFunction(() => window.__zmc.shadow.querySelector(".hd__title")?.textContent === "zhongwen");
+  await p.locator('button[aria-label="History"]').click();
+  await p.locator(".hrow__ren").first().click();
+  await p.locator(".hrow__edit").fill("nihongo");
+  await p.locator(".hrow__edit").dispatchEvent("keydown", { key: "Enter", isComposing: true, bubbles: true });
+  assert.equal(await p.locator(".hrow__edit").count(), 1, "the row edit is still open too");
+  await p.locator(".hrow__edit").press("Enter");
+  await p.waitForFunction(() => window.__zmc.shadow.querySelector(".hrow__t")?.textContent === "nihongo");
+});
+
+await test("history: renaming another chat's row leaves the open chat's header alone", async (p) => {
+  // The default names a chat after the open paper; name by the question so each chat has its own row text.
+  await p.locator('button[aria-label="Settings"]').click();
+  await p.locator('select[aria-label="Name new chats by"]').selectOption("question");
+  await p.waitForFunction(() => window.__zmc.host.getSettings().titleSource === "question");
+  await p.keyboard.press("Escape");
+  await send(p, "the first chat");
+  await ended(p, 1);
+  await p.locator('button[aria-label="New chat"]').click();
+  await send(p, "the second chat");
+  await ended(p, 1);
+  await p.locator('button[aria-label="History"]').click();
+  const row = p.locator(".hrow", { hasText: "the first chat" });
+  await row.locator(".hrow__ren").click();
+  await p.locator(".hrow__edit").fill("Renamed first");
+  await p.locator(".hrow__edit").press("Enter");
+  await p.waitForFunction(() => [...window.__zmc.shadow.querySelectorAll(".hrow__t")].some((e) => e.textContent === "Renamed first"));
+  await p.keyboard.press("Escape");
+  assert.match(await p.locator(".hd__title").innerText(), /the second chat/, "the open chat keeps its own name");
+  const lockedOpen = await sim(p, async () => (await window.__zmc.host.sessions()).filter((s) => s.titleLocked).map((s) => s.title));
+  assert.deepEqual(lockedOpen, ["Renamed first"], "only the renamed row is locked");
+});
+
+await test("settings: the title-source dropdown names the next chat", async (p) => {
+  await p.locator('button[aria-label="Settings"]').click();
+  await p.locator('select[aria-label="Name new chats by"]').selectOption("question");
+  await p.waitForFunction(() => window.__zmc.host.getSettings().titleSource === "question");
+  await p.keyboard.press("Escape");
+  await p.locator('button[aria-label="New chat"]').click();
+  await send(p, "a question with a paper in focus"); // the reader chip is attached, but the source says: the question
+  await ended(p, 1);
+  await p.waitForFunction(() => window.__zmc.shadow.querySelector(".hd__title")?.textContent === "a question with a paper in focus");
+});
+
+const atBottomSel = "(() => { const s = window.__zmc.shadow.querySelector('.feed'); return s.scrollHeight - s.clientHeight - s.scrollTop < 4; })()";
+const topOf = "window.__zmc.shadow.querySelector('.feed').scrollTop";
+
+await test("scroll on send: the default jumps to the newest message; off holds a scrolled-up reader's place", async (p) => {
+  await send(p, "long");
+  await ended(p, 1);
+  const scrollable = await p.evaluate(() => { const s = window.__zmc.shadow.querySelector(".feed"); return s.scrollHeight > s.clientHeight + 100; });
+  assert.ok(scrollable, "the long answer makes the feed scrollable");
+  // a reader going back over the text: the scroller takes keys (Home is one of follow.ts's up intents);
+  // the feed scrolls smoothly, so wait for the position to settle rather than a fixed delay
+  const toTop = async () => { await p.locator(".feed").focus(); await p.keyboard.press("Home"); await p.waitForFunction("window.__zmc.shadow.querySelector('.feed').scrollTop === 0", null, { timeout: 3000 }); };
+  await toTop();
+  assert.equal(await p.evaluate(topOf), 0, "scrolled up");
+  // default (on): sending jumps back to the newest message
+  await send(p, "another");
+  await ended(p, 2);
+  await p.waitForFunction(atBottomSel, null, { timeout: 3000 }).catch(() => {});
+  assert.ok(await p.evaluate(atBottomSel), "at the newest message after send (default)");
+  // off: sending while scrolled up holds the position through the turn and its answer
+  await toTop();
+  await sim(p, () => window.__zmc.sim.setSettingsElsewhere({ scrollOnSend: false }));
+  await send(p, "one from up here");
+  await ended(p, 3);
+  assert.ok((await p.evaluate(topOf)) < 100, `the feed holds the reader's place while the answer streams (top=${await p.evaluate(topOf)})`);
+  // the jump pill is the way back down
+  await p.locator(".jump").click();
+  await p.waitForFunction(atBottomSel, null, { timeout: 3000 });
+});
+
 await test("settings: api key saved, removed; prompts edited and shortcut runs it", async (p) => {
   await p.locator('button[aria-label="Settings"]').click();
   await p.getByRole("radio", { name: "API key" }).click();
@@ -507,11 +638,33 @@ await test("pickers: effort, model and mode act on the live session and save int
   assert.deepEqual([s.effort.codex, s.effort.pi, s.mode.codex, s.model["claude-code"]], ["", "", "", ""]);
   await openSettings(p);
   await p.locator(".seg__opt", { hasText: /^pi$/ }).first().click();
-  await p.waitForFunction(() => window.__zmc.shadow.querySelectorAll(".radio").length === 0 && window.__zmc.shadow.querySelectorAll(".field").length === 2);
+  await p.waitForFunction(() => window.__zmc.shadow.querySelectorAll(".radio").length === 0 && window.__zmc.shadow.querySelectorAll(".field").length === 3); // model, translate target — and the title-source dropdown
   await p.keyboard.press("Escape");
   assert.equal(await p.locator(".pick--mode").isVisible(), false, "pi has no permission modes");
   assert.match(await p.locator(".pick--model .pick__e").innerText(), /Off/, "pi's own effort default");
 });
+
+await test("languages: Zotero in Chinese draws the panel in Chinese; the Interface language setting redraws it at once, chat and draft kept", async (p) => {
+  const english = /^[\x20-\x7e…]+$/;
+  assert.equal(await p.locator('button[aria-label="设置"]').count(), 1, "Zotero's own word for Settings");
+  assert.doesNotMatch(await p.locator(".cin").getAttribute("placeholder"), english);
+  assert.doesNotMatch(await p.locator(".empty h2").innerText(), english);
+  await send(p, "hello");
+  await done(p);
+  await p.locator(".cin").fill("a draft");
+  await p.locator('button[aria-label="设置"]').click();
+  await p.waitForSelector("#look select");
+  for (const title of await p.locator(".sec__t").allInnerTexts()) assert.doesNotMatch(title, english, `card “${title}”`);
+  assert.match(await p.locator("#look select option").first().innerText(), /简体中文/, "Automatic names Zotero's language");
+  await p.locator("#look select").selectOption("en");
+  await p.waitForSelector('button[aria-label="Settings"]');
+  assert.equal(await settings(p).then((s) => s.uiLanguage), "en");
+  assert.equal(await p.locator(".sec__t", { hasText: "Appearance" }).count(), 1, "the settings screen stays open, now in English");
+  await p.getByRole("button", { name: "Back to the chat" }).click();
+  assert.equal(await p.locator(".msg--user").count(), 1, "the chat is still there");
+  assert.equal(await p.locator(".cin").inputValue(), "a draft");
+  assert.equal(await p.locator(".cin").getAttribute("placeholder"), "Ask about your library…");
+}, { params: { lang: "zh-CN" } });
 
 await test("settings saved elsewhere (Zotero's Settings pane) apply to the open panel at once, settings screen included", async (p) => {
   await openSettings(p);
@@ -531,7 +684,7 @@ await test("agent switch: an empty chat switches at once; a chat with messages a
   await p.locator(".pick--model").click();
   await p.waitForSelector(".mdd .menu__item");
   assert.deepEqual(await p.locator(".mdd__agent").evaluateAll((els) => els.map((e) => [e.textContent, e.dataset.state, e.getAttribute("aria-checked")])),
-    [["Claude Code", "ok", "true"], ["Codex", "bad", "false"], ["pi", "ok", "false"]], "every agent, with the status detect() gave");
+    [["Claude Code", "ok", "true"], ["Codex", "bad", "false"], ["pi", "ok", "false"], ["OpenCode", "ok", "false"], ["Custom", "bad", "false"]], "every agent, with the status detect() gave (Custom unconfigured, #813)");
   // an agent that is not ready says why and stays unchosen
   await agentTab(p, "Codex").click();
   assert.match(await p.locator(".mdd__note").innerText(), /Codex isn't ready: codex is not installed/);
@@ -784,7 +937,7 @@ await test("settings: Translate: the switch, the target language, and the model 
   assert.deepEqual(await model.locator("option").allInnerTexts(), ["Fastest available (recommended)", "Claude Opus", "Claude Sonnet", "Claude Haiku", "Claude Opus 4.1", "Claude Sonnet 4", "Claude Haiku 3.5"]);
   assert.equal(await model.inputValue(), "", "Fastest available is the default");
   await model.selectOption("haiku");
-  assert.deepEqual((await settings(p)).translateModel, { "claude-code": "haiku", codex: "", pi: "" }, "saved per agent");
+  assert.deepEqual((await settings(p)).translateModel, { "claude-code": "haiku", codex: "", pi: "", opencode: "" }, "saved per agent");
   assert.equal((await settings(p)).model["claude-code"], "", "the chat's model is another setting");
 
   // Another agent: its own models, and its own (default) choice.
@@ -959,7 +1112,7 @@ await test("history: each chat shows its folder; Copy terminal command copies th
 await test("welcome: first run shows it instead of the chat; the checks settle one by one; a failing check is fixed in place; Start chatting hands over", async (p) => {
   assert.equal(await p.locator(".cin").isVisible(), false, "the chat is not showing yet");
   assert.match(await p.locator(".wel h2").innerText(), /Chat with your library/);
-  assert.equal(await p.locator(".wcard").count(), 3);
+  assert.equal(await p.locator(".wcard").count(), 5); // the four built-ins and the user-configured agent (#813)
   assert.equal(await p.locator(".wcard[aria-checked=true]").innerText().then((t) => t.split("\n")[0]), "Claude Code");
   await p.waitForSelector(".wrow--pending");
   await p.waitForSelector(".wrow--bad", { timeout: 4000 });
@@ -1273,6 +1426,32 @@ await test("a diagram streams as a quiet placeholder, never half drawn", async (
   await done(p);
   assert.equal(await p.locator(".dg--pending").count(), 0);
   assert.equal(await p.locator(".dg__fig svg").count(), 3);
+});
+
+await test("mermaid blocks render as figures (flowchart, sequence), stream as a placeholder, show their source; another type stays code", async (p) => {
+  await sim(p, () => { window.__zmc.sim.speed = 6; });
+  await send(p, "mermaid please");
+  await p.waitForSelector(".dg--pending", { timeout: 8000 });
+  await done(p);
+  assert.equal(await p.locator(".dg--pending").count(), 0);
+  assert.equal(await p.locator(".dg .dg__fig svg").count(), 2);
+  const texts = await p.locator(".dg__fig svg").evaluateAll((a) => a.map((s) => s.textContent));
+  assert.match(texts[0], /Research question[^]*Enough papers/);
+  assert.match(texts[1], /You[^]*Panel[^]*Agent/);
+  // colours are the theme's: nothing black, the styled node in the accent
+  const strokes = await p.evaluate(() => [...window.__zmc.shadow.querySelectorAll(".dg__fig svg rect")].map((r) => getComputedStyle(r).stroke));
+  assert.ok(strokes.length && strokes.every((c) => c !== "rgb(0, 0, 0)"), strokes.join(","));
+  // the pie chart is not drawn: it shows as a mermaid code block
+  assert.equal(await p.locator(".msg--assistant .code").count(), 1);
+  assert.match(await p.locator(".msg--assistant .code").innerText(), /pie title Sources/);
+  const src = p.locator(".dg").first().locator('button[aria-label="Show the Mermaid source"]');
+  await p.locator(".dg").first().hover();
+  await src.click();
+  assert.match(await p.locator(".dg").first().locator(".dg__src .code").innerText(), /flowchart TD[^]*Research question/);
+  await p.locator(".dg").first().locator('button[aria-label="Save as SVG"]').click();
+  await p.waitForFunction(() => window.__zmc.sim.saved.length === 1);
+  assert.match((await sim(p, () => window.__zmc.sim.saved))[0].head, /^<\?xml[^]*<svg /);
+  assert.deepEqual(p.errors, []);
 });
 
 await test("a hostile diagram is neutralised: no script runs, nothing external, only the drawing", async (p) => {
@@ -1722,6 +1901,7 @@ await test("Add skill: the full text, what is copied and what is left out, the s
 
 
 // no horizontal overflow at 300 px in any state: nothing may stick out of the panel except inside scroll containers
+// (the steps find their buttons by place, not by their English labels, since they also run in other languages)
 for (const [name, params, run] of [
   ["empty", {}, async () => {}],
   ["answer", {}, async (p) => { await send(p, "compare"); await done(p); await p.locator(".foot__src").click(); await p.locator(".step__row").first().click(); }],
@@ -1736,24 +1916,28 @@ for (const [name, params, run] of [
     const g = await p.evaluate(() => { const r = (s) => window.__zmc.shadow.querySelector(s).getBoundingClientRect(); const m = r(".mdd"), b = r(".pick--model"), c = r(".composer"); return { off: Math.abs(m.left - Math.max(c.left, Math.min(b.left - c.left, c.width - m.width) + c.left)), inside: m.right <= c.right + 1 }; });
     assert.ok(g.off < 3 && g.inside, "the dropdown opens above its own button, inside the composer");
   }],
-  ["diagram", {}, async (p) => { await send(p, "draw it"); await done(p); await p.locator(".dg").first().hover(); await p.locator(".dg").first().locator('button[aria-label="Show the SVG source"]').click(); }],
+  ["diagram", {}, async (p) => { await send(p, "draw it"); await done(p); await p.locator(".dg").first().hover(); await p.locator(".dg").first().locator(".dg__bar .iconbtn").first().click(); }],
   ["meter", {}, async (p) => { await p.evaluate(() => { window.__zmc.sim.contextUsage = { used: 176000, size: 200000 }; }); await send(p, "hello"); await done(p); await p.waitForSelector(".cnote:not([hidden])"); }],
-  ["popup", {}, async (p) => { await p.locator('button[aria-label="Add a source"]').click(); await p.waitForSelector(".pop__i"); }],
+  ["popup", {}, async (p) => { await p.locator(".ctools > .iconbtn").first().click(); await p.waitForSelector(".pop__i"); }],
   ["permission", { speed: 5 }, async (p) => { await send(p, "add a note"); await p.waitForSelector(".perm__opts"); }],
   ["error", {}, async (p) => { await send(p, "error"); await done(p, "error"); }],
-  ["history", {}, async (p) => { await p.locator('button[aria-label="History"]').click(); await p.waitForSelector(".hrow__main"); }],
-  ["settings", {}, async (p) => { await p.locator('button[aria-label="Settings"]').click(); await p.waitForTimeout(300); }],
-  ["skills card", {}, async (p) => { await p.locator('button[aria-label="Settings"]').click(); await p.waitForSelector(".sp"); await p.locator('button[aria-label="Edit /annotate-paper"]').click(); await p.waitForSelector(".sp__src"); await p.locator('button[aria-label="Edit Short summary"]').click(); }],
-  ["add skill", {}, async (p) => { await p.locator('button[aria-label="Settings"]').click(); await p.waitForSelector(".sp"); await p.getByRole("button", { name: "Add skill…" }).click(); await p.waitForSelector(".imp"); }],
+  ["history", {}, async (p) => { await p.locator(".hd > button").nth(2).click(); await p.waitForSelector(".hrow__main"); }],
+  ["settings", {}, async (p) => { await p.locator(".hd > button").last().click(); await p.waitForTimeout(300); }],
+  ["skills card", {}, async (p) => { await p.locator(".hd > button").last().click(); await p.waitForSelector(".sp"); await p.locator('.sp:has([title="/annotate-paper"]) .sp__acts .iconbtn').click(); await p.waitForSelector(".sp__src"); await p.locator('.sp:has([title="Short summary"]) .sp__acts .iconbtn').click(); }],
+  ["add skill", {}, async (p) => { await p.locator(".hd > button").last().click(); await p.waitForSelector(".sp"); await p.locator('[data-fid="sp:add"]').click(); await p.waitForSelector(".imp"); }],
   ["slash menu", {}, async (p) => { await sim(p, () => window.__zmc.sim.setSettingsElsewhere({ skills: { "annotate-paper": { slot: 4 } }, prompts: window.__zmc.host.getSettings().prompts.map((x) => (x.id === "p4" ? { ...x, slot: undefined } : x)) })); await p.locator(".cin").click(); await p.keyboard.type("/"); await p.waitForSelector(".pop--slash .pop__i"); }],
   ["start with", {}, async (p) => { await pinSkill(p); await LONG(p); await p.waitForFunction(() => /must truncate/.test(window.__zmc.shadow.querySelector(".pin__t").textContent)); }],
-  ["appearance", {}, async (p) => { await p.locator('button[aria-label="Settings"]').click(); await p.getByRole("button", { name: "Choose an image…" }).click(); await p.waitForSelector(".bgsw--image"); await p.locator('input[type="color"]').fill("#8a2be2"); await p.waitForFunction(() => window.__zmc.shadow.querySelector(".hex")); }],
+  ["appearance", {}, async (p) => { await p.locator(".hd > button").last().click(); await p.locator('[data-fid="image:choose"]').click(); await p.waitForSelector(".bgsw--image"); await p.locator('input[type="color"]').fill("#8a2be2"); await p.waitForFunction(() => window.__zmc.shadow.querySelector(".hex")); }],
   ["status", { doctor: "many" }, async (p) => { await p.locator(".stat").click(); await p.waitForSelector(".check"); }],
   ["setup", { doctor: "many" }, async (p) => { await p.locator(".setup").waitFor(); }],
   ["welcome", { welcome: "1", doctor: "many" }, async (p) => { await p.waitForSelector(".wrow--bad"); await p.waitForFunction(() => !window.__zmc.shadow.querySelector(".wrow--pending")); await p.locator(".wrow--bad .btn").first().click(); await p.waitForTimeout(500); }],
 ]) {
   for (const width of [300, 320]) for (const dark of [false, true]) {
     await test(`no overflow at ${width}px ${dark ? "dark" : "light"}: ${name}`, async (p) => { await run(p); await p.waitForTimeout(150); assert.deepEqual(await p.evaluate(OVERFLOW), []); }, { width, dark, params });
+  }
+  // the longest languages (German, French: about 30% longer than English) and the CJK ones, at the narrowest width
+  for (const lang of ["de-DE", "fr-FR", "pt-BR", "ja-JP", "zh-TW"]) {
+    await test(`no overflow at 300px in ${lang}: ${name}`, async (p) => { await run(p); await p.waitForTimeout(150); assert.deepEqual(await p.evaluate(OVERFLOW), []); }, { width: 300, params: { ...params, lang } });
   }
 }
 

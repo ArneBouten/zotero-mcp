@@ -20,6 +20,7 @@ but not follow a sub-command: `get --json metadata KEY` parses and
  - `<query>` -- Search query
  - `--mode` -- one of `items`, `tag`, `citekey`, `advanced`, `semantic`, `notes` -- default `items` -- Search mode (default: items)
  - `--qmode` -- one of `titleCreatorYear`, `everything` -- default `titleCreatorYear`
+ - `--level` -- one of `articles`, `passages` -- With --mode semantic: search articles or passages (default: passages when chunking is on, articles when off)
  - `--collection` -- Scope to a collection key
  - `--limit` -- default `10`
  - `--conditions` -- JSON conditions for advanced mode
@@ -88,6 +89,7 @@ but not follow a sub-command: `get --json metadata KEY` parses and
  - `--pdf-extraction`
  - `--limit` -- default `100`
  - `--format` -- one of `markdown`, `json` -- default `markdown`
+ - `--positions` -- Add each stored position to the JSON: page_index, rects (PDF points), rect (x,y,w,h, as update --rect takes)
 
 ### `annotations update`
 
@@ -95,6 +97,8 @@ but not follow a sub-command: `get --json metadata KEY` parses and
  - `--text`
  - `--comment`
  - `--color`
+ - `--rect` -- Move or resize an area box: x,y,width,height, normalized 0-1
+ - `--page` -- Move an area box to this page
  - `--add-tags` -- Tags to add (comma-separated, or a JSON array if a name has a comma)
  - `--remove-tags` -- Tags to remove (comma-separated, or a JSON array if a name has a comma)
 
@@ -107,7 +111,9 @@ but not follow a sub-command: `get --json metadata KEY` parses and
  - `--attachment-key` -- **required**
  - `--page` -- **required**
  - `--text` -- Exact text to highlight
- - `--rect` -- Area box x,y,width,height, normalized 0-1; `zotero-cli layout` prints boxes for figures and tables
+ - `--underline` -- Underline --text instead of highlighting it
+ - `--rect` -- Area box x,y,width,height, normalized 0-1; `zotero-cli layout` prints boxes for figures and tables; `auto` fits the figure or panel at --near
+ - `--near` -- With --rect auto: x,y,width,height hint, kept if nothing matches
  - `--note` -- Sticky note centered at x,y, normalized 0-1; its text is --comment
  - `--comment`
  - `--color` -- default `#ffd400` -- Hex, or a Zotero color name: yellow, red, green, blue, purple, magenta, orange, gray
@@ -117,13 +123,23 @@ but not follow a sub-command: `get --json metadata KEY` parses and
 ### `annotations batch`
 
  - `--attachment-key` -- **required** -- Attachment for lines that do not name their own
- - `--file` -- default `-` -- JSON Lines (or a JSON array) of {page, text|rect|note, comment, color, tags}; - reads stdin
- - `--dry-run` -- Locate every highlight and report what it would cover, without writing
+ - `--file` -- default `-` -- JSON Lines (or a JSON array) of {page, text|rect|note, underline, comment, color, tags}, rect may be auto; - reads stdin
+ - `--dry-run` -- Locate every highlight and underline and report what it would cover, without writing
+ - `--render` -- With --dry-run: draw the plan on page PNGs in DIR
+ - `--on-existing` -- one of `skip`, `replace` -- Skip, or replace, entries already there (same page and first 40 characters of comment)
+
+### `annotations preview`
+
+ - `--attachment-key` -- **required**
+ - `--pages` -- default `all` -- all (default), 3, 3-6, or 1,4,6-9
+ - `--out` -- Folder for the PNGs (default: a new temp folder)
+ - `--scale` -- default `1.5` -- Pixels per PDF point
 
 ## `layout`
 
  - `<attachment_key>`
  - `--pages` -- default `all` -- Pages to scan: all (default), 3, 3-6, or 1,4,6-9
+ - `--panels` -- Also box each figure panel, from its panel letter (A, B, C ...)
 
 ## `notes (alias: n)`
 
@@ -161,7 +177,16 @@ but not follow a sub-command: `get --json metadata KEY` parses and
  - `--tags` -- Tags (comma-separated, or a JSON array if a name has a comma)
  - `--if-exists` -- one of `file`, `skip`, `duplicate` -- default `file` -- When the item already exists: 'file' (default) reuses it and adds missing collections/tags; 'skip' leaves it untouched; 'duplicate' creates a new item anyway
  - `--create-collections` -- Create collections that don't exist yet (including parent/child paths)
- - `--attach-mode` -- one of `auto`, `linked_url`, `import_file`, `none`, `required` -- default `auto`
+ - `--attach-mode` -- one of `auto`, `linked_url`, `import_file`, `none`, `required` -- default auto; none with --attach-file
+ - `--attach-file` -- Attach this local PDF instead of fetching one
+
+### `add folder`
+
+ - `<folder>`
+ - `-c, --collection` -- Collection (repeatable)
+ - `--tags` -- Tags (comma-separated, or a JSON array if a name has a comma)
+ - `--if-exists` -- one of `file`, `skip`, `duplicate` -- default `file`
+ - `--dry-run` -- Only show each PDF's DOI
 
 ### `add url`
 
@@ -295,23 +320,35 @@ but not follow a sub-command: `get --json metadata KEY` parses and
 
 ### `db update`
 
- - `--force-rebuild`
- - `--limit`
- - `--fulltext`
- - `--allow-mass-deletion`
- - `--config-path`
- - `--db-path`
+ - `--automatic` -- Run as an automatic update (the server's startup update uses it): passages missing for unchanged items are left for a run without it
+ - `--force-rebuild` -- Force complete rebuild of the database
+ - `--limit` -- Limit number of items to process (for testing; does not advance the sync watermark)
+ - `--fulltext` -- Extract fulltext content from local Zotero database (slower but more comprehensive)
+ - `--allow-mass-deletion` -- One-run opt-in when the deletion pass would remove a large share of the library's indexed documents (e.g. after intentionally purging the library)
+ - `--config-path` -- Path to semantic search configuration file
+ - `--db-path` -- Path to Zotero database file (zotero.sqlite), overrides config
+ - `--extraction-workers` -- Parse N attachments in parallel during --fulltext (default: semantic_search.extraction.workers, or 1 for sequential). Capped at the CPU count
+ - `--clear-fulltext-cache` -- Discard the transient extracted-fulltext cache before running, forcing every attachment to be re-parsed
+ - `--batch` / `--no-batch` -- mutually exclusive
+ - `--batch-provider` -- one of `openai`, `gemini` -- Batch provider to use with --batch (default: inferred from the configured embedding model)
+ - `--batch-max-tokens` -- Cap estimated tokens enqueued with the provider at once; chunks beyond it are held back; batch-import and --auto-loop submit them as earlier ones finish
+ - `--batch-max-requests` -- Cap requests per uploaded batch file
+ - `--auto-loop` -- After submitting, keep polling, importing completed batches and submitting held-back chunks until the run finishes
+ - `--poll-interval` -- default `60` -- Seconds between --auto-loop polls (default: 60)
  - `--openai-batch` / `--no-openai-batch` -- mutually exclusive
+ - `--gemini-batch` / `--no-gemini-batch` -- mutually exclusive
 
 ### `db batch-status`
 
- - `--batch-id`
- - `--config-path`
+ - `--batch-id` -- Specific batch ID to inspect; can be repeated
+ - `--provider` -- one of `openai`, `gemini` -- Which provider's manifests to read (default: inferred from config)
+ - `--config-path` -- Path to semantic search configuration file
 
 ### `db batch-import`
 
- - `--batch-id`
- - `--config-path`
+ - `--batch-id` -- Specific batch ID to import; can be repeated. Importing by id never submits pending chunks; run batch-import without ids to resume a throttled run
+ - `--provider` -- one of `openai`, `gemini` -- Which provider's manifests to read (default: inferred from config)
+ - `--config-path` -- Path to semantic search configuration file
 
 ### `db status`
 
@@ -344,14 +381,16 @@ but not follow a sub-command: `get --json metadata KEY` parses and
  - `--context` -- default `12` -- With --find: words of context on each side of a match (1-60, default 12)
  - `--format` -- one of `text`, `image` -- default `text` -- image writes PNG page images (up to 10 pages) for math, figures and tables
  - `--rect` -- With --format image: crop the start page to x,y,width,height (normalized 0-1), e.g. from `zotero-cli layout`
+ - `--grid` -- With --format image: draw a labelled 0.05 grid in page coordinates
  - `--out` -- With --format image: directory for the PNG files (default: a new temporary directory)
 
 ## `attach`
 
  - `<item_key>`
- - `--file` -- Path to a local file to upload
+ - `--file` -- Path to a local file to upload (or to link in place, with --link)
  - `--url` -- URL to attach as a link
  - `--filename` -- Override the stored filename
+ - `--link` -- With --file: link the file where it is instead of uploading a copy (Zotero's 'Add Link to File'; uses no cloud storage)
 
 ## `delete`
 

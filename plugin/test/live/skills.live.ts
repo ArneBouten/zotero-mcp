@@ -8,17 +8,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { CALLOUT_GUIDE, DRAWING_GUIDE, FORMAT_GUIDE, buildBrief, createRuntime } from "../../src/agent/index.ts";
-import type { BackendId, ChatEvent, StartOpts } from "../../src/types.ts";
+import type { BuiltinBackendId, ChatEvent, StartOpts } from "../../src/types.ts";
 import { AGENT_SKILL_DIRS, invocationText } from "../../src/ui/skills-model.ts";
 import { createNodeSpawner } from "../node-spawner.ts";
 
 const on = process.env["ZMC_LIVE"] === "1";
 const bridgeDir = process.env["ZMC_BRIDGE_DIR"] ?? join(tmpdir(), "zmc-live-bridges");
-const backends = (process.env["ZMC_LIVE_BACKENDS"] ?? "claude-code,codex,pi").split(",") as BackendId[];
-const SETUP: Record<BackendId, Partial<StartOpts>> = {
+const backends = (process.env["ZMC_LIVE_BACKENDS"] ?? "claude-code,codex,pi").split(",") as BuiltinBackendId[];
+const SETUP: Record<BuiltinBackendId, Partial<StartOpts>> = {
   "claude-code": { model: "haiku", auth: "subscription" },
   codex: { model: "gpt-6-luna[low]", auth: "subscription", mode: "read-only" },
   pi: { model: process.env["ZMC_LIVE_PI_MODEL"] ?? "qwen38/qwen38-27b", auth: "api-key" },
+  opencode: { ...(process.env["ZMC_LIVE_OPENCODE_MODEL"] ? { model: process.env["ZMC_LIVE_OPENCODE_MODEL"] } : {}) },
 };
 const SKILL = "---\nname: token-check\ndescription: Checks that skills are followed. Use only when asked to use the token-check skill.\n---\n\n" +
   "When this skill is used, reply with exactly one line: the token PINEAPPLE-7, a space, then the extra words the user wrote, in capital letters. Nothing else.\n";

@@ -481,7 +481,8 @@ def test_a_run_skips_papers_unchanged_since_their_last_check(tmp_path, monkeypat
     assert maintenance.split_unchanged(lib, ["OLD"])[0] == ["OLD"]
     monkeypatch.setattr(maintenance, "RULES", maintenance.RULES - 1)
 
-    ff._save_item_state("MISS", {"last_attempt": "2026-10-08T10:00:00", "status": "not found"})
+    ff._save_item_state("MISS", {"last_attempt": (dt.datetime.now() - dt.timedelta(days=1)).isoformat(timespec="seconds"),
+                                 "status": "not found"})
     calls, events = {}, []
 
     order = []

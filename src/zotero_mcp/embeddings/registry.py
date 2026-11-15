@@ -27,6 +27,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from zotero_mcp.embeddings.providers.default import DefaultEmbeddingFunction
 from zotero_mcp.embeddings.providers.gemini import GeminiEmbeddingFunction
 from zotero_mcp.embeddings.providers.huggingface import HuggingFaceEmbeddingFunction
 from zotero_mcp.embeddings.providers.ollama import OllamaEmbeddingFunction
@@ -173,6 +174,7 @@ def _ollama_ef_factory(config: dict[str, Any]) -> Any:
             model_name=config.get("model_name", "qwen3-embedding"),
             base_url=config.get("base_url"),
             timeout=config.get("timeout"),
+            query_instruction=config.get("query_instruction"),
             request_batch_size=config.get("request_batch_size"),
             **_remote_pacing_kwargs(config),
         ),
@@ -183,13 +185,12 @@ def _ollama_ef_factory(config: dict[str, Any]) -> Any:
 def _huggingface_ef_factory(config: dict[str, Any]) -> Any:
     return HuggingFaceEmbeddingFunction(
         model_name=config.get("model_name", "Qwen/Qwen3-Embedding-0.6B"),
+        query_instruction=config.get("query_instruction"),
     )
 
 
 def _default_ef_factory(config: dict[str, Any]) -> Any:
-    from chromadb.utils import embedding_functions
-
-    ef = embedding_functions.DefaultEmbeddingFunction()
+    ef = DefaultEmbeddingFunction()
     ef.max_input_tokens = 256  # all-MiniLM-L6-v2 max_seq_length
     return ef
 

@@ -41,6 +41,9 @@ N = 30
 @pytest.fixture()
 def config(tmp_path, monkeypatch):
     """A populated index, a config pointing at it, and worker mode switched on."""
+    # The worker inherits this environment, so it never sees the real home.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     persist = tmp_path / "chroma_db"
     client = chromadb.PersistentClient(path=str(persist), settings=Settings(anonymized_telemetry=False))
     client.create_collection("zotero_library").add(
@@ -161,6 +164,28 @@ def test_idle_worker_exits_and_the_next_call_starts_a_new_one(config, monkeypatc
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="kills the worker with POSIX signals")
+def test_a_passage_write_to_an_unmigrated_index_leaves_every_call_counting(config, monkeypatch):
+    # This index keeps its passages in the article collection, so every
+    # search loads them and every call must keep the worker, as before
+    # passages had a collection of their own. tests/test_chroma_worker_idle.py
+    # covers the rules with a fake clock; this runs a real worker and reaper.
+    monkeypatch.setattr(chroma_worker, "_shared", {})
+    client = chroma_worker.shared_client(config, idle_minutes=1 / 60)  # one second
+    client.upsert_embeddings(
+        documents=["a passage"], metadatas=[{"item_key": "NEW", "group_id": 0}],
+        ids=["NEW#0"], embeddings=[[0.5] * 8],
+    )
+    first = client.worker_pid
+
+    end = time.monotonic() + 3
+    while time.monotonic() < end:
+        assert client.get_existing_ids(["ITEM0001#0"]) == {"ITEM0001#0"}
+        time.sleep(0.2)
+
+    assert client.worker_pid == first
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="kills the worker with POSIX signals")
 def test_a_worker_that_dies_is_replaced_on_the_next_call(config):
     client = create_chroma_client(config)
     client.get_collection_info()
@@ -206,3 +231,118 @@ def test_outside_the_server_chromadb_stays_in_process(tmp_path):
 
     assert isinstance(create_chroma_client(str(path)), ChromaClient)
     SharedSystemClient.clear_system_cache()
+
+
+class _NeedsKeywords(Exception):
+    """Pickles fine, cannot be unpickled: like the openai SDK's APIStatusError."""
+
+    def __init__(self, message, *, response, body):
+        super().__init__(message)
+
+
+def test_an_exception_that_cannot_be_unpickled_still_reaches_the_caller_as_an_error(monkeypatch):
+    import io
+
+    class Boom:
+        def fail(self):
+            raise _NeedsKeywords("429 rate limited", response=None, body=None)
+
+    monkeypatch.setattr("zotero_mcp.chroma_client.create_chroma_client", lambda config_path: Boom())
+    requests, replies = io.BytesIO(), io.BytesIO()
+    chroma_worker._send(requests, ("call", "fail", (), {}))
+    requests.seek(0)
+
+    chroma_worker._serve(None, requests, replies)
+
+    replies.seek(0)
+    status, error = chroma_worker._receive(replies)  # must not raise while reading
+    assert status == "error"
+    assert "429 rate limited" in str(error)
+
+
+# --- the embedding function, which the server reads and calls itself ----------
+#
+# Indexing asks the client for ``embedding_function``: its
+# ``max_parallel_requests`` picks the streaming pipeline (on by default for
+# OpenAI and Gemini) and ``chars_per_token`` sizes passages. Forwarded by
+# name, the attribute became a callable that runs in the worker with no such
+# attributes, so every server-side update silently lost its parallelism.
+
+
+@pytest.fixture()
+def openai_config(config, tmp_path):
+    """A config for an OpenAI index. No embedding call may leave this machine:
+    the base_url is a closed local port, so a call made by mistake in the
+    worker (which the test patches cannot reach) fails fast instead."""
+    path = tmp_path / "openai_config.json"
+    path.write_text(json.dumps({"semantic_search": {
+        "persist_directory": str(tmp_path / "openai_chroma_db"),
+        "embedding_model": "openai",
+        "embedding_config": {"api_key": "sk-test", "base_url": "http://127.0.0.1:9"},
+        "idle_unload_minutes": 10,
+    }}))
+    return str(path)
+
+
+def test_the_embedding_function_reports_the_providers_own_settings(openai_config):
+    ef = create_chroma_client(openai_config).embedding_function
+
+    assert ef.max_parallel_requests == 4  # OpenAI's default: the streaming pipeline
+    assert ef.chars_per_token == 3
+    assert getattr(ef, "no_such_setting", "fallback") == "fallback"
+
+
+def test_a_setting_is_read_from_the_worker_once(openai_config, monkeypatch):
+    client = create_chroma_client(openai_config)
+    ef = client.embedding_function
+    assert ef.chars_per_token == 3
+
+    def no_more_requests(message):
+        raise AssertionError(f"asked the worker again: {message}")
+
+    monkeypatch.setattr(client, "_request", no_more_requests)
+    assert ef.chars_per_token == 3
+
+
+def test_the_embedding_function_embeds_in_this_process_so_requests_can_overlap(openai_config, monkeypatch):
+    seen = []
+
+    def fake_create(model, config):
+        seen.append((model, config.get("api_key")))
+        return lambda documents: [[float(len(d))] for d in documents]
+
+    monkeypatch.setattr("zotero_mcp.embeddings.registry.create_embedding_function", fake_create)
+    client = create_chroma_client(openai_config)
+
+    assert client.embedding_function(["ab", "abc"]) == [[2.0], [3.0]]
+    assert seen == [("openai", "sk-test")]
+    client.embedding_function(["x"])
+    assert len(seen) == 1  # built once
+
+
+def test_a_streaming_update_runs_through_the_worker(openai_config, monkeypatch):
+    from zotero_mcp import semantic_search
+
+    monkeypatch.setattr(
+        "zotero_mcp.embeddings.registry.create_embedding_function",
+        lambda model, config: (lambda documents: [[float(len(d)), 1.0] for d in documents]),
+    )
+    monkeypatch.setattr(semantic_search, "get_zotero_client", lambda: object())
+    client = create_chroma_client(openai_config)
+    search = semantic_search.ZoteroSemanticSearch(chroma_client=client, config_path=openai_config)
+    monkeypatch.setattr(search, "_save_update_config", lambda *a, **k: None)
+    items = [
+        {"key": f"ITEM{i:04d}", "data": {"title": f"Title {i}", "itemType": "journalArticle",
+                                         "abstractNote": f"Abstract {i}", "creators": []}}
+        for i in range(10)
+    ]
+    monkeypatch.setattr(search, "_get_items_from_source", lambda **kwargs: list(items))
+    streamed = []
+    original = search._stream_index_items
+    monkeypatch.setattr(search, "_stream_index_items", lambda *a, **k: streamed.append(1) or original(*a, **k))
+
+    stats = search.update_database()
+
+    assert streamed, "the update did not use the streaming pipeline"
+    assert stats["added_items"] == 10 and stats["errors"] == 0
+    assert client.get_collection_info()["count"] == 10

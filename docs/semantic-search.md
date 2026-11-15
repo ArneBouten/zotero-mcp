@@ -29,6 +29,33 @@ zotero-mcp setup --semantic-config-only
 - **Gemini**: Better quality, requires API key (`gemini-embedding-001`)
 - **Ollama**: Runs locally via Ollama API (requires model name, e.g., 'qwen3-embedding')
 
+### Instructions for query embeddings
+
+For instruction-tuned models such as Qwen3-Embedding, set an optional
+`query_instruction` under `semantic_search.embedding_config`. This works with
+`embedding_model: "ollama"` and HuggingFace models (`"qwen"` or a HuggingFace
+model name):
+
+```json
+{
+  "semantic_search": {
+    "embedding_model": "ollama",
+    "embedding_config": {
+      "model_name": "qwen3-embedding:0.6b",
+      "query_instruction": "Given a search query, retrieve relevant academic papers, books and reports from a research library"
+    }
+  }
+}
+```
+
+Queries become `Instruct: <instruction>\nQuery: <query>`. Document text is
+unchanged, so changing only this setting does not require re-indexing. Omit it,
+set it to `null`, or use an empty/whitespace-only string to keep plain queries.
+The setting is saved with the embedding function's configuration and restored
+when the collection is reopened. Instructions are per embedding-function
+instance, even when HuggingFace instances share the same loaded model. No
+instruction is selected automatically; choose one appropriate for your model.
+
 ### Ollama
 
 Install and start Ollama, then pull an embedding model before running `zotero-mcp update-db`:
@@ -76,6 +103,8 @@ with a 4096-token batch.
 When you choose OpenAI, setup also asks whether database updates should use
 OpenAI Batch API. Batch updates are cheaper for large libraries, but they are
 asynchronous: submit the batch, wait for completion, then import the embeddings.
+
+[Passage chunking](configuration.md#passage-chunking) works on this path too, and a large library needs a little planning. Providers limit how many tokens can be queued at once, so a run is split into files and the ones that don't fit wait for earlier ones to finish: `update-db --auto-loop` keeps that going, or run `batch-import` from time to time. After two days a run no longer holds back the next update, and if one starts, the older run's unsent files are dropped; what already landed is kept, and the next `update-db` adds the passages the dropped files would have. The default budgets are the lowest tier's, so set `batch_max_enqueued_tokens` under `semantic_search.<provider>_batch` a little below your account's limit. Also consider `batch_max_requests: 10000`, because each output file is read into memory during import and an output row is about 65 KB at 3072 dimensions.
 
 ### Update frequency
 

@@ -301,16 +301,26 @@ class IndexSync:
 
     def _rows_for(self, keys: list[str], with_vectors: bool) -> dict[str, list[dict]]:
         include = ["documents", "metadatas"] + (["embeddings"] if with_vectors else [])
-        got = self.client.collection.get(where={"item_key": {"$in": keys}}, include=include)
         rows: dict[str, list[dict]] = defaultdict(list)
-        vecs = got.get("embeddings") if with_vectors else None
-        for i, doc_id in enumerate(got.get("ids") or []):
-            meta = (got.get("metadatas") or [None])[i] or {}
-            row = {"id": doc_id, "doc": (got.get("documents") or [None])[i], "meta": meta}
-            if vecs is not None:
-                row["_vec"] = vecs[i]
-            rows[meta.get("item_key") or item_of(doc_id)].append(row)
+        for collection in self._collections():
+            got = collection.get(where={"item_key": {"$in": keys}}, include=include)
+            vecs = got.get("embeddings") if with_vectors else None
+            for i, doc_id in enumerate(got.get("ids") or []):
+                meta = (got.get("metadatas") or [None])[i] or {}
+                row = {"id": doc_id, "doc": (got.get("documents") or [None])[i], "meta": meta}
+                if vecs is not None:
+                    row["_vec"] = vecs[i]
+                rows[meta.get("item_key") or item_of(doc_id)].append(row)
         return rows
+
+    def _collections(self) -> list:
+        """The index's collections: articles, and passages once an index keeps them apart."""
+        collections = getattr(self.client, "collections", None)
+        return collections() if callable(collections) else [self.client.collection]
+
+    def _delete_item(self, item: str) -> None:
+        for collection in self._collections():
+            collection.delete(where={"item_key": item})
 
     def publish(self, keys: Iterable[str] | None = None, pack: bool = False,
                 log: Callable[[str], None] | None = None, batch: int = 50) -> int:
@@ -415,7 +425,7 @@ class IndexSync:
         for n, (item, t, who, file, offset, length, deleted, _applied) in enumerate(todo, 1):
             if deleted:
                 with self.suspended():
-                    self.client.collection.delete(where={"item_key": item})
+                    self._delete_item(item)
                 done_marks.append((item, t, who))
                 result["deleted"] += 1
                 continue
@@ -432,10 +442,11 @@ class IndexSync:
                 result["waiting"] += 1
                 continue
             with self.suspended():
-                self.client.collection.delete(where={"item_key": item})
+                self._delete_item(item)
                 stale = [r["id"] for r in entries]
                 if stale:
-                    self.client.collection.delete(ids=stale)
+                    for collection in self._collections():
+                        collection.delete(ids=stale)
             for i, r in enumerate(entries):
                 buf_ids.append(r["id"])
                 buf_docs.append(r["doc"])
@@ -606,17 +617,18 @@ class IndexSync:
         """Papers whose entries here differ from their newest publication."""
         self.refresh(force=True)
         local: dict[str, list[dict]] = defaultdict(list)
-        offset, total = 0, self.client.collection.count()
-        while offset < total:
-            got = self.client.collection.get(limit=2000, offset=offset, include=["documents", "metadatas"])
-            ids = got.get("ids") or []
-            if not ids:
-                break
-            for i, doc_id in enumerate(ids):
-                meta = (got.get("metadatas") or [None])[i] or {}
-                local[meta.get("item_key") or item_of(doc_id)].append(
-                    {"id": doc_id, "doc": (got.get("documents") or [None])[i], "meta": meta})
-            offset += len(ids)
+        for collection in self._collections():
+            offset, total = 0, collection.count()
+            while offset < total:
+                got = collection.get(limit=2000, offset=offset, include=["documents", "metadatas"])
+                ids = got.get("ids") or []
+                if not ids:
+                    break
+                for i, doc_id in enumerate(ids):
+                    meta = (got.get("metadatas") or [None])[i] or {}
+                    local[meta.get("item_key") or item_of(doc_id)].append(
+                        {"id": doc_id, "doc": (got.get("documents") or [None])[i], "meta": meta})
+                offset += len(ids)
         with self._lock:
             pubs = {item: (fp, deleted, who) for item, fp, deleted, who in
                     self._db.execute("SELECT item, fp, deleted, who FROM pubs")}
